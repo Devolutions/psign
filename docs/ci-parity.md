@@ -36,10 +36,10 @@ For local no-admin online certificate checks, use [`scripts/run-local-online-cer
 
 `psign-server` also provides local Azure-shaped endpoints for CI-safe signing tests:
 
-- **`azure-key-vault-server`** serves Key Vault-compatible certificate metadata and **`keys/sign`** responses. Automated coverage uses **`psign-tool portable azure-key-vault-sign-digest`** with a local bearer token and does not call Azure.
+- **`azure-key-vault-server`** serves Key Vault-compatible certificate metadata and **`keys/sign`** responses. Automated coverage uses **`psign-tool portable azure-key-vault-sign-digest`**, **`psign-tool portable sign-pe`**, and **`psign-tool --mode portable sign`** with a local bearer token and does not call Azure.
 - **`artifact-signing-server`** serves the Azure Code Signing / Trusted Signing **`:sign`** data-plane plus pollable LRO responses. Automated coverage uses both **`psign-tool portable artifact-signing-submit`** and the Windows **`psign-tool artifact-signing-submit`** command through the hidden local endpoint override.
 
-Full Windows PE signing through the Azure Key Vault **`SignerSignEx3`** callback still requires a local provider binding before it can be enabled as a non-ignored CI test; the local server already covers the REST digest-signing contract used by that path.
+Windows PE signing through the Azure Key Vault **`SignerSignEx3`** callback and portable PE signing both have local server coverage; the remaining production-only gap is real Azure identity / vault integration.
 
 For a **baseline** report matching the static tier (verify/remove scenarios only, no optional blocks), clear process env vars whose names start with `PSIGN_`, then run `scripts/run-parity-diff.ps1`. Expect **21** scenarios, `missingScenarioCount: 0`, and `semanticMismatchCount: 0` (UTF-16 `@rsp` remains `documented_native_utf16_rsp_gap`, not a semantic failure).
 

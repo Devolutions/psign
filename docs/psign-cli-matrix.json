@@ -244,7 +244,7 @@
       {"name": "list-pe-pkcs7", "maps_to_native_concept": "Enumerate embedded PKCS#7 rows (byte_len per index)"},
       {"name": "inspect-pe-spc-indirect", "maps_to_native_concept": "JSON for SpcIndirectDataContent / digest in embedded PE PKCS#7"},
       {"name": "append-pe-pkcs7", "maps_to_native_concept": "Experimental: append PKCS#7 row + recompute PE CheckSum — not SignerSignEx3"},
-      {"name": "sign-pe", "maps_to_native_concept": "Portable PE Authenticode signing: create RSA/SHA-2 SignedData, append WIN_CERTIFICATE, recompute CheckSum; no WinTrust policy or timestamp embedding"},
+      {"name": "sign-pe", "maps_to_native_concept": "Portable PE Authenticode signing: create RSA/SHA-2 SignedData with local key or Azure Key Vault RSA signing, append WIN_CERTIFICATE, recompute CheckSum; no WinTrust policy or sign-time timestamp URL"},
       {"name": "sign-cab", "maps_to_native_concept": "Portable unsigned single-volume CAB Authenticode signing: insert reserve header, create RSA/SHA-2 SignedData, append tail PKCS#7"},
       {"name": "sign-msi", "maps_to_native_concept": "Portable MSI/MSP Authenticode signing: create RSA/SHA-2 SignedData and write the DigitalSignature OLE stream"},
       {"name": "sign-catalog", "maps_to_native_concept": "Portable generic catalog signing: author CTL member entries, create RSA/SHA-2 SignedData over Microsoft CTL eContent; no catalog database or driver/INF policy"},

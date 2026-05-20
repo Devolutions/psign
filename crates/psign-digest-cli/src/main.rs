@@ -17,7 +17,7 @@ use psign_authenticode_trust::{
 #[cfg(feature = "azure-kv-sign-portable")]
 use psign_azure_kv_rest::{
     KvAuthParams, KvHashAlg, acquire_kv_access_token, fetch_kv_certificate,
-    kv_sign_digest_from_certificate,
+    kv_decode_cer_b64, kv_sign_digest_from_certificate,
 };
 #[cfg(feature = "artifact-signing-rest")]
 use psign_codesigning_rest::{
@@ -585,23 +585,45 @@ enum Command {
     /// Sign an unsigned PE image with portable Authenticode CMS + `WIN_CERTIFICATE` embedding.
     ///
     /// This is the first production-oriented portable Authenticode signing path. It supports local RSA
-    /// PKCS#1 v1.5 keys and SHA-2 digests; timestamp embedding and non-PE formats remain separate backlog.
+    /// PKCS#1 v1.5 keys or Azure Key Vault RSA signing and SHA-2 digests; timestamp embedding and
+    /// non-PE formats remain separate backlog.
     SignPe {
         /// Input PE path.
         #[arg(value_name = "PATH")]
         path: PathBuf,
         /// Signer certificate as DER or PEM.
         #[arg(long, value_name = "PATH")]
-        cert: PathBuf,
+        cert: Option<PathBuf>,
         /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
         #[arg(long, value_name = "PATH")]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Additional certificate to include in the PKCS#7 certificate set.
         #[arg(long = "chain-cert", value_name = "PATH")]
         chain_certs: Vec<PathBuf>,
         /// File digest algorithm for the PE Authenticode indirect digest and CMS signer.
         #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
         digest: PortableSignDigest,
+        /// Azure Key Vault URL for remote RSA signing.
+        #[arg(long = "azure-key-vault-url", visible_alias = "kvu")]
+        azure_key_vault_url: Option<String>,
+        /// Azure Key Vault certificate name for remote RSA signing.
+        #[arg(long = "azure-key-vault-certificate", visible_alias = "kvc")]
+        azure_key_vault_certificate: Option<String>,
+        /// Optional Azure Key Vault certificate version.
+        #[arg(long = "azure-key-vault-certificate-version", visible_alias = "kvcv")]
+        azure_key_vault_certificate_version: Option<String>,
+        #[arg(long = "azure-key-vault-accesstoken")]
+        azure_key_vault_access_token: Option<String>,
+        #[arg(long = "azure-key-vault-managed-identity")]
+        azure_key_vault_managed_identity: bool,
+        #[arg(long = "azure-key-vault-tenant-id")]
+        azure_key_vault_tenant_id: Option<String>,
+        #[arg(long = "azure-key-vault-client-id")]
+        azure_key_vault_client_id: Option<String>,
+        #[arg(long = "azure-key-vault-client-secret")]
+        azure_key_vault_client_secret: Option<String>,
+        #[arg(long = "azure-authority")]
+        azure_authority: Option<String>,
         /// Output signed PE path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -949,6 +971,17 @@ impl From<PortableSignDigest> for pkcs7::AuthenticodeSigningDigest {
     }
 }
 
+#[cfg(feature = "azure-kv-sign-portable")]
+impl From<PortableSignDigest> for KvHashAlg {
+    fn from(value: PortableSignDigest) -> Self {
+        match value {
+            PortableSignDigest::Sha256 => Self::Sha256,
+            PortableSignDigest::Sha384 => Self::Sha384,
+            PortableSignDigest::Sha512 => Self::Sha512,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum DigestEncoding {
     Hex,
@@ -1245,27 +1278,21 @@ impl From<KvPortableHashAlg> for KvHashAlg {
 }
 
 #[cfg(feature = "azure-kv-sign-portable")]
-fn validate_kv_portable_auth(args: &AzureKvSignDigestPortableArgs) -> Result<()> {
-    let has_sp = args
-        .azure_key_vault_client_secret
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        == Some(true);
-    let has_tenant = args
-        .azure_key_vault_tenant_id
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        == Some(true);
-    let has_client = args
-        .azure_key_vault_client_id
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        == Some(true);
-    let has_token = args
-        .azure_key_vault_access_token
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        == Some(true);
+#[derive(Clone, Copy)]
+struct KvPortableAuthInputs<'a> {
+    access_token: Option<&'a str>,
+    managed_identity: bool,
+    tenant_id: Option<&'a str>,
+    client_id: Option<&'a str>,
+    client_secret: Option<&'a str>,
+}
+
+#[cfg(feature = "azure-kv-sign-portable")]
+fn validate_kv_portable_auth_inputs(args: KvPortableAuthInputs<'_>) -> Result<()> {
+    let has_sp = args.client_secret.map(|s| !s.trim().is_empty()) == Some(true);
+    let has_tenant = args.tenant_id.map(|s| !s.trim().is_empty()) == Some(true);
+    let has_client = args.client_id.map(|s| !s.trim().is_empty()) == Some(true);
+    let has_token = args.access_token.map(|s| !s.trim().is_empty()) == Some(true);
 
     let sp_count = has_sp as u8 + has_tenant as u8 + has_client as u8;
     if sp_count != 0 && sp_count != 3 {
@@ -1274,22 +1301,33 @@ fn validate_kv_portable_auth(args: &AzureKvSignDigestPortableArgs) -> Result<()>
         ));
     }
 
-    if has_token && (args.azure_key_vault_managed_identity || sp_count == 3) {
+    if has_token && (args.managed_identity || sp_count == 3) {
         return Err(anyhow!(
             "use either --azure-key-vault-accesstoken or managed identity / client credentials, not multiple"
         ));
     }
-    if args.azure_key_vault_managed_identity && (has_token || sp_count == 3) {
+    if args.managed_identity && (has_token || sp_count == 3) {
         return Err(anyhow!(
             "--azure-key-vault-managed-identity cannot be combined with access tokens or client secrets"
         ));
     }
-    if !has_token && !args.azure_key_vault_managed_identity && sp_count != 3 {
+    if !has_token && !args.managed_identity && sp_count != 3 {
         return Err(anyhow!(
             "choose authentication: --azure-key-vault-accesstoken, --azure-key-vault-managed-identity, or client id/secret/tenant"
         ));
     }
     Ok(())
+}
+
+#[cfg(feature = "azure-kv-sign-portable")]
+fn validate_kv_portable_auth(args: &AzureKvSignDigestPortableArgs) -> Result<()> {
+    validate_kv_portable_auth_inputs(KvPortableAuthInputs {
+        access_token: args.azure_key_vault_access_token.as_deref(),
+        managed_identity: args.azure_key_vault_managed_identity,
+        tenant_id: args.azure_key_vault_tenant_id.as_deref(),
+        client_id: args.azure_key_vault_client_id.as_deref(),
+        client_secret: args.azure_key_vault_client_secret.as_deref(),
+    })
 }
 
 #[cfg(feature = "azure-kv-sign-portable")]
@@ -1335,6 +1373,107 @@ fn run_portable_azure_kv_sign_digest(args: AzureKvSignDigestPortableArgs) -> Res
         );
     }
     Ok(())
+}
+
+#[cfg(feature = "azure-kv-sign-portable")]
+struct SignPeAzureKvOptions<'a> {
+    vault_url: Option<&'a str>,
+    certificate: Option<&'a str>,
+    certificate_version: Option<&'a str>,
+    access_token: Option<&'a str>,
+    managed_identity: bool,
+    tenant_id: Option<&'a str>,
+    client_id: Option<&'a str>,
+    client_secret: Option<&'a str>,
+    authority: Option<&'a str>,
+}
+
+#[cfg(feature = "azure-kv-sign-portable")]
+fn create_pe_authenticode_pkcs7_der_azure_kv(
+    pe: &[u8],
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: SignPeAzureKvOptions<'_>,
+) -> Result<Vec<u8>> {
+    use std::time::Duration;
+
+    let vault_url = args
+        .vault_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("portable sign-pe Azure Key Vault signing requires --azure-key-vault-url"))?;
+    let certificate = args
+        .certificate
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "portable sign-pe Azure Key Vault signing requires --azure-key-vault-certificate"
+            )
+        })?;
+    validate_kv_portable_auth_inputs(KvPortableAuthInputs {
+        access_token: args.access_token,
+        managed_identity: args.managed_identity,
+        tenant_id: args.tenant_id,
+        client_id: args.client_id,
+        client_secret: args.client_secret,
+    })?;
+
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let auth = KvAuthParams {
+        access_token: args.access_token,
+        managed_identity: args.managed_identity,
+        tenant_id: args.tenant_id,
+        client_id: args.client_id,
+        client_secret: args.client_secret,
+        authority: args.authority,
+    };
+    let token = acquire_kv_access_token(&auth)?;
+    let kv_cert = fetch_kv_certificate(
+        &http,
+        vault_url,
+        certificate,
+        args.certificate_version
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        &token,
+    )?;
+    let signer_cert_der = kv_decode_cer_b64(&kv_cert.cer)?;
+    let signer_cert =
+        rdp::parse_certificate(&signer_cert_der).context("parse Key Vault signer certificate")?;
+    let mut chain = Vec::with_capacity(chain_certs.len());
+    for chain_cert in chain_certs {
+        let bytes =
+            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
+        chain.push(
+            rdp::parse_certificate(&bytes)
+                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
+        );
+    }
+
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let pe_digest = pe_authenticode_digest(pe, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
+    let signer_prehash =
+        pkcs7::authenticode_remote_rsa_signed_attrs_digest(&indirect, digest_algorithm)?;
+    let signature = kv_sign_digest_from_certificate(
+        &http,
+        &token,
+        &kv_cert,
+        KvHashAlg::from(digest),
+        &signer_prehash,
+    )?;
+
+    pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+        indirect,
+        digest_algorithm,
+        signer_cert,
+        chain,
+        &signature,
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -1803,38 +1942,120 @@ where
             key,
             chain_certs,
             digest,
+            azure_key_vault_url,
+            azure_key_vault_certificate,
+            azure_key_vault_certificate_version,
+            azure_key_vault_access_token,
+            azure_key_vault_managed_identity,
+            azure_key_vault_tenant_id,
+            azure_key_vault_client_id,
+            azure_key_vault_client_secret,
+            azure_authority,
             output,
         } => {
             let pe = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let cert_bytes =
-                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            let signer_cert = rdp::parse_certificate(&cert_bytes)
-                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-            let key_bytes = std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
-            let private_key = rdp::parse_rsa_private_key(&key_bytes)
-                .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let mut chain = Vec::with_capacity(chain_certs.len());
-            for chain_cert in chain_certs {
-                let bytes = std::fs::read(&chain_cert)
-                    .with_context(|| format!("read {}", chain_cert.display()))?;
-                chain.push(
-                    rdp::parse_certificate(&bytes)
-                        .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
-                );
+            let has_local = cert.is_some() || key.is_some();
+            let has_kv = azure_key_vault_url
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_certificate
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_certificate_version
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_access_token
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_managed_identity
+                || azure_key_vault_tenant_id
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_client_id
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_key_vault_client_secret
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+                || azure_authority
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+            if has_local && has_kv {
+                return Err(anyhow!(
+                    "portable sign-pe accepts either --cert/--key or --azure-key-vault-* options, not both"
+                ));
             }
-            let pkcs7 = pkcs7::create_pe_authenticode_pkcs7_der_rsa(
-                &pe,
-                digest.into(),
-                signer_cert,
-                chain,
-                private_key,
-            )
-            .with_context(|| {
-                format!(
-                    "create portable Authenticode signature for {}",
-                    path.display()
+            let pkcs7 = if has_kv {
+                #[cfg(feature = "azure-kv-sign-portable")]
+                {
+                    create_pe_authenticode_pkcs7_der_azure_kv(
+                        &pe,
+                        digest,
+                        chain_certs,
+                        SignPeAzureKvOptions {
+                            vault_url: azure_key_vault_url.as_deref(),
+                            certificate: azure_key_vault_certificate.as_deref(),
+                            certificate_version: azure_key_vault_certificate_version.as_deref(),
+                            access_token: azure_key_vault_access_token.as_deref(),
+                            managed_identity: azure_key_vault_managed_identity,
+                            tenant_id: azure_key_vault_tenant_id.as_deref(),
+                            client_id: azure_key_vault_client_id.as_deref(),
+                            client_secret: azure_key_vault_client_secret.as_deref(),
+                            authority: azure_authority.as_deref(),
+                        },
+                    )
+                    .with_context(|| {
+                        format!(
+                            "create portable Azure Key Vault Authenticode signature for {}",
+                            path.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "azure-kv-sign-portable"))]
+                {
+                    return Err(anyhow!(
+                        "portable sign-pe Azure Key Vault support requires the azure-kv-sign-portable feature"
+                    ));
+                }
+            } else {
+                let (cert, key) = match (cert, key) {
+                    (Some(cert), Some(key)) => (cert, key),
+                    _ => {
+                        return Err(anyhow!(
+                            "portable sign-pe requires either --cert and --key, or --azure-key-vault-url and --azure-key-vault-certificate"
+                        ));
+                    }
+                };
+                let cert_bytes =
+                    std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+                let signer_cert = rdp::parse_certificate(&cert_bytes)
+                    .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+                let key_bytes =
+                    std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+                let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                    .with_context(|| format!("parse RSA private key {}", key.display()))?;
+                let mut chain = Vec::with_capacity(chain_certs.len());
+                for chain_cert in chain_certs {
+                    let bytes = std::fs::read(&chain_cert)
+                        .with_context(|| format!("read {}", chain_cert.display()))?;
+                    chain.push(rdp::parse_certificate(&bytes).with_context(|| {
+                        format!("parse chain certificate {}", chain_cert.display())
+                    })?);
+                }
+                pkcs7::create_pe_authenticode_pkcs7_der_rsa(
+                    &pe,
+                    digest.into(),
+                    signer_cert,
+                    chain,
+                    private_key,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "create portable Authenticode signature for {}",
+                        path.display()
+                    )
+                })?
+            };
             let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             std::fs::write(&output, signed).with_context(|| format!("write {}", output.display()))?;

@@ -2987,6 +2987,76 @@ fn psign_server_azure_key_vault_signs_digest_for_portable_cli() {
     );
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn psign_server_azure_key_vault_signs_pe_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_pe = dir.path().join("tiny32.kv-portable-signed.exe");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-pe")
+        .arg(tiny32_unsigned_fixture())
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg("--output")
+        .arg(&out_pe);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-pe: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&out_pe);
+    verify.assert().success();
+
+    let signed = std::fs::read(&out_pe).expect("read signed PE");
+    let pkcs7 = verify_pe::pe_nth_pkcs7_signed_data_der(&signed, 0).expect("extract PKCS#7");
+    let sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7).expect("parse SignedData");
+    let indirect = pkcs7::signed_data_spc_indirect_message_digest_octets(&sd).expect("indirect");
+    pkcs7::verify_signed_data_authenticode_indirect_digest_and_rsa_sha256_pkcs1v15_signature(
+        &sd, 0, &indirect,
+    )
+    .expect("portable Azure Key Vault Authenticode RSA signature verifies");
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn mode_portable_sign_uses_azure_key_vault_for_pe() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir.path().join("tiny32.kv-mode-portable-signed.exe");
+    std::fs::copy(tiny32_unsigned_fixture(), &pe_path).expect("copy unsigned PE");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&pe_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&pe_path);
+    verify.assert().success();
+}
+
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
 #[test]
 fn psign_server_artifact_signing_submit_serves_portable_cli() {

@@ -1,9 +1,13 @@
 use crate::CommandOutput;
 use crate::cli::{DigestAlgorithm, GlobalOpts, SignArgs};
 use anyhow::{Context, Result, anyhow};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput> {
+    if azure_key_vault_requested(args) {
+        return sign_file_azure_key_vault(args);
+    }
     validate_supported_options(args)?;
     if args.files.is_empty() {
         return Err(anyhow!("portable sign requires at least one file"));
@@ -34,6 +38,32 @@ pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput>
             identity.thumbprint_sha1,
             identity.scope,
             identity.store_name
+        ));
+    }
+    Ok(CommandOutput::with_exit(combined, success_exit_code(args)))
+}
+
+fn sign_file_azure_key_vault(args: &SignArgs) -> Result<CommandOutput> {
+    validate_azure_key_vault_supported_options(args)?;
+    if args.files.is_empty() {
+        return Err(anyhow!(
+            "portable Azure Key Vault sign requires at least one file"
+        ));
+    }
+
+    let mut combined = String::new();
+    for (idx, target) in args.files.iter().enumerate() {
+        if idx > 0 {
+            combined.push('\n');
+        }
+        sign_one_target_azure_key_vault(target, args)
+            .with_context(|| format!("portable Azure Key Vault sign '{}'", target.display()))?;
+        combined.push_str(&format!(
+            "Signed: {}\nazure_key_vault_certificate={}\n",
+            target.display(),
+            args.azure_key_vault_certificate
+                .as_deref()
+                .unwrap_or("<missing>")
         ));
     }
     Ok(CommandOutput::with_exit(combined, success_exit_code(args)))
@@ -140,6 +170,83 @@ fn validate_supported_options(args: &SignArgs) -> Result<()> {
     Ok(())
 }
 
+fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
+    match args.digest {
+        DigestAlgorithm::Sha256 | DigestAlgorithm::Sha384 | DigestAlgorithm::Sha512 => {}
+        DigestAlgorithm::Sha1 | DigestAlgorithm::CertHash => {
+            return Err(anyhow!(
+                "portable Azure Key Vault sign supports only --fd SHA256, SHA384, or SHA512, got {}",
+                args.digest.as_signtool_name()
+            ));
+        }
+    }
+    reject_path_option("--f/--pfx", &args.pfx)?;
+    reject_string_option("--p/--password", &args.password)?;
+    reject_bool_option("--a/--auto-select", args.auto_select)?;
+    reject_string_option("--n/--subject-name", &args.subject_name)?;
+    reject_string_option("--i/--issuer-name", &args.issuer_name)?;
+    reject_string_option("--sha1", &args.cert_sha1)?;
+    reject_string_option("--csp", &args.csp)?;
+    reject_string_option("--kc/--key-container", &args.key_container)?;
+    reject_bool_option("--sm/--machine-store", args.machine_store)?;
+    reject_option("--s/--store", args.store_name != "MY")?;
+    reject_path_option("--cert-store-dir", &args.cert_store_dir)?;
+    reject_bool_option("--as/--append-signature", args.append_signature)?;
+    reject_bool_option("--ph/--page-hashes", args.page_hashes)?;
+    reject_bool_option("--nph/--no-page-hashes", args.no_page_hashes)?;
+    reject_path_option("--dlib", &args.dlib)?;
+    reject_path_option(
+        "--trusted-signing-dlib-root",
+        &args.trusted_signing_dlib_root,
+    )?;
+    reject_path_option("--dmdf", &args.dmdf)?;
+    reject_string_option("--tr/--timestamp-url", &args.timestamp_url)?;
+    reject_string_option("--t/--legacy-timestamp-url", &args.legacy_timestamp_url)?;
+    reject_string_option("--tseal/--seal-timestamp-url", &args.seal_timestamp_url)?;
+    reject_option("--td/--timestamp-digest", args.timestamp_digest.is_some())?;
+    reject_string_option("--d/--description", &args.description)?;
+    reject_string_option("--du/--description-url", &args.description_url)?;
+    reject_string_option("--r/--root-subject-name", &args.root_subject_name)?;
+    reject_string_option("--u/--eku-oid", &args.eku_oid)?;
+    reject_bool_option(
+        "--uw/--eku-windows-system-component",
+        args.eku_windows_system_component,
+    )?;
+    reject_string_option(
+        "--signing-cert-eku-prefix",
+        &args.signing_cert_eku_oid_prefix,
+    )?;
+    reject_path_option("--dg/--digest-generate", &args.digest_generate)?;
+    reject_bool_option("--ds/--digest-sign-only", args.digest_sign_only)?;
+    reject_path_option("--di/--digest-ingest", &args.digest_ingest)?;
+    reject_bool_option("--dxml/--digest-xml", args.digest_xml)?;
+    reject_path_option("--p7/--pkcs7-output-dir", &args.pkcs7_output_dir)?;
+    reject_string_option("--p7co/--pkcs7-content-oid", &args.pkcs7_content_oid)?;
+    reject_option(
+        "--p7ce/--pkcs7-content-embedding",
+        args.pkcs7_content_embedding.is_some(),
+    )?;
+    reject_string_option("--certificate-template", &args.certificate_template)?;
+    reject_option("--sa/--sign-auth", !args.sign_auth_pairs.is_empty())?;
+    reject_bool_option("--fdchw", args.warn_fd_digest_vs_cert_signature_hash)?;
+    reject_bool_option("--tdchw", args.warn_td_digest_vs_cert_signature_hash)?;
+    reject_bool_option("--rmc", args.relaxed_pe_marker_check)?;
+    reject_bool_option("--seal", args.add_sealing_signature)?;
+    reject_bool_option("--itos", args.intent_to_seal)?;
+    reject_bool_option("--force", args.force_seal_or_resign)?;
+    reject_bool_option("--nosealwarn", args.sign_no_seal_warn)?;
+    reject_bool_option("--noenclavewarn", args.sign_no_enclave_warn)?;
+    reject_option("--rust-sip", args.rust_sip.is_some())?;
+    reject_path_option("--input-file-list", &args.sign_input_file_list)?;
+    reject_bool_option("--continue-on-error", args.continue_on_error)?;
+    reject_bool_option("--skip-signed", args.skip_signed)?;
+    reject_option(
+        "--max-degree-of-parallelism",
+        args.max_degree_parallelism.is_some(),
+    )?;
+    Ok(())
+}
+
 fn sign_one_target(
     target: &Path,
     identity: &crate::cert_store::SigningIdentity,
@@ -166,6 +273,147 @@ fn sign_one_target(
     )
 }
 
+fn sign_one_target_azure_key_vault(target: &Path, args: &SignArgs) -> Result<()> {
+    let ext = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !matches!(
+        ext.as_str(),
+        "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd"
+    ) {
+        return Err(anyhow!(
+            "portable Azure Key Vault signing is currently implemented only for PE/WinMD targets; got {}",
+            target.display()
+        ));
+    }
+
+    let tmp = temporary_output_path(target);
+    let result = run_portable_sign_pe_azure_key_vault(target, &tmp, args)
+        .and_then(|_| {
+            std::fs::copy(&tmp, target)
+                .with_context(|| format!("replace '{}' with signed output", target.display()))?;
+            Ok(())
+        })
+        .and_then(|_| {
+            std::fs::remove_file(&tmp)
+                .with_context(|| format!("remove temporary output '{}'", tmp.display()))
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn run_portable_sign_pe_azure_key_vault(
+    target: &Path,
+    output: &Path,
+    args: &SignArgs,
+) -> Result<()> {
+    let mut argv = Vec::new();
+    argv.push(OsString::from("psign-tool"));
+    argv.push(OsString::from("sign-pe"));
+    argv.push(target.as_os_str().to_os_string());
+    argv.push(OsString::from("--digest"));
+    argv.push(OsString::from(portable_digest_name(args.digest)?));
+    for chain_cert in &args.additional_certs {
+        argv.push(OsString::from("--chain-cert"));
+        argv.push(chain_cert.as_os_str().to_os_string());
+    }
+    push_option(
+        &mut argv,
+        "--azure-key-vault-url",
+        &args.azure_key_vault_url,
+    );
+    push_option(
+        &mut argv,
+        "--azure-key-vault-certificate",
+        &args.azure_key_vault_certificate,
+    );
+    push_option(
+        &mut argv,
+        "--azure-key-vault-certificate-version",
+        &args.azure_key_vault_certificate_version,
+    );
+    push_option(
+        &mut argv,
+        "--azure-key-vault-accesstoken",
+        &args.azure_key_vault_access_token,
+    );
+    if args.azure_key_vault_managed_identity {
+        argv.push(OsString::from("--azure-key-vault-managed-identity"));
+    }
+    push_option(
+        &mut argv,
+        "--azure-key-vault-tenant-id",
+        &args.azure_key_vault_tenant_id,
+    );
+    push_option(
+        &mut argv,
+        "--azure-key-vault-client-id",
+        &args.azure_key_vault_client_id,
+    );
+    push_option(
+        &mut argv,
+        "--azure-key-vault-client-secret",
+        &args.azure_key_vault_client_secret,
+    );
+    push_option(&mut argv, "--azure-authority", &args.azure_authority);
+    argv.push(OsString::from("--output"));
+    argv.push(output.as_os_str().to_os_string());
+
+    std::thread::Builder::new()
+        .name("psign-portable-sign-pe".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || psign_digest_cli::run_from(argv))
+        .map_err(|e| anyhow!("spawn portable sign-pe runner: {e}"))?
+        .join()
+        .map_err(|_| anyhow!("portable sign-pe runner panicked"))?
+}
+
+fn portable_digest_name(digest: DigestAlgorithm) -> Result<&'static str> {
+    match digest {
+        DigestAlgorithm::Sha256 => Ok("sha256"),
+        DigestAlgorithm::Sha384 => Ok("sha384"),
+        DigestAlgorithm::Sha512 => Ok("sha512"),
+        DigestAlgorithm::Sha1 | DigestAlgorithm::CertHash => Err(anyhow!(
+            "portable Azure Key Vault sign supports only SHA-2 file digests"
+        )),
+    }
+}
+
+fn push_option(argv: &mut Vec<OsString>, name: &str, value: &Option<String>) {
+    if let Some(value) = value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        argv.push(OsString::from(name));
+        argv.push(OsString::from(value));
+    }
+}
+
+fn temporary_output_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("signed-output");
+    target.with_file_name(format!("{}.psign-{}.tmp", file_name, std::process::id()))
+}
+
+fn azure_key_vault_requested(args: &SignArgs) -> bool {
+    text_present(&args.azure_key_vault_url)
+        || text_present(&args.azure_key_vault_certificate)
+        || text_present(&args.azure_key_vault_certificate_version)
+        || text_present(&args.azure_key_vault_client_id)
+        || text_present(&args.azure_key_vault_client_secret)
+        || text_present(&args.azure_key_vault_tenant_id)
+        || text_present(&args.azure_key_vault_access_token)
+        || args.azure_key_vault_managed_identity
+        || text_present(&args.azure_authority)
+}
+
+fn text_present(value: &Option<String>) -> bool {
+    value.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
 fn success_exit_code(args: &SignArgs) -> i32 {
     match args.exit_codes {
         Some(crate::cli::SignExitCodes::Azuresigntool) => 0,
@@ -176,7 +424,7 @@ fn success_exit_code(args: &SignArgs) -> i32 {
 fn reject_option(name: &str, present: bool) -> Result<()> {
     if present {
         return Err(anyhow!(
-            "portable sign does not support {name}; supported subset is --sha1, --store/--s, --machine-store/--sm, --cert-store-dir, --fd SHA256, and PE/WinMD file paths"
+            "portable sign does not support {name}; supported subsets are local store PE/WinMD signing (--sha1, --store/--s, --machine-store/--sm, --cert-store-dir, --fd SHA256) and Azure Key Vault PE/WinMD signing (--azure-key-vault-*, --fd SHA256/SHA384/SHA512)"
         ));
     }
     Ok(())

@@ -11,7 +11,7 @@ autobins = false
 default = []
 ## Azure Code Signing `:sign` LRO on Linux/macOS (same API as `psign-tool artifact-signing-submit`).
 artifact-signing-rest = ["dep:psign-codesigning-rest"]
-## Azure Key Vault `keys/sign` on Linux/macOS (digest file → signature bytes / base64); embedding still requires Windows.
+## Azure Key Vault `keys/sign` on Linux/macOS (digest file → signature bytes / base64, plus portable PE signing).
 azure-kv-sign-portable = ["dep:psign-azure-kv-rest", "dep:base64", "dep:reqwest"]
 ## RFC 3161 TSA HTTP POST (`rfc3161-timestamp-http-post`) using Rustls (same optional `reqwest` crate as KV portable).
 timestamp-http = ["dep:reqwest"]

@@ -1,6 +1,6 @@
 # Linux signing pipelines (what works today)
 
-**`psign-tool portable`** on Linux/macOS can now sign PE, unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. It still does not provide a broad native-compatible `sign` verb, MSIX signing/embed, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
+**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys or Azure Key Vault RSA signing, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. It still does not provide a broad native-compatible `sign` verb, MSIX signing/embed, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
 
 For tool-by-tool gaps vs **`signtool.exe`**, AzureSignTool, and Artifact Signing, see [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md). On Windows, for writable copies of native signing binaries outside protected install paths, see [`writable-signing-binaries.md`](writable-signing-binaries.md).
 
@@ -28,6 +28,32 @@ psign-tool portable sign-catalog --cert cert.der --key key.pk8 --output files.ca
 ```
 
 `sign-catalog` authors generic CTL member entries and signs the catalog PKCS#7. Pair it with `verify-catalog` and `verify-catalog-member --catalog files.cat file1.exe`; driver/INF policy and OS catalog database lookup remain Windows-only.
+
+## 1.2 Portable PE signing with Azure Key Vault
+
+With **`--features azure-kv-sign-portable`**, PE/WinMD signing can use Azure Key Vault for the RSA signature while building and embedding Authenticode CMS locally:
+
+```bash
+psign-tool portable sign-pe ./MyApp.exe \
+  --azure-key-vault-url https://myvault.vault.azure.net \
+  --azure-key-vault-certificate my-cert \
+  --azure-key-vault-managed-identity \
+  --digest sha256 \
+  --output ./MyApp.signed.exe
+```
+
+The PE subset of the native-shaped verb is also available for in-place signing:
+
+```bash
+psign-tool --mode portable sign \
+  --azure-key-vault-url https://myvault.vault.azure.net \
+  --azure-key-vault-certificate my-cert \
+  --azure-key-vault-managed-identity \
+  --digest sha256 \
+  ./MyApp.exe
+```
+
+Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and no sign-time timestamp URL. Keep Windows mode for one-step Key Vault signing with RFC3161 timestamping, or use `timestamp-pe-rfc3161` as a separate portable timestamp mutation step.
 
 ## 1.5 RFC 3161 TSA query/reply (DER only; no embed)
 
@@ -77,9 +103,9 @@ Optional debug: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 
 Details: [`migration-artifact-signing.md`](migration-artifact-signing.md).
 
-## 3. AzureSignTool — Key Vault digest sign on Linux
+## 3. AzureSignTool — Key Vault signing on Linux
 
-**Partial.** Use **`pe-digest` / `cab-digest`** (**`--encoding raw`**) for **subject layout** digests when that matches your tool mode, or the **CMS authenticated-attribute** prehash family when you mirror **`CryptMsg`** / **`SignerSignEx3`** signing over **`signedAttrs`**:
+For full portable PE signing, prefer **`portable sign-pe --azure-key-vault-*`** or **`--mode portable sign --azure-key-vault-*`** from section 1.2. For lower-level digest-only integrations, use **`pe-digest` / `cab-digest`** (**`--encoding raw`**) for **subject layout** digests when that matches your tool mode, or the **CMS authenticated-attribute** prehash family when you mirror **`CryptMsg`** / **`SignerSignEx3`** signing over **`signedAttrs`**:
 
 | Subject | Prehash for KV **`RS256`** (`--encoding raw`, 32 bytes) | Same bytes via extract + generic PKCS#7 |
 |---------|------------------------------------------------------------|-------------------------------------------|
@@ -90,7 +116,7 @@ Details: [`migration-artifact-signing.md`](migration-artifact-signing.md).
 
 Then **`azure-key-vault-sign-digest`** with **`--features azure-kv-sign-portable`** performs **`keys/sign`** (see [`migration-azuresigntool.md`](migration-azuresigntool.md)). **`verify-catalog`** checks CTL-style **`messageDigest` ↔ eContent`** and can disagree with Authenticode-only PKCS#7 bodies—use the right command for catalog *membership* vs *CMS signer* prehash.
 
-**Embed** PKCS#7 on Windows with **`psign-tool`** (`--features azure-kv-sign`) or native **`signtool.exe`**.
+PE embedding is portable; CAB/MSI/catalog remote-sign embedding still requires Windows mode or future portable remote-signer support for those formats.
 
 Details: [`migration-azuresigntool.md`](migration-azuresigntool.md).
 
