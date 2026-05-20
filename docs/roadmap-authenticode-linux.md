@@ -32,7 +32,7 @@ Portable mode is staged by lifecycle capability rather than by native `signtool.
 | Remote hash signing | Artifact Signing `:sign`, Key Vault `keys/sign`, and Authenticode signer prehash helpers | Returns signatures over supplied digests only; no Authenticode embed |
 | Local signing | Portable RDP, PE `sign-pe`, unsigned single-volume CAB `sign-cab`, MSI/MSP `sign-msi`, and generic catalog `sign-catalog` with RSA/SHA-2 | Cleartext MSIX Authenticode signing and CAB replacement/multivolume signing remain backlog |
 | CMS creation / embedding | PE, CAB, MSI, and catalog `SignedData` creation; remote RSA signature injection helpers; PE `WIN_CERTIFICATE`, CAB reserve-header/tail PKCS#7, MSI `DigitalSignature` stream embedding, and CTL `eContent` authoring | MSIX production embedding remains backlog |
-| Timestamping | RFC3161 request/response construction, POST, inspection helpers, and PE `timestamp-pe-rfc3161` token embedding | Non-PE timestamp embedding and full `SignerTimeStampEx3` policy parity remain backlog |
+| Timestamping | RFC3161 request/response construction, POST, inspection helpers, PE sign-time timestamping through `sign-pe --timestamp-url --timestamp-digest`, and PE `timestamp-pe-rfc3161` token embedding | Non-PE timestamp embedding and full `SignerTimeStampEx3` policy parity remain backlog |
 | Mutation / removal | None for Authenticode subjects | Requires format-specific embedders before safe remove/update support |
 | Catalog workflows | Generic catalog `sign-catalog`, CMS/catalog consistency checks, and explicit `verify-catalog-member --catalog file.cat subject` for MakeCat-style or psign-authored catalogs | No OS catalog database search, driver package policy, INF metadata, or MakeCat byte-for-byte output |
 

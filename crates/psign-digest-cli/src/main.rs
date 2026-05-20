@@ -48,6 +48,8 @@ use psign_sip_digest::timestamp::{
 use psign_sip_digest::verify_pe;
 use psign_sip_digest::verify_script_digest_consistency;
 use serde::Deserialize;
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -177,6 +179,15 @@ fn hash_alg_timestamp_oid(alg: HashAlg) -> &'static str {
         HashAlg::Sha256 => "2.16.840.1.101.3.4.2.1",
         HashAlg::Sha384 => "2.16.840.1.101.3.4.2.2",
         HashAlg::Sha512 => "2.16.840.1.101.3.4.2.3",
+    }
+}
+
+fn digest_bytes_for_hash_alg(alg: HashAlg, input: &[u8]) -> Vec<u8> {
+    match alg {
+        HashAlg::Sha1 => Sha1::digest(input).to_vec(),
+        HashAlg::Sha256 => Sha256::digest(input).to_vec(),
+        HashAlg::Sha384 => Sha384::digest(input).to_vec(),
+        HashAlg::Sha512 => Sha512::digest(input).to_vec(),
     }
 }
 
@@ -415,6 +426,87 @@ fn run_rfc3161_timestamp_http_post(
     Ok(())
 }
 
+#[cfg(feature = "timestamp-http")]
+fn post_rfc3161_timestamp_request(
+    url: &str,
+    algorithm: HashAlg,
+    message_imprint: &[u8],
+) -> Result<Vec<u8>> {
+    if message_imprint.len() != digest_byte_len_for_hash_alg(algorithm) {
+        return Err(anyhow!(
+            "timestamp message imprint must be exactly {} bytes for {:?}, got {}",
+            digest_byte_len_for_hash_alg(algorithm),
+            algorithm,
+            message_imprint.len()
+        ));
+    }
+    let plan = Rfc3161TimestampRequestPlan {
+        digest_alg_oid: hash_alg_timestamp_oid(algorithm),
+        nonce: None,
+        cert_req: true,
+    };
+    let der = build_timestamp_request_bytes(&plan, message_imprint).ok_or_else(|| {
+        anyhow!("unsupported digest OID / preimage length for RFC3161 TimeStampReq")
+    })?;
+    let client = reqwest::blocking::Client::builder()
+        .use_rustls_tls()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .context("build HTTP client (timestamp-http feature)")?;
+    let resp = client
+        .post(url.trim())
+        .header("Content-Type", "application/timestamp-query")
+        .header(
+            "Accept",
+            "application/timestamp-reply, application/timestamp-response",
+        )
+        .body(der)
+        .send()
+        .with_context(|| format!("POST TimeStampReq to {}", url.trim()))?;
+    let status = resp.status();
+    let body = resp.bytes().context("read TSA response body")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "TSA HTTP {} — first {} body bytes (hex): {}",
+            status,
+            body.len().min(256),
+            hex_lower(&body[..body.len().min(256)])
+        ));
+    }
+    Ok(body.to_vec())
+}
+
+#[cfg(feature = "timestamp-http")]
+fn timestamp_pkcs7_der_rfc3161(
+    pkcs7_der: &[u8],
+    timestamp_url: &str,
+    timestamp_digest: HashAlg,
+) -> Result<Vec<u8>> {
+    let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der).context("parse PKCS#7 SignedData")?;
+    let signer = sd
+        .signer_infos
+        .0
+        .as_slice()
+        .first()
+        .ok_or_else(|| anyhow!("PKCS#7 SignedData has no SignerInfo to timestamp"))?;
+    let imprint = digest_bytes_for_hash_alg(timestamp_digest, signer.signature.as_bytes());
+    let response = post_rfc3161_timestamp_request(timestamp_url, timestamp_digest, &imprint)?;
+    let parsed = parse_time_stamp_resp_der(&response)
+        .ok_or_else(|| anyhow!("could not parse TimeStampResp DER from TSA response"))?;
+    if !parsed.pki_status.granted() {
+        return Err(anyhow!(
+            "TimeStampResp status is not granted (status={})",
+            parsed.pki_status.as_raw_integer()
+        ));
+    }
+    let token = parsed
+        .time_stamp_token
+        .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?;
+    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
+        .context("attach RFC3161 timestamp token")?;
+    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
 fn parse_sha256_hex(s: &str) -> Result<[u8; 32]> {
     let hex = s.trim().strip_prefix("0x").unwrap_or(s.trim());
     let hex = hex.strip_prefix("0X").unwrap_or(hex);
@@ -603,6 +695,12 @@ enum Command {
         /// File digest algorithm for the PE Authenticode indirect digest and CMS signer.
         #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
         digest: PortableSignDigest,
+        /// RFC3161 timestamp URL to timestamp the primary PE signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
         /// Azure Key Vault URL for remote RSA signing.
         #[arg(long = "azure-key-vault-url", visible_alias = "kvu")]
         azure_key_vault_url: Option<String>,
@@ -1942,6 +2040,8 @@ where
             key,
             chain_certs,
             digest,
+            timestamp_url,
+            timestamp_digest,
             azure_key_vault_url,
             azure_key_vault_certificate,
             azure_key_vault_certificate_version,
@@ -1985,7 +2085,7 @@ where
                     "portable sign-pe accepts either --cert/--key or --azure-key-vault-* options, not both"
                 ));
             }
-            let pkcs7 = if has_kv {
+            let mut pkcs7 = if has_kv {
                 #[cfg(feature = "azure-kv-sign-portable")]
                 {
                     create_pe_authenticode_pkcs7_der_azure_kv(
@@ -2056,6 +2156,38 @@ where
                     )
                 })?
             };
+            match (timestamp_url, timestamp_digest) {
+                (Some(url), Some(timestamp_digest)) => {
+                    #[cfg(feature = "timestamp-http")]
+                    {
+                        pkcs7 = timestamp_pkcs7_der_rfc3161(&pkcs7, &url, timestamp_digest)
+                            .with_context(|| {
+                                format!(
+                                    "RFC3161 timestamp portable Authenticode signature for {}",
+                                    path.display()
+                                )
+                            })?;
+                    }
+                    #[cfg(not(feature = "timestamp-http"))]
+                    {
+                        let _ = (url, timestamp_digest);
+                        return Err(anyhow!(
+                            "portable sign-pe RFC3161 timestamping requires the timestamp-http feature"
+                        ));
+                    }
+                }
+                (Some(_), None) => {
+                    return Err(anyhow!(
+                        "portable sign-pe requires --timestamp-digest with --timestamp-url"
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(anyhow!(
+                        "portable sign-pe requires --timestamp-url with --timestamp-digest"
+                    ));
+                }
+                (None, None) => {}
+            }
             let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             std::fs::write(&output, signed).with_context(|| format!("write {}", output.display()))?;

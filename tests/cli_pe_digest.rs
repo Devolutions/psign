@@ -3057,6 +3057,66 @@ fn mode_portable_sign_uses_azure_key_vault_for_pe() {
     verify.assert().success();
 }
 
+#[cfg(all(
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "azure-kv-sign"
+))]
+#[test]
+fn mode_portable_sign_uses_azure_key_vault_and_rfc3161_timestamp_for_pe() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir.path().join("tiny32.kv-mode-portable-timestamped.exe");
+    std::fs::copy(tiny32_unsigned_fixture(), &pe_path).expect("copy unsigned PE");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&pe_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&pe_path);
+    verify.assert().success();
+
+    let mut inspect = portable_cmd();
+    inspect
+        .arg("inspect-authenticode")
+        .arg(&pe_path)
+        .arg("--input")
+        .arg("pe");
+    inspect
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "microsoft_nested_rfc3161_attribute",
+        ))
+        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+}
+
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
 #[test]
 fn psign_server_artifact_signing_submit_serves_portable_cli() {

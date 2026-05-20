@@ -82,6 +82,8 @@ psign-tool portable sign-pe ./MyApp.exe \
   --azure-key-vault-url https://myvault.vault.azure.net \
   --azure-key-vault-certificate my-cert \
   --azure-key-vault-managed-identity \
+  --timestamp-url http://timestamp.digicert.com \
+  --timestamp-digest sha256 \
   --digest sha256 \
   --output ./MyApp.signed.exe
 ```
@@ -93,11 +95,13 @@ psign-tool --mode portable sign \
   --azure-key-vault-url https://myvault.vault.azure.net \
   --azure-key-vault-certificate my-cert \
   --azure-key-vault-managed-identity \
+  --timestamp-url http://timestamp.digicert.com \
+  --timestamp-digest sha256 \
   --digest sha256 \
   ./MyApp.exe
 ```
 
-The portable path currently supports PE/WinMD, SHA-2 digests, Key Vault signer certificates, optional **`--ac` / `--chain-cert`** certificates, and no sign-time timestamp URL. Use **`psign-tool portable timestamp-pe-rfc3161`** as a second portable step when you already have a timestamp token/response, or keep Windows mode for one-step Key Vault signing with RFC3161 timestamping.
+The portable path currently supports PE/WinMD, SHA-2 digests, Key Vault signer certificates, optional **`--ac` / `--chain-cert`** certificates, and RFC3161 sign-time timestamping. Use **`psign-tool portable timestamp-pe-rfc3161`** as a second portable step only when you already have a timestamp token/response.
 
 ### Linux / CI: Key Vault **`keys/sign`** on a raw digest
 

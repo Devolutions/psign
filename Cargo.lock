@@ -2103,6 +2103,7 @@ dependencies = [
  "rsa 0.9.10",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "tempfile",
  "x509-cert",

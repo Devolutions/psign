@@ -200,10 +200,18 @@ fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
         &args.trusted_signing_dlib_root,
     )?;
     reject_path_option("--dmdf", &args.dmdf)?;
-    reject_string_option("--tr/--timestamp-url", &args.timestamp_url)?;
+    if args.timestamp_url.is_some() && args.timestamp_digest.is_none() {
+        return Err(anyhow!(
+            "portable Azure Key Vault sign requires --td/--timestamp-digest with --tr/--timestamp-url"
+        ));
+    }
+    if args.timestamp_url.is_none() && args.timestamp_digest.is_some() {
+        return Err(anyhow!(
+            "portable Azure Key Vault sign requires --tr/--timestamp-url with --td/--timestamp-digest"
+        ));
+    }
     reject_string_option("--t/--legacy-timestamp-url", &args.legacy_timestamp_url)?;
     reject_string_option("--tseal/--seal-timestamp-url", &args.seal_timestamp_url)?;
-    reject_option("--td/--timestamp-digest", args.timestamp_digest.is_some())?;
     reject_string_option("--d/--description", &args.description)?;
     reject_string_option("--du/--description-url", &args.description_url)?;
     reject_string_option("--r/--root-subject-name", &args.root_subject_name)?;
@@ -321,6 +329,11 @@ fn run_portable_sign_pe_azure_key_vault(
         argv.push(OsString::from("--chain-cert"));
         argv.push(chain_cert.as_os_str().to_os_string());
     }
+    push_option(&mut argv, "--timestamp-url", &args.timestamp_url);
+    if let Some(timestamp_digest) = args.timestamp_digest {
+        argv.push(OsString::from("--timestamp-digest"));
+        argv.push(OsString::from(timestamp_digest_name(timestamp_digest)?));
+    }
     push_option(
         &mut argv,
         "--azure-key-vault-url",
@@ -379,6 +392,18 @@ fn portable_digest_name(digest: DigestAlgorithm) -> Result<&'static str> {
         DigestAlgorithm::Sha512 => Ok("sha512"),
         DigestAlgorithm::Sha1 | DigestAlgorithm::CertHash => Err(anyhow!(
             "portable Azure Key Vault sign supports only SHA-2 file digests"
+        )),
+    }
+}
+
+fn timestamp_digest_name(digest: DigestAlgorithm) -> Result<&'static str> {
+    match digest {
+        DigestAlgorithm::Sha1 => Ok("sha1"),
+        DigestAlgorithm::Sha256 => Ok("sha256"),
+        DigestAlgorithm::Sha384 => Ok("sha384"),
+        DigestAlgorithm::Sha512 => Ok("sha512"),
+        DigestAlgorithm::CertHash => Err(anyhow!(
+            "portable Azure Key Vault timestamping supports only explicit hash algorithms"
         )),
     }
 }

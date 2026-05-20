@@ -38,6 +38,8 @@ psign-tool portable sign-pe ./MyApp.exe \
   --azure-key-vault-url https://myvault.vault.azure.net \
   --azure-key-vault-certificate my-cert \
   --azure-key-vault-managed-identity \
+  --timestamp-url http://timestamp.digicert.com \
+  --timestamp-digest sha256 \
   --digest sha256 \
   --output ./MyApp.signed.exe
 ```
@@ -49,11 +51,13 @@ psign-tool --mode portable sign \
   --azure-key-vault-url https://myvault.vault.azure.net \
   --azure-key-vault-certificate my-cert \
   --azure-key-vault-managed-identity \
+  --timestamp-url http://timestamp.digicert.com \
+  --timestamp-digest sha256 \
   --digest sha256 \
   ./MyApp.exe
 ```
 
-Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and no sign-time timestamp URL. Keep Windows mode for one-step Key Vault signing with RFC3161 timestamping, or use `timestamp-pe-rfc3161` as a separate portable timestamp mutation step.
+Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
 
 ## 1.5 RFC 3161 TSA query/reply (DER only; no embed)
 

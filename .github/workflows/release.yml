@@ -298,7 +298,7 @@ jobs:
 
   sign_windows:
     name: Sign and package Windows artifacts
-    runs-on: windows-2022
+    runs-on: ubuntu-latest
     needs:
       - preflight
       - build
@@ -316,6 +316,12 @@ jobs:
         with:
           name: psign-tool-windows-arm64.zip-unsigned-bin
           path: work/win-arm64
+
+      - name: Download Linux x64 psign-tool
+        uses: actions/download-artifact@v8
+        with:
+          name: psign-tool-linux-x64.zip
+          path: work/linux-x64
 
       - name: Resolve signing mode
         id: signing_mode
@@ -358,9 +364,9 @@ jobs:
           "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           Write-Host "Windows signing dry-run mode: $dryRun"
-          Write-Host "Windows binaries will be signed: $shouldSign"
+          Write-Host "Windows binaries will be signed with Linux psign-tool: $shouldSign"
 
-      - name: Add built psign-tool to PATH
+      - name: Add Linux psign-tool to PATH
         if: steps.signing_mode.outputs.should_sign == 'true'
         shell: pwsh
         run: |
@@ -371,14 +377,20 @@ jobs:
 
           New-Item -Path $toolDir -ItemType Directory -Force | Out-Null
 
-          $sourceToolPath = 'work\win-x64\psign-tool.exe'
-          if (-not (Test-Path -Path $sourceToolPath)) {
-            throw "Built psign-tool executable was not found at $sourceToolPath"
+          $toolArchivePath = 'work/linux-x64/psign-tool-linux-x64.zip'
+          if (-not (Test-Path -Path $toolArchivePath)) {
+            throw "Built Linux psign-tool archive was not found at $toolArchivePath"
           }
 
-          Copy-Item -Path $sourceToolPath -Destination (Join-Path $toolDir 'psign-tool.exe') -Force
+          Expand-Archive -Path $toolArchivePath -DestinationPath $toolDir -Force
+          $sourceToolPath = Join-Path $toolDir 'psign-tool'
+          if (-not (Test-Path -Path $sourceToolPath)) {
+            throw "Built Linux psign-tool executable was not found at $sourceToolPath"
+          }
+
+          chmod +x $sourceToolPath
           $toolDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & (Join-Path $toolDir 'psign-tool.exe') --version
+          & $sourceToolPath --version
 
       - name: Code sign Windows executables
         if: steps.signing_mode.outputs.should_sign == 'true'
@@ -391,7 +403,7 @@ jobs:
           CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
           CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
         run: |
-          psign-tool --verbose sign `
+          psign-tool --mode portable --verbose sign `
             --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
             --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
             --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
@@ -401,13 +413,13 @@ jobs:
             --timestamp-digest sha256 `
             --digest sha256 `
             --exit-codes azure `
-            "work\win-x64\psign-tool.exe"
+            "work/win-x64/psign-tool.exe"
 
           if ($LASTEXITCODE -ne 0) {
             throw "psign-tool signing failed for win-x64 with exit code $LASTEXITCODE"
           }
 
-          psign-tool --verbose sign `
+          psign-tool --mode portable --verbose sign `
             --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
             --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
             --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
@@ -417,7 +429,7 @@ jobs:
             --timestamp-digest sha256 `
             --digest sha256 `
             --exit-codes azure `
-            "work\win-arm64\psign-tool.exe"
+            "work/win-arm64/psign-tool.exe"
 
           if ($LASTEXITCODE -ne 0) {
             throw "psign-tool signing failed for win-arm64 with exit code $LASTEXITCODE"
