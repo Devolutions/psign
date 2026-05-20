@@ -12,8 +12,8 @@ use psign_azure_kv_rest::{
     kv_decode_cer_b64, kv_jws_alg, kv_public_key_kind_from_cer_der, kv_sign_digest,
     kv_sign_url_from_kid,
 };
-use std::cell::RefCell;
 use std::mem::size_of;
+use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{E_FAIL, S_OK};
 use windows::Win32::Security::Cryptography::ALG_ID;
 use windows::Win32::Security::Cryptography::{
@@ -24,15 +24,17 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapAlloc};
 use windows::core::HRESULT;
 
-thread_local! {
-    static KV_HTTP: RefCell<Option<KvCallbackState>> = const { RefCell::new(None) };
-}
-
+#[derive(Clone)]
 struct KvCallbackState {
     client: reqwest::blocking::Client,
     token: String,
     sign_url: String,
     key_kind: KvPublicKeyKind,
+}
+
+fn kv_callback_state() -> &'static Mutex<Option<KvCallbackState>> {
+    static STATE: OnceLock<Mutex<Option<KvCallbackState>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
 }
 
 #[repr(C)]
@@ -68,23 +70,24 @@ fn algid_to_kv_hash(algid: ALG_ID) -> Result<KvHashAlg> {
 }
 
 fn sign_digest_with_key_vault(algid_hash: ALG_ID, digest: &[u8]) -> Result<Vec<u8>> {
-    KV_HTTP.with(|slot| {
-        let borrowed = slot.borrow();
-        let Some(state) = borrowed.as_ref() else {
-            return Err(anyhow!(
-                "Azure KV signing thread-local state was not installed"
-            ));
-        };
-        let hash = algid_to_kv_hash(algid_hash)?;
-        let alg = kv_jws_alg(state.key_kind, hash)?;
-        kv_sign_digest(
-            &state.client,
-            &state.token,
-            &state.sign_url,
-            alg.as_str(),
-            digest,
-        )
-    })
+    let state = {
+        let guard = kv_callback_state()
+            .lock()
+            .map_err(|_| anyhow!("Azure Key Vault signing callback state mutex was poisoned"))?;
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("Azure Key Vault signing callback state was not installed"))?
+    };
+    let hash = algid_to_kv_hash(algid_hash)?;
+    let alg = kv_jws_alg(state.key_kind, hash)?;
+    kv_sign_digest(
+        &state.client,
+        &state.token,
+        &state.sign_url,
+        alg.as_str(),
+        digest,
+    )
 }
 
 unsafe fn write_heap_signature_blob(
@@ -126,7 +129,10 @@ unsafe extern "system" fn azure_kv_digest_callback(
 
     let sig = match outcome {
         Ok(b) => b,
-        Err(_) => return E_FAIL,
+        Err(e) => {
+            eprintln!("Azure Key Vault digest callback failed: {e:#}");
+            return E_FAIL;
+        }
     };
     unsafe { write_heap_signature_blob(&sig, p_signature_blob) }
 }
@@ -319,14 +325,17 @@ pub(crate) fn sign_with_azure_key_vault(
     };
     let digest_param = DigestSignInfoParam::basic(std::ptr::addr_of!(digest_info));
 
-    KV_HTTP.with(|slot| {
-        *slot.borrow_mut() = Some(KvCallbackState {
+    {
+        let mut state = kv_callback_state()
+            .lock()
+            .map_err(|_| anyhow!("Azure Key Vault signing callback state mutex was poisoned"))?;
+        *state = Some(KvCallbackState {
             client: http,
             token,
             sign_url,
             key_kind,
         });
-    });
+    }
 
     let report = authenticode_sign_embedded(
         args,
@@ -343,9 +352,9 @@ pub(crate) fn sign_with_azure_key_vault(
         None,
     );
 
-    KV_HTTP.with(|slot| {
-        slot.borrow_mut().take();
-    });
+    if let Ok(mut state) = kv_callback_state().lock() {
+        state.take();
+    }
 
     report
 }
