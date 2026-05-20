@@ -47,8 +47,14 @@ cargo test -p psign --test cli_pe_digest --locked
 echo "== integration: psign-tool portable (artifact-signing-rest) =="
 cargo test -p psign --test cli_pe_digest --features artifact-signing-rest --locked
 
+echo "== integration: psign-tool portable + psign-server (artifact-signing-rest) =="
+cargo test -p psign --test cli_pe_digest --features timestamp-server,artifact-signing-rest --locked psign_server_artifact
+
 echo "== integration: psign-tool portable (azure-kv-sign-portable) =="
 cargo test -p psign --test cli_pe_digest --features azure-kv-sign --locked
+
+echo "== integration: psign-tool portable + psign-server (azure-kv-sign-portable) =="
+cargo test -p psign --test cli_pe_digest --features timestamp-server,azure-kv-sign --locked psign_server_azure_key_vault_signs_digest_for_portable_cli
 
 echo "== integration: psign-tool portable (timestamp-http) =="
 cargo test -p psign --test cli_pe_digest --features timestamp-http --locked

@@ -116,4 +116,6 @@ Use the appropriate portable subcommands for your format (`verify-pe`, catalog c
 
 ## Integration testing
 
-Exercise the Key Vault path against a real vault (managed identity or client secret), then compare **`psign-tool verify`** and **`psign-tool portable`** results with a known-good AzureSignTool-signed artifact.
+Automated CI uses **`psign-server azure-key-vault-server`** as a local Key Vault replacement for digest signing. The non-ignored E2E test starts the server, calls **`psign-tool portable azure-key-vault-sign-digest`** with **`--azure-key-vault-url http://127.0.0.1:...`** and a dummy access token, then checks the returned RSA signature bytes. This exercises the same REST certificate lookup and **`keys/sign`** client used by the Windows signing path without contacting Azure.
+
+Full Windows PE signing through **`psign-tool sign --azure-key-vault-url ...`** is tracked separately because **`SignerSignEx3`** currently requires a local provider binding before a Key Vault-only certificate can be used for embedded signing. Until that is enabled as a non-ignored local test, use real-vault/manual validation for full AzureSignTool replacement signing and compare **`psign-tool verify`** plus **`psign-tool portable verify-pe`** results with a known-good AzureSignTool-signed artifact.

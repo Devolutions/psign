@@ -34,6 +34,13 @@ For a local Windows timestamp parity run, use [`scripts/run-local-timestamp-pari
 
 For local no-admin online certificate checks, use [`scripts/run-local-online-cert-parity.ps1`](../scripts/run-local-online-cert-parity.ps1). It builds **`psign-server`** with timestamp HTTP support and runs the feature-gated loopback PKI tests for explicit **`--trusted-ca`** anchors, AIA, CRL, OCSP, and trusted RFC3161 timestamp validation. These tests intentionally exercise the portable trust backend because Windows **`WinVerifyTrust`** custom-root parity still requires either persistent user/machine store changes or deeper custom chain-policy integration.
 
+`psign-server` also provides local Azure-shaped endpoints for CI-safe signing tests:
+
+- **`azure-key-vault-server`** serves Key Vault-compatible certificate metadata and **`keys/sign`** responses. Automated coverage uses **`psign-tool portable azure-key-vault-sign-digest`** with a local bearer token and does not call Azure.
+- **`artifact-signing-server`** serves the Azure Code Signing / Trusted Signing **`:sign`** data-plane plus pollable LRO responses. Automated coverage uses both **`psign-tool portable artifact-signing-submit`** and the Windows **`psign-tool artifact-signing-submit`** command through the hidden local endpoint override.
+
+Full Windows PE signing through the Azure Key Vault **`SignerSignEx3`** callback still requires a local provider binding before it can be enabled as a non-ignored CI test; the local server already covers the REST digest-signing contract used by that path.
+
 For a **baseline** report matching the static tier (verify/remove scenarios only, no optional blocks), clear process env vars whose names start with `PSIGN_`, then run `scripts/run-parity-diff.ps1`. Expect **21** scenarios, `missingScenarioCount: 0`, and `semanticMismatchCount: 0` (UTF-16 `@rsp` remains `documented_native_utf16_rsp_gap`, not a semantic failure).
 
 ## Tier 2 — Extensions (`parity-extensions.yml`)

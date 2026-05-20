@@ -32,7 +32,7 @@ pub fn artifact_signing_submit_command(
         correlation_id: args.correlation_id.clone(),
         authority: args.authority.clone(),
         auth,
-        endpoint_base_url: None,
+        endpoint_base_url: args.endpoint_base_url.clone(),
     };
 
     let debug = |msg: &str| {

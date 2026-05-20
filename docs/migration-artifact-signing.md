@@ -173,6 +173,8 @@ Either **`PSIGN_ARTIFACT_SIGNING_DLIB`** or **`PSIGN_ARTIFACT_SIGNING_DLIB_ROOT`
 
 ### REST hash signing (gated smoke test)
 
+Automated CI does not need a real Trusted Signing account for REST submit coverage. **`psign-server artifact-signing-server`** serves a local **`:sign`** endpoint and pollable operation URL; feature-gated E2E tests call **`psign-tool portable artifact-signing-submit`** and, on Windows, **`psign-tool artifact-signing-submit`** with the local endpoint override.
+
 Build with **`--features artifact-signing-rest`**, then run the ignored test **`artifact_signing_rest_submit_smoke`** when you have a **Trusted Signing** account and a **raw digest file** (for example **32 bytes** for SHA-256):
 
 ```powershell

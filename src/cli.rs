@@ -336,6 +336,9 @@ pub struct ArtifactSigningSubmitArgs {
     pub client_secret: Option<String>,
     #[arg(long)]
     pub authority: Option<String>,
+    /// Override data-plane origin for deterministic local tests.
+    #[arg(long, hide = true)]
+    pub endpoint_base_url: Option<String>,
 }
 
 #[derive(Args, Debug)]
