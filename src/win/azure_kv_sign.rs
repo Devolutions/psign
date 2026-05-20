@@ -3,7 +3,7 @@
 use crate::cli::{DigestAlgorithm, GlobalOpts, SignArgs};
 use crate::win::sealing::validate_sign_constraints_paths;
 use crate::win::sign_core::{
-    adopt_cert, authenticode_sign_embedded, encoding, infer_digest_for_cert,
+    DigestSignInfoParam, adopt_cert, authenticode_sign_embedded, encoding, infer_digest_for_cert,
     merge_additional_cert_file, open_memory_cert_store, validate_cert_constraints,
 };
 use anyhow::{Result, anyhow};
@@ -19,7 +19,7 @@ use windows::Win32::Security::Cryptography::ALG_ID;
 use windows::Win32::Security::Cryptography::{
     CALG_SHA_256, CALG_SHA_384, CALG_SHA_512, CERT_CONTEXT, CERT_STORE_ADD_REPLACE_EXISTING,
     CRYPT_INTEGER_BLOB, CertAddCertificateContextToStore, CertCreateCertificateContext,
-    CertFreeCertificateContext, SIGNER_DIGEST_SIGN_INFO, SIGNER_DIGEST_SIGN_INFO_0,
+    CertFreeCertificateContext, PFN_AUTHENTICODE_DIGEST_SIGN,
 };
 use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapAlloc};
 use windows::core::HRESULT;
@@ -33,6 +33,13 @@ struct KvCallbackState {
     token: String,
     sign_url: String,
     key_kind: KvPublicKeyKind,
+}
+
+#[repr(C)]
+struct SignerDigestSignInfoV1 {
+    cb_size: u32,
+    pfn_authenticode_digest_sign: PFN_AUTHENTICODE_DIGEST_SIGN,
+    p_metadata_blob: *mut CRYPT_INTEGER_BLOB,
 }
 
 fn auth_params_from_sign_args(args: &SignArgs) -> KvAuthParams<'_> {
@@ -305,22 +312,12 @@ pub(crate) fn sign_with_azure_key_vault(
         other => other,
     };
 
-    let mut empty_blob = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
+    let digest_info = SignerDigestSignInfoV1 {
+        cb_size: size_of::<SignerDigestSignInfoV1>() as u32,
+        pfn_authenticode_digest_sign: Some(azure_kv_digest_callback),
+        p_metadata_blob: std::ptr::null_mut(),
     };
-    let mut anon = SIGNER_DIGEST_SIGN_INFO_0::default();
-    anon.pfnAuthenticodeDigestSign = Some(azure_kv_digest_callback);
-    let digest_info = SIGNER_DIGEST_SIGN_INFO {
-        cbSize: size_of::<SIGNER_DIGEST_SIGN_INFO>() as u32,
-        dwDigestSignChoice: 1,
-        Anonymous: anon,
-        pMetadataBlob: std::ptr::addr_of_mut!(empty_blob),
-        dwReserved: 0,
-        dwReserved2: 0,
-        dwReserved3: 0,
-    };
-    let digest_ptr = std::ptr::addr_of!(digest_info);
+    let digest_param = DigestSignInfoParam::basic(std::ptr::addr_of!(digest_info));
 
     KV_HTTP.with(|slot| {
         *slot.borrow_mut() = Some(KvCallbackState {
@@ -339,7 +336,7 @@ pub(crate) fn sign_with_azure_key_vault(
         &signing,
         resolved_digest,
         None,
-        Some(digest_ptr),
+        Some(digest_param),
         "azure-key-vault",
         "MEMORY",
         None,
