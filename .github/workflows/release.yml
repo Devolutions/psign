@@ -217,7 +217,24 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --locked --release -p psign --bin psign-tool --target "${{ matrix.target }}"
+          $target = '${{ matrix.target }}'
+          $cargoArgs = @(
+            'build',
+            '--locked',
+            '--release',
+            '-p',
+            'psign',
+            '--bin',
+            'psign-tool',
+            '--target',
+            $target
+          )
+
+          if ($target.Contains('windows-msvc')) {
+            $cargoArgs += @('--features', 'azure-kv-sign')
+          }
+
+          cargo @cargoArgs
 
       - name: Verify Windows version info
         if: contains(matrix.target, 'windows-msvc')
@@ -347,17 +364,39 @@ jobs:
           Write-Host "Windows signing dry-run mode: $dryRun"
           Write-Host "Windows binaries will be signed: $shouldSign"
 
-      - name: Install AzureSignTool
+      - name: Setup .NET SDK
         if: steps.signing_mode.outputs.should_sign == 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install psign-tool from NuGet.org
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        id: install_psign_tool
         shell: pwsh
         run: |
-          $toolPath = Join-Path $env:USERPROFILE '.dotnet\tools\AzureSignTool.exe'
-          if (Test-Path -Path $toolPath) {
-            dotnet tool update --global AzureSignTool
+          $toolDir = Join-Path $env:RUNNER_TEMP 'psign-tool-nuget'
+          if (Test-Path -Path $toolDir) {
+            Remove-Item -Path $toolDir -Recurse -Force
           }
-          else {
-            dotnet tool install --global AzureSignTool
+
+          New-Item -Path $toolDir -ItemType Directory -Force | Out-Null
+
+          dotnet tool install Devolutions.Psign.Tool `
+            --tool-path $toolDir `
+            --add-source https://api.nuget.org/v3/index.json
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "dotnet tool install failed with exit code $LASTEXITCODE"
           }
+
+          $toolPath = Join-Path $toolDir 'psign-tool.cmd'
+          if (-not (Test-Path -Path $toolPath)) {
+            throw "Installed psign-tool executable was not found at $toolPath"
+          }
+
+          "tool_path=$toolPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          & $toolPath --version
 
       - name: Code sign Windows executables
         if: steps.signing_mode.outputs.should_sign == 'true'
@@ -370,27 +409,42 @@ jobs:
           CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
           CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
         run: |
-          $toolPath = Join-Path $env:USERPROFILE '.dotnet\tools\AzureSignTool.exe'
+          $toolPath = '${{ steps.install_psign_tool.outputs.tool_path }}'
+          if (-not (Test-Path -Path $toolPath)) {
+            throw "psign-tool executable was not found at $toolPath"
+          }
 
-          & $toolPath sign `
-            -kvt "$env:AZURE_TENANT_ID" `
-            -kvu "$env:CODE_SIGNING_KEYVAULT_URL" `
-            -kvi "$env:CODE_SIGNING_CLIENT_ID" `
-            -kvs "$env:CODE_SIGNING_CLIENT_SECRET" `
-            -kvc "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            -tr "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            -v `
-            "work/win-x64/psign-tool.exe"
+          & $toolPath --verbose sign `
+            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
+            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
+            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
+            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            --timestamp-digest sha256 `
+            --digest sha256 `
+            --exit-codes azure `
+            "work\win-x64\psign-tool.exe"
 
-          & $toolPath sign `
-            -kvt "$env:AZURE_TENANT_ID" `
-            -kvu "$env:CODE_SIGNING_KEYVAULT_URL" `
-            -kvi "$env:CODE_SIGNING_CLIENT_ID" `
-            -kvs "$env:CODE_SIGNING_CLIENT_SECRET" `
-            -kvc "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            -tr "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            -v `
-            "work/win-arm64/psign-tool.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "psign-tool signing failed for win-x64 with exit code $LASTEXITCODE"
+          }
+
+          & $toolPath --verbose sign `
+            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
+            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
+            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
+            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            --timestamp-digest sha256 `
+            --digest sha256 `
+            --exit-codes azure `
+            "work\win-arm64\psign-tool.exe"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "psign-tool signing failed for win-arm64 with exit code $LASTEXITCODE"
+          }
 
       - name: Package Windows artifacts
         shell: pwsh

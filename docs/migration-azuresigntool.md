@@ -21,7 +21,7 @@ psign-tool.exe sign ^
   --azure-key-vault-managed-identity ^
   --timestamp-url http://timestamp.digicert.com ^
   --timestamp-digest sha256 ^
-  --file-digest sha256 ^
+  --digest sha256 ^
   -ifl files.txt ^
   path\to\*.dll ^
   other.exe

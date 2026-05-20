@@ -80,7 +80,24 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --locked --release -p psign --bin psign-tool --target "${{ matrix.target }}"
+          $target = '${{ matrix.target }}'
+          $cargoArgs = @(
+            'build',
+            '--locked',
+            '--release',
+            '-p',
+            'psign',
+            '--bin',
+            'psign-tool',
+            '--target',
+            $target
+          )
+
+          if ($target.Contains('windows-msvc')) {
+            $cargoArgs += @('--features', 'azure-kv-sign')
+          }
+
+          cargo @cargoArgs
 
       - name: Verify Windows version info
         if: contains(matrix.target, 'windows-msvc')
