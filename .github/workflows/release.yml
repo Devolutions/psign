@@ -1,0 +1,626 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to build/publish (for example 0.1.0)
+        required: true
+        type: string
+      publish_nuget:
+        description: Publish packages to NuGet.org
+        required: false
+        default: false
+        type: boolean
+      dry_run_nuget:
+        description: Dry-run NuGet publish and GitHub release asset upload
+        required: false
+        default: true
+        type: boolean
+      sign_dry_run:
+        description: Sign Windows binaries during dry-run when signing secrets are available
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  preflight:
+    name: Resolve release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.info.outputs.release_tag }}
+      build_ref: ${{ steps.info.outputs.build_ref }}
+      publish_env: ${{ steps.info.outputs.publish_env }}
+      publish_nuget: ${{ steps.info.outputs.publish_nuget }}
+      dry_run: ${{ steps.info.outputs.dry_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release info
+        id: info
+        shell: pwsh
+        run: |
+          function Parse-BoolOrDefault {
+            param(
+              [string]$Value,
+              [bool]$Default
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Value)) {
+              return $Default
+            }
+
+            try {
+              return [System.Boolean]::Parse($Value)
+            }
+            catch {
+              return $Default
+            }
+          }
+
+          $runSha = '${{ github.sha }}'
+          $sourceBranch = '${{ github.ref_name }}'
+          $buildRef = $runSha
+
+          $releaseVersion = '${{ github.event.inputs.version }}'.Trim()
+          if ([string]::IsNullOrWhiteSpace($releaseVersion)) {
+            throw 'Workflow input version is required.'
+          }
+
+          if ($releaseVersion.StartsWith('v')) {
+            $releaseVersion = $releaseVersion.Substring(1)
+          }
+
+          if ($releaseVersion -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+            throw "Invalid version format: $releaseVersion (expected 1.2.3 or 1.2.3-suffix)."
+          }
+
+          $releaseTag = "v$releaseVersion"
+          $isMasterBranch = $sourceBranch -eq 'master'
+          $publishEnv = if ($isMasterBranch) { 'publish-prod' } else { 'publish-test' }
+          $publishNuget = Parse-BoolOrDefault '${{ github.event.inputs.publish_nuget }}' $false
+          $dryRun = Parse-BoolOrDefault '${{ github.event.inputs.dry_run_nuget }}' $true
+
+          if (-not $isMasterBranch) {
+            $dryRun = $true
+          }
+
+          if (-not $publishNuget) {
+            $dryRun = $true
+          }
+
+          "release_tag=$releaseTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "build_ref=$buildRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publish_env=$publishEnv" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publish_nuget=$($publishNuget.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "::notice::Release tag: $releaseTag"
+          Write-Host "::notice::Build ref: $buildRef"
+          Write-Host "::notice::Source branch: $sourceBranch"
+          Write-Host "::notice::Publish environment: $publishEnv"
+          Write-Host "::notice::Publish NuGet: $($publishNuget.ToString().ToLowerInvariant())"
+          Write-Host "::notice::NuGet dry-run: $($dryRun.ToString().ToLowerInvariant())"
+
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: psign-tool-linux-x64.zip
+            binary: psign-tool
+
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: psign-tool-linux-arm64.zip
+            binary: psign-tool
+
+          - name: windows-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: psign-tool-windows-x64.zip
+            binary: psign-tool.exe
+
+          - name: windows-arm64
+            os: windows-2022
+            target: aarch64-pc-windows-msvc
+            archive: psign-tool-windows-arm64.zip
+            binary: psign-tool.exe
+
+          - name: macos-x64
+            os: macos-14
+            target: x86_64-apple-darwin
+            archive: psign-tool-macos-x64.zip
+            binary: psign-tool
+
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: psign-tool-macos-arm64.zip
+            binary: psign-tool
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.build_ref }}
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target "${{ matrix.target }}"
+          rustup default stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.8.2
+
+      - name: Install Linux ARM64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure static MSVC runtime
+        if: contains(matrix.target, 'windows-msvc')
+        shell: pwsh
+        run: |
+          "RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build psign-tool
+        shell: pwsh
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --locked --release -p psign --bin psign-tool --target "${{ matrix.target }}"
+
+      - name: Package artifact
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN_NAME: ${{ matrix.binary }}
+          ARCHIVE_NAME: ${{ matrix.archive }}
+        run: |
+          $target = $env:TARGET
+          $binName = $env:BIN_NAME
+          $archiveName = $env:ARCHIVE_NAME
+
+          $binaryPath = [System.IO.Path]::Combine("target", $target, "release", $binName)
+          if (-not (Test-Path -Path $binaryPath)) {
+            throw "Binary not found: $binaryPath"
+          }
+
+          if (Test-Path -Path $archiveName) {
+            Remove-Item -Path $archiveName -Force
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::Open($archiveName, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+              $archive,
+              $binaryPath,
+              $binName,
+              [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+          Write-Host "Created $archiveName"
+
+      - name: Upload packaged artifact
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload unsigned Windows binary
+        if: ${{ contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}-unsigned-bin
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+
+  sign_windows:
+    name: Sign and package Windows artifacts
+    runs-on: windows-2022
+    needs:
+      - preflight
+      - build
+    environment: ${{ needs.preflight.outputs.publish_env }}
+
+    steps:
+      - name: Download unsigned Windows x64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: psign-tool-windows-x64.zip-unsigned-bin
+          path: work/win-x64
+
+      - name: Download unsigned Windows arm64 binary
+        uses: actions/download-artifact@v8
+        with:
+          name: psign-tool-windows-arm64.zip-unsigned-bin
+          path: work/win-arm64
+
+      - name: Resolve signing mode
+        id: signing_mode
+        shell: pwsh
+        env:
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry_run }}')
+          $signDryRun = [System.Boolean]::Parse('${{ github.event.inputs.sign_dry_run }}')
+
+          $requiredValues = @(
+            $env:CODE_SIGNING_KEYVAULT_URL,
+            $env:AZURE_TENANT_ID,
+            $env:CODE_SIGNING_CLIENT_ID,
+            $env:CODE_SIGNING_CLIENT_SECRET,
+            $env:CODE_SIGNING_CERTIFICATE_NAME,
+            $env:CODE_SIGNING_TIMESTAMP_SERVER
+          )
+
+          $hasSigningSecrets = $true
+          foreach ($value in $requiredValues) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              $hasSigningSecrets = $false
+              break
+            }
+          }
+
+          $shouldSign = $hasSigningSecrets -and ((-not $dryRun) -or $signDryRun)
+
+          if (-not $dryRun -and -not $hasSigningSecrets) {
+            throw 'Code signing secrets are required for non-dry-run release jobs.'
+          }
+
+          "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Write-Host "Windows signing dry-run mode: $dryRun"
+          Write-Host "Windows binaries will be signed: $shouldSign"
+
+      - name: Install AzureSignTool
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        shell: pwsh
+        run: |
+          $toolPath = Join-Path $env:USERPROFILE '.dotnet\tools\AzureSignTool.exe'
+          if (Test-Path -Path $toolPath) {
+            dotnet tool update --global AzureSignTool
+          }
+          else {
+            dotnet tool install --global AzureSignTool
+          }
+
+      - name: Code sign Windows executables
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+        run: |
+          $toolPath = Join-Path $env:USERPROFILE '.dotnet\tools\AzureSignTool.exe'
+
+          & $toolPath sign `
+            -kvt "$env:AZURE_TENANT_ID" `
+            -kvu "$env:CODE_SIGNING_KEYVAULT_URL" `
+            -kvi "$env:CODE_SIGNING_CLIENT_ID" `
+            -kvs "$env:CODE_SIGNING_CLIENT_SECRET" `
+            -kvc "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            -tr "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            -v `
+            "work/win-x64/psign-tool.exe"
+
+          & $toolPath sign `
+            -kvt "$env:AZURE_TENANT_ID" `
+            -kvu "$env:CODE_SIGNING_KEYVAULT_URL" `
+            -kvi "$env:CODE_SIGNING_CLIENT_ID" `
+            -kvs "$env:CODE_SIGNING_CLIENT_SECRET" `
+            -kvc "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            -tr "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            -v `
+            "work/win-arm64/psign-tool.exe"
+
+      - name: Package Windows artifacts
+        shell: pwsh
+        run: |
+          if (Test-Path -Path 'psign-tool-windows-x64.zip') {
+            Remove-Item -Path 'psign-tool-windows-x64.zip' -Force
+          }
+
+          if (Test-Path -Path 'psign-tool-windows-arm64.zip') {
+            Remove-Item -Path 'psign-tool-windows-arm64.zip' -Force
+          }
+
+          Compress-Archive -Path 'work/win-x64/psign-tool.exe' -DestinationPath 'psign-tool-windows-x64.zip' -Force
+          Compress-Archive -Path 'work/win-arm64/psign-tool.exe' -DestinationPath 'psign-tool-windows-arm64.zip' -Force
+
+      - name: Upload artifact psign-tool-windows-x64.zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: psign-tool-windows-x64.zip
+          path: psign-tool-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload artifact psign-tool-windows-arm64.zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: psign-tool-windows-arm64.zip
+          path: psign-tool-windows-arm64.zip
+          if-no-files-found: error
+
+  pack_dotnet_tool:
+    name: Pack dotnet tool from prebuilt binaries
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - sign_windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Import binaries and pack dotnet tool
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if (-not $tag.StartsWith('v')) {
+            throw "Release tag must start with 'v'. Actual: $tag"
+          }
+
+          $version = $tag.Substring(1)
+          $stagingRoot = Join-Path $PWD "nuget/staging"
+
+          ./nuget/pack-psign-dotnet-tool.ps1 `
+            -Version $version `
+            -ArtifactsRoot "dist" `
+            -StagingRoot $stagingRoot `
+            -OutputDir "dist/nuget"
+
+      - name: Upload dotnet tool artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: devolutions-psign-tool-nupkg
+          path: dist/nuget/Devolutions.Psign.Tool*.nupkg
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - sign_windows
+      - pack_dotnet_tool
+
+    steps:
+      - name: Download platform zip artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: psign-tool-*.zip
+          path: dist
+
+      - name: Download dotnet tool NuGet artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: devolutions-psign-tool-nupkg
+          path: dist
+
+      - name: Generate checksums
+        shell: pwsh
+        working-directory: dist
+        run: |
+          $releaseAssets = Get-ChildItem -Recurse -File |
+            Where-Object {
+              $_.Name -like 'psign-tool-*.zip' -or
+              $_.Name -like 'Devolutions.Psign.Tool*.nupkg'
+            } |
+            Sort-Object Name
+
+          if (-not $releaseAssets) {
+            throw 'No release assets found under dist'
+          }
+
+          $lines = $releaseAssets |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+
+          $lines | Set-Content -Path checksums.txt -Encoding utf8
+          Get-Content -Path checksums.txt
+
+      - name: Publish release assets
+        if: needs.preflight.outputs.dry_run != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          RELEASE_TARGET: ${{ github.sha }}
+        run: |
+          $assets = Get-ChildItem -Path dist -Recurse -File |
+            Where-Object {
+              $_.Name -like 'psign-tool-*.zip' -or
+              $_.Name -like 'Devolutions.Psign.Tool*.nupkg'
+            } |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
+
+          if (-not $assets) {
+            throw 'No release assets found under dist'
+          }
+
+          gh release view "$env:RELEASE_TAG" *> $null
+
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:RELEASE_TAG" @assets "dist/checksums.txt" --clobber
+          }
+          else {
+            $createArgs = @("$env:RELEASE_TAG")
+            $createArgs += $assets
+            $createArgs += "dist/checksums.txt"
+            $createArgs += "--generate-notes"
+            $createArgs += "--target"
+            $createArgs += "$env:RELEASE_TARGET"
+
+            gh release create @createArgs
+          }
+
+      - name: "Dry Run: skip GitHub release publish"
+        if: needs.preflight.outputs.dry_run == 'true'
+        shell: pwsh
+        run: |
+          Write-Host 'Dry Run: skipping GitHub release create/upload.'
+
+  publish_nuget:
+    name: Publish NuGet packages
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - pack_dotnet_tool
+    if: needs.preflight.outputs.publish_nuget == 'true'
+    environment: ${{ needs.preflight.outputs.publish_env }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Resolve publish mode
+        id: publish_mode
+        shell: pwsh
+        env:
+          NUGET_BOT_USERNAME: ${{ secrets.NUGET_BOT_USERNAME }}
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry_run }}')
+          $hasLoginUser = -not [string]::IsNullOrWhiteSpace($env:NUGET_BOT_USERNAME)
+
+          "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "has_login_user=$($hasLoginUser.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          if (-not $dryRun -and -not $hasLoginUser) {
+            throw 'NUGET_BOT_USERNAME is required when dry_run is false.'
+          }
+
+          Write-Host "NuGet dry-run mode: $dryRun"
+
+      - name: Download dotnet tool NuGet artifact
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: devolutions-psign-tool-nupkg
+          path: dist
+
+      - name: Setup .NET SDK
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: NuGet login (OIDC)
+        if: steps.publish_mode.outputs.dry_run != 'true' && steps.publish_mode.outputs.has_login_user == 'true'
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_BOT_USERNAME }}
+
+      - name: Publish to NuGet.org (RID first, pointer last)
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        shell: pwsh
+        env:
+          NUGET_SOURCE: https://api.nuget.org/v3/index.json
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ steps.publish_mode.outputs.dry_run }}')
+          $apiKey = '${{ steps.nuget-login.outputs.NUGET_API_KEY }}'
+
+          if ($dryRun) {
+            $apiKey = 'dry-run-key'
+            Write-Host 'Dry Run: NuGet push commands will be printed but not executed.'
+          }
+          elseif ([string]::IsNullOrWhiteSpace($apiKey)) {
+            throw 'NuGet login did not return an API key.'
+          }
+
+          $toolPackages = Get-ChildItem -Path dist -Recurse -File -Filter 'Devolutions.Psign.Tool*.nupkg' | Sort-Object Name
+          if (-not $toolPackages) {
+            throw 'Missing Devolutions.Psign.Tool package artifacts.'
+          }
+
+          $toolRidPattern = 'Devolutions\.Psign\.Tool\.(win-x64|win-arm64|linux-x64|linux-arm64|osx-x64|osx-arm64|any)\.'
+          $toolRidPackages = $toolPackages | Where-Object { $_.Name -match $toolRidPattern }
+          $toolPointerPackages = $toolPackages | Where-Object { $_.Name -notmatch $toolRidPattern }
+
+          if (-not $toolRidPackages) {
+            throw 'Missing Devolutions.Psign.Tool RID package artifacts.'
+          }
+
+          if (-not $toolPointerPackages) {
+            throw 'Missing Devolutions.Psign.Tool pointer package artifact.'
+          }
+
+          foreach ($package in $toolRidPackages) {
+            $pushArgs = @(
+              'nuget', 'push', "$($package.FullName)",
+              '--api-key', "$apiKey",
+              '--source', "$env:NUGET_SOURCE",
+              '--skip-duplicate', '--no-symbols'
+            )
+
+            Write-Host "dotnet $($pushArgs -join ' ')"
+            if (-not $dryRun) {
+              & dotnet @pushArgs
+            }
+          }
+
+          foreach ($package in $toolPointerPackages) {
+            $pushArgs = @(
+              'nuget', 'push', "$($package.FullName)",
+              '--api-key', "$apiKey",
+              '--source', "$env:NUGET_SOURCE",
+              '--skip-duplicate', '--no-symbols'
+            )
+
+            Write-Host "dotnet $($pushArgs -join ' ')"
+            if (-not $dryRun) {
+              & dotnet @pushArgs
+            }
+          }

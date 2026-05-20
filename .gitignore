@@ -1,0 +1,16 @@
+/target/
+/vendor/
+/parity-output/
+# Legacy local dir name (keep binary copies + local analysis scratch out of git)
+/reversing/
+# Local API / ABI notes under docs/ (filename contains *-api-map.md)
+/docs/*-api-map.md
+/tests/fixtures/private/
+.env
+# Local CI artifact unpack / agent scratch dirs
+tmp-ci-*/
+/dist/
+/nuget/staging/
+/nuget/tmp-tool/
+/nuget/tool/bin/
+/nuget/tool/obj/

@@ -1,0 +1,3 @@
+﻿<job id="psign">
+  <script language="JScript">WScript.Echo('psign vector wsf');</script>
+</job>

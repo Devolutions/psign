@@ -1,0 +1,3 @@
+@{
+    RootModule = 'vector.psm1'
+}

@@ -1,0 +1,21 @@
+[package]
+name = "psign-azure-kv-rest"
+version = "0.1.0"
+edition = "2024"
+description = "Azure Key Vault certificate metadata + keys/sign REST (portable, blocking HTTP)"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+x509-cert = "0.2.5"
+
+[dev-dependencies]
+mockito = "1.6"
+rcgen = "0.13"
+serde_json = "1"

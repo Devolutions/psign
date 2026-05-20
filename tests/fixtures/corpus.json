@@ -1,0 +1,193 @@
+{
+  "scenarios": [
+    {
+      "id": "verify_pa_signed_sdk_signtool",
+      "kind": "verify",
+      "description": "SDK signtool verifies with /pa",
+      "fixture": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/signtool.exe",
+      "expected": "success"
+    },
+    {
+      "id": "verify_default_policy_failure",
+      "kind": "verify",
+      "description": "SDK signtool fails under default policy",
+      "fixture": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/signtool.exe",
+      "expected": "failure"
+    },
+    {
+      "id": "sign_sha256_with_pfx",
+      "kind": "sign",
+      "description": "Sign fixture with PFX and SHA256",
+      "fixture": "tests/fixtures/private/unsigned.exe",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "timestamp_rfc3161",
+      "kind": "timestamp",
+      "description": "RFC3161 timestamp existing signature",
+      "fixture": "tests/fixtures/private/signed-valid.exe",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "msix_sign_rfc3161",
+      "kind": "sign",
+      "description": "Sign unsigned MSIX with RFC3161 timestamp during sign",
+      "fixture": "tests/fixtures/private/unsigned.msix",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "msix_sign_missing_timestamp_fails",
+      "kind": "sign",
+      "description": "MSIX sign without timestamp is rejected",
+      "fixture": "tests/fixtures/private/unsigned.msix",
+      "expected": "failure"
+    },
+    {
+      "id": "msix_sign_dlib_dmdf",
+      "kind": "sign",
+      "description": "MSIX decoupled digest signing flow with dlib+dmdf",
+      "fixture": "tests/fixtures/private/unsigned.msix",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "winmd_sign_sha256_pfx",
+      "kind": "sign",
+      "description": "Sign unsigned .winmd with PFX + SHA256 (Windows metadata / PE-based SIP); optional RFC3161 via PSIGN_WINMD_TIMESTAMP_URL",
+      "fixture": "tests/fixtures/private/unsigned.winmd",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "msi_sign_sha256_pfx",
+      "kind": "sign",
+      "description": "Sign unsigned MSI with PFX + SHA256 (Windows Installer SIP); optional RFC3161 via PSIGN_MSI_TIMESTAMP_URL in parity script",
+      "fixture": "tests/fixtures/private/unsigned.msi",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "appx_sign_rfc3161",
+      "kind": "sign",
+      "description": "Sign unsigned APPX with RFC3161 timestamp during sign",
+      "fixture": "tests/fixtures/private/unsigned.appx",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "msixbundle_sign_rfc3161",
+      "kind": "sign",
+      "description": "Sign unsigned MSIXBundle with RFC3161 timestamp during sign",
+      "fixture": "tests/fixtures/private/unsigned.msixbundle",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "msix_verify_tampered_fails",
+      "kind": "verify",
+      "description": "Tampered signed MSIX fails verification",
+      "fixture": "tests/fixtures/private/signed-tampered.msix",
+      "expected": "failure"
+    },
+    {
+      "id": "msix_verify_expired_fails",
+      "kind": "verify",
+      "description": "Expired signed MSIX fails trust validation",
+      "fixture": "tests/fixtures/private/signed-expired.msix",
+      "expected": "failure"
+    },
+    {
+      "id": "msix_sign_invalid_dlib_fails",
+      "kind": "sign",
+      "description": "MSIX decoupled signing fails with invalid dlib export set",
+      "fixture": "tests/fixtures/private/unsigned.msix",
+      "expected": "failure"
+    },
+    {
+      "id": "msix_sign_invalid_dmdf_fails",
+      "kind": "sign",
+      "description": "MSIX decoupled signing fails with invalid metadata blob",
+      "fixture": "tests/fixtures/private/unsigned.msix",
+      "expected": "failure"
+    },
+    {
+      "id": "cli_verify_catalog_search_all",
+      "kind": "verify",
+      "description": "Resolve catalog via --catalog-search then verify member file",
+      "fixture": "tests/fixtures/private/catalog-member.sys",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "cli_catdb_add_catalog",
+      "kind": "catdb",
+      "description": "catdb registers a .cat into the catalog database",
+      "fixture": "tests/fixtures/private/sample.cat",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "cli_remove_embedded_signature",
+      "kind": "remove",
+      "description": "remove --strip-signature clears WIN_CERTIFICATE entries",
+      "fixture": "tests/fixtures/private/signed-valid.exe",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "cli_split_digest_unsupported",
+      "kind": "sign",
+      "description": "/dg-/ds-/di pipeline rejected with explicit message",
+      "fixture": "tests/fixtures/private/unsigned.exe",
+      "expected": "failure"
+    },
+    {
+      "id": "rust_sip_pe_digest_golden_upstream_tiny32",
+      "kind": "rust_sip",
+      "description": "PE Authenticode SHA256 digest matches google/authenticode-rs tiny32.signed.efi vector",
+      "fixture": "tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi",
+      "expected": "success"
+    },
+    {
+      "id": "rust_sip_pe_digest_golden_upstream_tiny64",
+      "kind": "rust_sip",
+      "description": "PE Authenticode SHA256 digest matches google/authenticode-rs tiny64.signed.efi vector",
+      "fixture": "tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi",
+      "expected": "success"
+    },
+    {
+      "id": "rust_sip_pe_sign_digest_gate_optional",
+      "kind": "sign",
+      "description": "sign --rust-sip pe succeeds vs native sign when PSIGN_UNSIGNED_FIXTURE + TEST_PFX set; scripts/rust-sip-parity-pe.ps1",
+      "fixture": "tests/fixtures/private/unsigned.exe",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "rust_sip_pe_verify_digest_check_optional",
+      "kind": "verify",
+      "description": "verify --rust-sip-pe-digest-check after WinTrust success on signed PE",
+      "fixture": "tests/fixtures/private/signed-valid.exe",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "rust_sip_msi_sign_digest_gate_optional",
+      "kind": "sign",
+      "description": "sign --rust-sip msi succeeds when PSIGN_MSI_UNSIGNED_FIXTURE + PSIGN_TEST_PFX set; MSI SIP digest vs PKCS#7 after SignerSignEx3",
+      "fixture": "tests/fixtures/private/unsigned.msi",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "rust_sip_msi_verify_digest_check_optional",
+      "kind": "verify",
+      "description": "verify --rust-sip-msi-digest-check after WinTrust success on signed Windows Installer package",
+      "fixture": "tests/fixtures/private/signed.msi",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "rust_sip_esd_sign_digest_gate_optional",
+      "kind": "sign",
+      "description": "sign --rust-sip esd after SignerSignEx3 on WIM/ESD; prefix digest vs PKCS#7 (`EsdSip` semantics)",
+      "fixture": "tests/fixtures/private/unsigned.wim",
+      "expected": "pending_fixture"
+    },
+    {
+      "id": "rust_sip_esd_verify_digest_check_optional",
+      "kind": "verify",
+      "description": "verify --rust-sip-esd-digest-check after WinTrust success on signed .wim/.esd",
+      "fixture": "tests/fixtures/private/signed.wim",
+      "expected": "pending_fixture"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+' optional WSH encoded VBScript probe
+WScript.Echo "psign optional probe"

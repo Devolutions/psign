@@ -1,0 +1,63 @@
+# Optional parity tiers that need extra inputs (decoupled digest DLL/metadata, catalog files).
+# Configure repository secrets then run from Actions → Parity extensions → Run workflow.
+name: parity-extensions
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_msix_decoupled:
+        description: Run MSIX decoupled (/dlib + /dmdf) parity via msix-parity-sign.ps1
+        type: boolean
+        default: false
+      run_catalog_verify:
+        description: Run Rust catalog verify against PSIGN_CATALOG_* secrets
+        type: boolean
+        default: false
+
+jobs:
+  msix-decoupled:
+    if: ${{ inputs.run_msix_decoupled }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p psign --bin psign-tool
+      - name: Bootstrap Devolutions test PKI + pack minimal MSIX
+        shell: pwsh
+        env:
+          PSIGN_MSIX_DLIB: ${{ secrets.PSIGN_MSIX_DLIB }}
+          PSIGN_MSIX_DMDF: ${{ secrets.PSIGN_MSIX_DMDF }}
+        run: |
+          if (-not $env:PSIGN_MSIX_DLIB -or -not $env:PSIGN_MSIX_DMDF) {
+            throw "Set repository secrets PSIGN_MSIX_DLIB and PSIGN_MSIX_DMDF."
+          }
+          ./scripts/ci/bootstrap-devolutions-authenticode.ps1 -EmitGithubEnv
+          $ws = "${{ github.workspace }}"
+          $exe = Join-Path $ws "target\debug\psign-tool.exe"
+          $rt = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+          $msix = Join-Path $rt "psign_extension_decoupled.msix"
+          ./scripts/ci/pack-minimal-msix.ps1 -WorkspaceRoot $ws -PeAsExecutable $exe -OutputMsix $msix
+          $env:PSIGN_MSIX_UNSIGNED_FIXTURE = $msix
+          ./scripts/msix-parity-sign.ps1 -UseDecoupledDigest -FailOnSemantic
+
+  catalog-verify:
+    if: ${{ inputs.run_catalog_verify }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p psign --bin psign-tool
+      - name: Catalog verify (Rust)
+        shell: pwsh
+        env:
+          PSIGN_CATALOG_TARGET: ${{ secrets.PSIGN_CATALOG_TARGET }}
+          PSIGN_CATALOG_FILE: ${{ secrets.PSIGN_CATALOG_FILE }}
+        run: |
+          if (-not $env:PSIGN_CATALOG_TARGET -or -not $env:PSIGN_CATALOG_FILE) {
+            throw "Set repository secrets PSIGN_CATALOG_TARGET and PSIGN_CATALOG_FILE."
+          }
+          $rust = Join-Path "${{ github.workspace }}" "target\debug\psign-tool.exe"
+          & $rust verify $env:PSIGN_CATALOG_TARGET --catalog $env:PSIGN_CATALOG_FILE
+          if ($LASTEXITCODE -ne 0) { throw "Catalog verify failed with exit $LASTEXITCODE" }
+          & $rust verify $env:PSIGN_CATALOG_TARGET --catalog $env:PSIGN_CATALOG_FILE --os-version-check "386:10.0.26100.0"
+          if ($LASTEXITCODE -ne 0) { throw "Catalog verify with --os-version-check failed with exit $LASTEXITCODE" }

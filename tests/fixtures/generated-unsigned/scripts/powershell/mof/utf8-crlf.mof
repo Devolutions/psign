@@ -1,0 +1,4 @@
+class Psign_Vector
+{
+  [key] string Name;
+};

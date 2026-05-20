@@ -1,0 +1,110 @@
+[workspace]
+members = [
+    "crates/psign-sip-digest",
+    "crates/psign-digest-cli",
+    "crates/psign-authenticode-trust",
+    "crates/psign-codesigning-rest",
+    "crates/psign-azure-kv-rest",
+    "crates/psign-opc-sign",
+]
+# Bare `cargo build` / `cargo test` at the repo root includes the unified `psign-tool`
+# target plus the portable crates.
+default-members = [
+    ".",
+    "crates/psign-sip-digest",
+    "crates/psign-digest-cli",
+    "crates/psign-authenticode-trust",
+    "crates/psign-codesigning-rest",
+    "crates/psign-azure-kv-rest",
+    "crates/psign-opc-sign",
+]
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/Devolutions/psign"
+
+[package]
+name = "psign"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of the Windows SDK signtool.exe (Authenticode sign/verify/timestamp) with portable digest helpers."
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+
+[features]
+default = []
+## Azure Key Vault signing (`AuthenticatorDigestSign` callback + REST); enables Azure-shaped CLI flags on `sign`.
+azure-kv-sign = [
+    "dep:psign-azure-kv-rest",
+    "dep:reqwest",
+    "psign-digest-cli/azure-kv-sign-portable",
+]
+## Azure Artifact Signing / Trusted Signing **data-plane** hash signing (REST LRO); experimental helper command `artifact-signing-submit`.
+artifact-signing-rest = ["dep:psign-codesigning-rest", "psign-digest-cli/artifact-signing-rest"]
+## Portable RFC 3161 TSA HTTP POST helper under `psign-tool portable`.
+timestamp-http = ["psign-digest-cli/timestamp-http"]
+## Local RFC 3161 timestamp test server (`psign-server`).
+timestamp-server = ["dep:cms", "dep:der", "dep:rand", "dep:rsa", "x509-cert/builder"]
+
+[dependencies]
+psign-sip-digest = { path = "crates/psign-sip-digest" }
+psign-authenticode-trust = { path = "crates/psign-authenticode-trust" }
+psign-digest-cli = { path = "crates/psign-digest-cli" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha1 = "0.10"
+base64 = "0.22"
+goblin = "0.9"
+picky = { version = "7.0.0-rc.23", default-features = false, features = ["pkcs12"] }
+cms = { version = "0.2.3", features = ["builder"], optional = true }
+der = { version = "0.7", features = ["derive"], optional = true }
+rand = { version = "0.8", optional = true }
+rsa = { version = "0.9.10", features = ["sha2"], optional = true }
+x509-cert = "0.2.5"
+
+[target.'cfg(windows)'.dependencies]
+glob = "0.3"
+rayon = "1.10"
+psign-azure-kv-rest = { path = "crates/psign-azure-kv-rest", optional = true }
+psign-codesigning-rest = { path = "crates/psign-codesigning-rest", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+uuid = "1"
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+rand = "0.8"
+rsa = { version = "0.9.10", features = ["sha2"] }
+tempfile = "3"
+x509-cert = { version = "0.2.5", features = ["builder"] }
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+
+[[bin]]
+name = "psign-tool"
+path = "src/main.rs"
+
+[[bin]]
+name = "psign-depgraph"
+path = "src/bin/depgraph.rs"
+
+[[bin]]
+name = "psign-server"
+path = "src/bin/psign-server.rs"
+required-features = ["timestamp-server"]

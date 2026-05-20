@@ -1,0 +1,2 @@
+// optional WSH encoded JScript probe
+WScript.Echo('psign optional probe');

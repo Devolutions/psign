@@ -1,0 +1,1343 @@
+{
+  "generated_by": "scripts/ci/build-code-signing-vector-corpus.ps1",
+  "signing_tool": "signtool.exe",
+  "pfx": ".\\tests\\fixtures\\devolutions-authenticode\\authenticode-test-cert.pfx",
+  "timestamp_url": "",
+  "signed": [
+    {
+      "id": "generated-pe-tiny32-exe",
+      "family": "pe",
+      "extension": ".exe",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.exe",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.exe",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-dll",
+      "family": "pe",
+      "extension": ".dll",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.dll",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.dll",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-sys",
+      "family": "pe",
+      "extension": ".sys",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.sys",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.sys",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-ocx",
+      "family": "pe",
+      "extension": ".ocx",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.ocx",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.ocx",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-scr",
+      "family": "pe",
+      "extension": ".scr",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.scr",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.scr",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-cpl",
+      "family": "pe",
+      "extension": ".cpl",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.cpl",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.cpl",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-efi",
+      "family": "pe",
+      "extension": ".efi",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.efi",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.efi",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny32-mui",
+      "family": "pe",
+      "extension": ".mui",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny32-pe-alias.mui",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny32-pe-alias.mui",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-winmd-tiny32",
+      "family": "winmd",
+      "extension": ".winmd",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\winmd\\tiny32-pe-copy.winmd",
+      "path": "tests\\fixtures\\generated-signed\\winmd\\tiny32-pe-copy.winmd",
+      "size_bytes": 3536,
+      "sha256": "78a79b4749eb8fcb4c4771a67d5670d7b602baa1062205f87834d7963c4dbf06"
+    },
+    {
+      "id": "generated-pe-tiny64-exe",
+      "family": "pe",
+      "extension": ".exe",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.exe",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.exe",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-dll",
+      "family": "pe",
+      "extension": ".dll",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.dll",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.dll",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-sys",
+      "family": "pe",
+      "extension": ".sys",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.sys",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.sys",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-ocx",
+      "family": "pe",
+      "extension": ".ocx",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.ocx",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.ocx",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-scr",
+      "family": "pe",
+      "extension": ".scr",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.scr",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.scr",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-cpl",
+      "family": "pe",
+      "extension": ".cpl",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.cpl",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.cpl",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-efi",
+      "family": "pe",
+      "extension": ".efi",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.efi",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.efi",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-pe-tiny64-mui",
+      "family": "pe",
+      "extension": ".mui",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\pe\\tiny64-pe-alias.mui",
+      "path": "tests\\fixtures\\generated-signed\\pe\\tiny64-pe-alias.mui",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-winmd-tiny64",
+      "family": "winmd",
+      "extension": ".winmd",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\winmd\\tiny64-pe-copy.winmd",
+      "path": "tests\\fixtures\\generated-signed\\winmd\\tiny64-pe-copy.winmd",
+      "size_bytes": 3536,
+      "sha256": "a7f9997c73fc4a45b7a262d856741e04088b85172e2e4ac27928c86d9990d737"
+    },
+    {
+      "id": "generated-powershell-ps1-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf8-crlf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf8-crlf.ps1",
+      "size_bytes": 2227,
+      "sha256": "b4f6e087a52b8f7a5af29ce0bfaa54c2e729512661833a2822ac8666ce35cbd0"
+    },
+    {
+      "id": "generated-powershell-ps1-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf8-lf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf8-lf.ps1",
+      "size_bytes": 2226,
+      "sha256": "8f25b6a43bc727b424a9e16df3af8dad287a70e8934746ff49b1d4f44c1199da"
+    },
+    {
+      "id": "generated-powershell-ps1-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf8-bom-crlf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf8-bom-crlf.ps1",
+      "size_bytes": 2230,
+      "sha256": "d9f97020741c56f0f5950b05facbb97ccae2b286488e9054faf29397e40ed271"
+    },
+    {
+      "id": "generated-powershell-ps1-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf8-bom-lf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf8-bom-lf.ps1",
+      "size_bytes": 2229,
+      "sha256": "2426aa62d82f4d4a597fb6829ff77d1b4d0b274e1e69f52c219388fb3520b05b"
+    },
+    {
+      "id": "generated-powershell-ps1-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf16le-bom-crlf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf16le-bom-crlf.ps1",
+      "size_bytes": 4456,
+      "sha256": "dc93953ce645050e314057463b1f47b12653bd5dbd7a76720d8be9acafbf4319"
+    },
+    {
+      "id": "generated-powershell-ps1-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf16le-bom-lf.ps1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1\\utf16le-bom-lf.ps1",
+      "size_bytes": 4454,
+      "sha256": "26e0adb0ba78946eac78513035c174afaa7f5786d083771d468469c323b17636"
+    },
+    {
+      "id": "generated-powershell-psd1-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf8-crlf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf8-crlf.psd1",
+      "size_bytes": 2233,
+      "sha256": "419eeb62c525c21975c0435a19c951d38a4cc55117a55dcfb0fb9874a5f7b546"
+    },
+    {
+      "id": "generated-powershell-psd1-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf8-lf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf8-lf.psd1",
+      "size_bytes": 2230,
+      "sha256": "e5f1a754ad6da59fb91ef052c87a8ff71e89fd6f912d3f2350f6410a0fbf87b1"
+    },
+    {
+      "id": "generated-powershell-psd1-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf8-bom-crlf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf8-bom-crlf.psd1",
+      "size_bytes": 2236,
+      "sha256": "786855d2dcece53362673876506bc8cc70cfc55d60e9f269c911f8970eb002e3"
+    },
+    {
+      "id": "generated-powershell-psd1-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf8-bom-lf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf8-bom-lf.psd1",
+      "size_bytes": 2233,
+      "sha256": "18d4cc7cba4b2ffd09db7e58a71015038664d8a799766f2b5718f13c1132cf84"
+    },
+    {
+      "id": "generated-powershell-psd1-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf16le-bom-crlf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf16le-bom-crlf.psd1",
+      "size_bytes": 4468,
+      "sha256": "c2495e9b8e196967a2f7e493ee64a5924b52eb5f846d9196cc9ddefad7c12da1"
+    },
+    {
+      "id": "generated-powershell-psd1-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf16le-bom-lf.psd1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psd1\\utf16le-bom-lf.psd1",
+      "size_bytes": 4462,
+      "sha256": "519920a481c3d3e92c203d4d5c1fca61ac457ddb0eee3703595801f82e6ab48e"
+    },
+    {
+      "id": "generated-powershell-psm1-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf8-crlf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf8-crlf.psm1",
+      "size_bytes": 2292,
+      "sha256": "f0ace6c22a82836d690aa7196667ca50491c678b9f665d66e115746f54f3a07e"
+    },
+    {
+      "id": "generated-powershell-psm1-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf8-lf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf8-lf.psm1",
+      "size_bytes": 2290,
+      "sha256": "de9eec20c1fa4ed75061b7e1f459b4884419078aba272d106414629c4ac4b131"
+    },
+    {
+      "id": "generated-powershell-psm1-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf8-bom-crlf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf8-bom-crlf.psm1",
+      "size_bytes": 2295,
+      "sha256": "40b6f722489c56830e7118c42bd83f764d5f1bb4a0162cea818f641c70e66c32"
+    },
+    {
+      "id": "generated-powershell-psm1-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf8-bom-lf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf8-bom-lf.psm1",
+      "size_bytes": 2293,
+      "sha256": "293150815dba051f7d0872653311f0a1c82078e8344b99d3df97b5abea9d5b10"
+    },
+    {
+      "id": "generated-powershell-psm1-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf16le-bom-crlf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf16le-bom-crlf.psm1",
+      "size_bytes": 4586,
+      "sha256": "cb75a3cba07be57062cf4ad7ecc9d573a61b66405d25032750934a34febe43f5"
+    },
+    {
+      "id": "generated-powershell-psm1-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf16le-bom-lf.psm1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psm1\\utf16le-bom-lf.psm1",
+      "size_bytes": 4582,
+      "sha256": "765b043f0b5f59e002519000aa3f59fb9ba63f10e1f4f5e1ef61d6c7dbec9f0e"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf8-crlf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf8-crlf.ps1xml",
+      "size_bytes": 2530,
+      "sha256": "828ba7deb9d1e0c2deec48614d701db6651bc22e9efd3927c76a45174f1091a4"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf8-lf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf8-lf.ps1xml",
+      "size_bytes": 2528,
+      "sha256": "a0f6a903d28bc6ba32a9c791391ab18271a5ae5110c94dc2a23600865d97a931"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf8-bom-crlf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf8-bom-crlf.ps1xml",
+      "size_bytes": 2533,
+      "sha256": "a7ea43764fafe13fc66149017fc8e94eafa68c8fb8f99ec349b06993958b58db"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf8-bom-lf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf8-bom-lf.ps1xml",
+      "size_bytes": 2531,
+      "sha256": "5678f7395d85f5e28e06202d2ba7f3797c9862c7bb7ef699a0904c89ff392e07"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf16le-bom-crlf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf16le-bom-crlf.ps1xml",
+      "size_bytes": 5062,
+      "sha256": "1c9e3f9a8751e3d425b8b9bac4f89609117c33cf2b4c28659ed19745e68bb953"
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf16le-bom-lf.ps1xml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\ps1xml\\utf16le-bom-lf.ps1xml",
+      "size_bytes": 5058,
+      "sha256": "3f37aee0216cc68dff8d8529ba6c0627342c3b96752ae9afe269694b7e6743df"
+    },
+    {
+      "id": "generated-powershell-psc1-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf8-crlf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf8-crlf.psc1",
+      "size_bytes": 2530,
+      "sha256": "828ba7deb9d1e0c2deec48614d701db6651bc22e9efd3927c76a45174f1091a4"
+    },
+    {
+      "id": "generated-powershell-psc1-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf8-lf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf8-lf.psc1",
+      "size_bytes": 2528,
+      "sha256": "a0f6a903d28bc6ba32a9c791391ab18271a5ae5110c94dc2a23600865d97a931"
+    },
+    {
+      "id": "generated-powershell-psc1-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf8-bom-crlf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf8-bom-crlf.psc1",
+      "size_bytes": 2533,
+      "sha256": "a7ea43764fafe13fc66149017fc8e94eafa68c8fb8f99ec349b06993958b58db"
+    },
+    {
+      "id": "generated-powershell-psc1-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf8-bom-lf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf8-bom-lf.psc1",
+      "size_bytes": 2531,
+      "sha256": "5678f7395d85f5e28e06202d2ba7f3797c9862c7bb7ef699a0904c89ff392e07"
+    },
+    {
+      "id": "generated-powershell-psc1-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf16le-bom-crlf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf16le-bom-crlf.psc1",
+      "size_bytes": 5062,
+      "sha256": "1c9e3f9a8751e3d425b8b9bac4f89609117c33cf2b4c28659ed19745e68bb953"
+    },
+    {
+      "id": "generated-powershell-psc1-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf16le-bom-lf.psc1",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\psc1\\utf16le-bom-lf.psc1",
+      "size_bytes": 5058,
+      "sha256": "3f37aee0216cc68dff8d8529ba6c0627342c3b96752ae9afe269694b7e6743df"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf8-crlf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf8-crlf.cdxml",
+      "size_bytes": 2530,
+      "sha256": "828ba7deb9d1e0c2deec48614d701db6651bc22e9efd3927c76a45174f1091a4"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf8-lf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf8-lf.cdxml",
+      "size_bytes": 2528,
+      "sha256": "a0f6a903d28bc6ba32a9c791391ab18271a5ae5110c94dc2a23600865d97a931"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf8-bom-crlf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf8-bom-crlf.cdxml",
+      "size_bytes": 2533,
+      "sha256": "a7ea43764fafe13fc66149017fc8e94eafa68c8fb8f99ec349b06993958b58db"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf8-bom-lf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf8-bom-lf.cdxml",
+      "size_bytes": 2531,
+      "sha256": "5678f7395d85f5e28e06202d2ba7f3797c9862c7bb7ef699a0904c89ff392e07"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf16le-bom-crlf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf16le-bom-crlf.cdxml",
+      "size_bytes": 5062,
+      "sha256": "1c9e3f9a8751e3d425b8b9bac4f89609117c33cf2b4c28659ed19745e68bb953"
+    },
+    {
+      "id": "generated-powershell-cdxml-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf16le-bom-lf.cdxml",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\cdxml\\utf16le-bom-lf.cdxml",
+      "size_bytes": 5058,
+      "sha256": "3f37aee0216cc68dff8d8529ba6c0627342c3b96752ae9afe269694b7e6743df"
+    },
+    {
+      "id": "generated-powershell-mof-utf8-crlf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf8-crlf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf8-crlf.mof",
+      "size_bytes": 2379,
+      "sha256": "c72846bee9d7feda256fcfa99cc0a753693999c6151ca44cc73910d1eb8983ab"
+    },
+    {
+      "id": "generated-powershell-mof-utf8-lf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf8-lf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf8-lf.mof",
+      "size_bytes": 2375,
+      "sha256": "651173146f9b7e33f2c1ff707fc58b8243874c46597ee91214e1f8e4e0de722b"
+    },
+    {
+      "id": "generated-powershell-mof-utf8-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf8-bom-crlf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf8-bom-crlf.mof",
+      "size_bytes": 2382,
+      "sha256": "dc73c75254b300b573a777f8a0bb4ead795e6577c78789076eae07b0733bf7f7"
+    },
+    {
+      "id": "generated-powershell-mof-utf8-bom-lf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf8-bom-lf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf8-bom-lf.mof",
+      "size_bytes": 2378,
+      "sha256": "db49e652b17c372e5e29ed31103408a35a3936cee647caa25e7eb7e9b2950401"
+    },
+    {
+      "id": "generated-powershell-mof-utf16le-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf16le-bom-crlf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf16le-bom-crlf.mof",
+      "size_bytes": 4760,
+      "sha256": "7567185fe22ffb332e733c19b9dc4f24caf8e85beacdc5bfdb3d0aa4410d62c7"
+    },
+    {
+      "id": "generated-powershell-mof-utf16le-bom-lf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf16le-bom-lf.mof",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\powershell\\mof\\utf16le-bom-lf.mof",
+      "size_bytes": 4752,
+      "sha256": "17eb283e64e3546acb1b4ef5e78407af6f004232b6aa3a26cca9938a4b5c2779"
+    },
+    {
+      "id": "generated-wsh-js-utf8-crlf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf8-crlf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf8-crlf.js",
+      "size_bytes": 2652,
+      "sha256": "389daca589ce93f48bf83839ad5a8f96d6eaaa0286c0e94d95b0fdf2814c1ff9"
+    },
+    {
+      "id": "generated-wsh-js-utf8-lf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf8-lf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf8-lf.js",
+      "size_bytes": 2651,
+      "sha256": "62d8a303ca46ac332a20718d27b1722516d78491bfd08b62b3a56c3401cb0b59"
+    },
+    {
+      "id": "generated-wsh-js-utf8-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf8-bom-crlf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf8-bom-crlf.js",
+      "size_bytes": 2655,
+      "sha256": "26438d88d73e37d1d7a2ca208a28943ecabd158d5d7d1afc30824d01d7a4d014"
+    },
+    {
+      "id": "generated-wsh-js-utf8-bom-lf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf8-bom-lf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf8-bom-lf.js",
+      "size_bytes": 2654,
+      "sha256": "c525496a16342f8d37f4a24d6355be50ad8ddf5c447e0eece5337f250b762ca0"
+    },
+    {
+      "id": "generated-wsh-js-utf16le-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf16le-bom-crlf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf16le-bom-crlf.js",
+      "size_bytes": 5306,
+      "sha256": "ccc2f757bafa0bf0c15e916ffc14b1c87733ed1b79afa4d0e30bbb845c382f5b"
+    },
+    {
+      "id": "generated-wsh-js-utf16le-bom-lf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf16le-bom-lf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf16le-bom-lf.js",
+      "size_bytes": 5304,
+      "sha256": "36545c94bda37e55d60312709f2feb0bba1ec1eb81b7d7eb2aaf90331985afd6"
+    },
+    {
+      "id": "generated-wsh-js-utf16be-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf16be-bom-crlf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf16be-bom-crlf.js",
+      "size_bytes": 5306,
+      "sha256": "af264bdfe7ba1010d392625065e4497efbb148266be14396d799df564ba759cc"
+    },
+    {
+      "id": "generated-wsh-js-utf16be-bom-lf",
+      "family": "wsh-script",
+      "extension": ".js",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\js\\utf16be-bom-lf.js",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\js\\utf16be-bom-lf.js",
+      "size_bytes": 5304,
+      "sha256": "f8f0bd230a845b7e2b372753302199e47d778582f799054fea16e66be3ad6455"
+    },
+    {
+      "id": "generated-wsh-vbs-utf8-crlf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf8-crlf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf8-crlf.vbs",
+      "size_bytes": 2651,
+      "sha256": "c3dd30e6c61bb746f107ecfe0ac1faadcb3c3f7963949812afc7361022a543ef"
+    },
+    {
+      "id": "generated-wsh-vbs-utf8-lf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf8-lf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf8-lf.vbs",
+      "size_bytes": 2650,
+      "sha256": "45ccbb0b9ae74507d02178bdba359c2223810d73f934cf81ffda48c6347db45c"
+    },
+    {
+      "id": "generated-wsh-vbs-utf8-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf8-bom-crlf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf8-bom-crlf.vbs",
+      "size_bytes": 2654,
+      "sha256": "3037f61a567a83700db72e3acb050041b5d11b997821bb56cd7e6c08a2b83260"
+    },
+    {
+      "id": "generated-wsh-vbs-utf8-bom-lf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf8-bom-lf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf8-bom-lf.vbs",
+      "size_bytes": 2653,
+      "sha256": "acf04dee5699a41acd4d8711df31f321a8d186dea6994b57353d39b828cd8304"
+    },
+    {
+      "id": "generated-wsh-vbs-utf16le-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf16le-bom-crlf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf16le-bom-crlf.vbs",
+      "size_bytes": 5304,
+      "sha256": "bdf0f1651e31ce000c83be77fe1bdee572d6a0dcbabf48ecacaad44d5969aea5"
+    },
+    {
+      "id": "generated-wsh-vbs-utf16le-bom-lf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf16le-bom-lf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf16le-bom-lf.vbs",
+      "size_bytes": 5302,
+      "sha256": "6fb16d24957b3151eb69c7f30cd16f5f2d87b9e9a078a42c285ca3846f428f82"
+    },
+    {
+      "id": "generated-wsh-vbs-utf16be-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf16be-bom-crlf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf16be-bom-crlf.vbs",
+      "size_bytes": 5304,
+      "sha256": "7afff4c949d0859b49062ab79258662217e7eb5bfccc38f8645be99e2a1c5a0a"
+    },
+    {
+      "id": "generated-wsh-vbs-utf16be-bom-lf",
+      "family": "wsh-script",
+      "extension": ".vbs",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\vbs\\utf16be-bom-lf.vbs",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\vbs\\utf16be-bom-lf.vbs",
+      "size_bytes": 5302,
+      "sha256": "8954427b23324c0626af8fc3636a2b1006b0e916c640ab7b9d7b54efeccc26d3"
+    },
+    {
+      "id": "generated-wsh-wsf-utf8-crlf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf8-crlf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf8-crlf.wsf",
+      "size_bytes": 2680,
+      "sha256": "1c34ed0519fa1a3a58a877a1f9a1cd861fb7664625f422a46ab623d447e2caa5"
+    },
+    {
+      "id": "generated-wsh-wsf-utf8-lf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf8-lf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf8-lf.wsf",
+      "size_bytes": 2677,
+      "sha256": "112edf5217292e28bc88a0c08408422814f313c9f58855f1f03fc672df174ff2"
+    },
+    {
+      "id": "generated-wsh-wsf-utf8-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf8-bom-crlf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf8-bom-crlf.wsf",
+      "size_bytes": 2683,
+      "sha256": "c0f55d5852f3901f2c10b5c1797ea3df5fe07cb64205139567cdc656f40078b1"
+    },
+    {
+      "id": "generated-wsh-wsf-utf8-bom-lf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf8-bom-lf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf8-bom-lf.wsf",
+      "size_bytes": 2680,
+      "sha256": "df6d3ffe159d065dc25b35fe3fb829cf370e6db74d12bf95ab91b95e94f4497c"
+    },
+    {
+      "id": "generated-wsh-wsf-utf16le-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf16le-bom-crlf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf16le-bom-crlf.wsf",
+      "size_bytes": 5362,
+      "sha256": "1a0d8d3dee42f5827c19a8dd657d47965c0963489a7cb126d1bd80c1aa7d1422"
+    },
+    {
+      "id": "generated-wsh-wsf-utf16le-bom-lf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf16le-bom-lf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf16le-bom-lf.wsf",
+      "size_bytes": 5356,
+      "sha256": "3f911bdf1ccbee57e2a52adaf410b1a057fa6bbfc1b5e1043082ffc7b48daf50"
+    },
+    {
+      "id": "generated-wsh-wsf-utf16be-bom-crlf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf16be-bom-crlf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf16be-bom-crlf.wsf",
+      "size_bytes": 5362,
+      "sha256": "b40a07362e9384da670d8cabc802e4dc8084d894c3966b2f72c9b06fce83ddc3"
+    },
+    {
+      "id": "generated-wsh-wsf-utf16be-bom-lf",
+      "family": "wsh-script",
+      "extension": ".wsf",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh\\wsf\\utf16be-bom-lf.wsf",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh\\wsf\\utf16be-bom-lf.wsf",
+      "size_bytes": 5356,
+      "sha256": "85585737c775e3951c34386685410a63488f5d49c19cb728edb7ede35f12a0f7"
+    },
+    {
+      "id": "generated-wsh-probe-jse-utf8",
+      "family": "wsh-script",
+      "extension": ".jse",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\jse\\utf8-crlf.jse",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh-probe\\jse\\utf8-crlf.jse",
+      "size_bytes": 2696,
+      "sha256": "b126ee634dac06543fd8c3607312260daad6512d9700e5daf0d2219f51de2add"
+    },
+    {
+      "id": "generated-wsh-probe-jse-utf16le-bom",
+      "family": "wsh-script",
+      "extension": ".jse",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\jse\\utf16le-bom-crlf.jse",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh-probe\\jse\\utf16le-bom-crlf.jse",
+      "size_bytes": 5394,
+      "sha256": "1d0448d4a6e988f88e54941374eba19b5a99efc6354592b7adb9ce6d4dd1f0be"
+    },
+    {
+      "id": "generated-wsh-probe-vbe-utf8",
+      "family": "wsh-script",
+      "extension": ".vbe",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\vbe\\utf8-crlf.vbe",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh-probe\\vbe\\utf8-crlf.vbe",
+      "size_bytes": 2694,
+      "sha256": "fdbe53e8e664860c0bea8b4d0b3a9da0b357ae641fa3365ca99790d240ec9a76"
+    },
+    {
+      "id": "generated-wsh-probe-vbe-utf16le-bom",
+      "family": "wsh-script",
+      "extension": ".vbe",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\vbe\\utf16le-bom-crlf.vbe",
+      "path": "tests\\fixtures\\generated-signed\\scripts\\wsh-probe\\vbe\\utf16le-bom-crlf.vbe",
+      "size_bytes": 5390,
+      "sha256": "43a44231ad7af45e7e5ff68b90189b0562e454fd7c5e3896815b9f0db9e0b2c8"
+    },
+    {
+      "id": "generated-cab-unsigned",
+      "family": "cab",
+      "extension": ".cab",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\cab\\sample.cab",
+      "path": "tests\\fixtures\\generated-signed\\cab\\sample.cab",
+      "size_bytes": 1675,
+      "sha256": "91ac5125d40a6d674478239fdba7f41b40ef3922907270aef9bf3b22702b7097"
+    },
+    {
+      "id": "generated-installer-tiny-msi",
+      "family": "installer",
+      "extension": ".msi",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\installer\\tiny.msi",
+      "path": "tests\\fixtures\\generated-signed\\installer\\tiny.msi",
+      "size_bytes": 32768,
+      "sha256": "5b59488be1516e8499749ff9ff095b502d118bdc734711b2df058258ec107828"
+    },
+    {
+      "id": "generated-installer-tiny-msp",
+      "family": "installer",
+      "extension": ".msp",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\installer\\tiny-patch.msp",
+      "path": "tests\\fixtures\\generated-signed\\installer\\tiny-patch.msp",
+      "size_bytes": 24576,
+      "sha256": "d0b12a069bd813d1c54bc77c4a28806dcbdaa0cdd0c767409f9567b0babd07ca"
+    },
+    {
+      "id": "generated-catalog-sample-cat",
+      "family": "catalog",
+      "extension": ".cat",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\catalog\\sample.cat",
+      "path": "tests\\fixtures\\generated-signed\\catalog\\sample.cat",
+      "size_bytes": 2429,
+      "sha256": "088834822d44df3b493a6515462842df3d2def494fb2d98c0b8cf8e7b45e5774"
+    },
+    {
+      "id": "generated-msix-msix",
+      "family": "msix",
+      "extension": ".msix",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix\\sample.msix",
+      "path": "tests\\fixtures\\generated-signed\\msix\\sample.msix",
+      "size_bytes": 5786,
+      "sha256": "3e12fba8108f4cbbd6d7ba03334130c48f6cd8b70a702dd6334c1a74d79be874"
+    },
+    {
+      "id": "generated-msix-appx",
+      "family": "msix",
+      "extension": ".appx",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix\\sample.appx",
+      "path": "tests\\fixtures\\generated-signed\\msix\\sample.appx",
+      "size_bytes": 5787,
+      "sha256": "989419aede149fff88a1042833bf45a096de8105e2433550e1d4ea28db9231dd"
+    },
+    {
+      "id": "generated-msix-msixbundle",
+      "family": "msix",
+      "extension": ".msixbundle",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix\\sample.msixbundle",
+      "path": "tests\\fixtures\\generated-signed\\msix\\sample.msixbundle",
+      "size_bytes": 8983,
+      "sha256": "8ee4b16a5dd466973e9c0b6b5f8114a77e2ec0c9b871f419e26d58f124916f65"
+    },
+    {
+      "id": "generated-msix-appxbundle",
+      "family": "msix",
+      "extension": ".appxbundle",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix\\sample.appxbundle",
+      "path": "tests\\fixtures\\generated-signed\\msix\\sample.appxbundle",
+      "size_bytes": 8981,
+      "sha256": "5f68a6bb2c19fcca53d42892f3a7dc525ef677a1c23477c6037ab90124306798"
+    },
+    {
+      "id": "generated-wim-esd-tiny-wim",
+      "family": "wim-esd",
+      "extension": ".wim",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\tiny.wim",
+      "path": "tests\\fixtures\\generated-signed\\wim-esd\\tiny.wim",
+      "size_bytes": 3098,
+      "sha256": "a5fc246591c1935b6f1863e213c12138eea1ff58bf7cb4a559f9d598df5a7619"
+    },
+    {
+      "id": "generated-wim-esd-tiny-esd",
+      "family": "wim-esd",
+      "extension": ".esd",
+      "state": "signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\tiny.esd",
+      "path": "tests\\fixtures\\generated-signed\\wim-esd\\tiny.esd",
+      "size_bytes": 3104,
+      "sha256": "0e0eb8568e2174156c29b6ba8ba33ddb6b7f4f27dea1c20431d77b8f496ef731"
+    },
+    {
+      "id": "generated-p7x-appxsignature-from-msix",
+      "family": "p7x",
+      "extension": ".p7x",
+      "state": "package-signature-extracted",
+      "source_path": "tests\\fixtures\\generated-signed\\msix\\sample.msix",
+      "path": "tests\\fixtures\\generated-signed\\p7x\\appxsignature-from-sample-msix.p7x",
+      "size_bytes": 1667,
+      "sha256": "fb51aa8ae8b6de047c8a17e076a600d0f2bfba9c14fc62c2a47b21cedda5aa65"
+    },
+    {
+      "id": "generated-appinstaller-sample-detached-pkcs7",
+      "family": "appinstaller",
+      "extension": ".p7",
+      "state": "detached-signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\appinstaller\\sample.appinstaller",
+      "path": "tests\\fixtures\\generated-signed\\appinstaller\\sample.appinstaller.p7",
+      "size_bytes": 1324,
+      "sha256": "df8a54cf29afe9cd3ab26b9c8325378289c4451be4aead84edc18eab320ee49e"
+    },
+    {
+      "id": "generated-detached-content-bin",
+      "family": "detached-pkcs7",
+      "extension": ".bin",
+      "state": "detached-signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\detached\\content.bin",
+      "path": "tests\\fixtures\\generated-signed\\detached\\content\\content.bin.p7",
+      "size_bytes": 1324,
+      "sha256": "40f9b5e1560839b4503ed07c375fe54068e99980a24af7abf3ef570038b210f0"
+    },
+    {
+      "id": "generated-detached-content-txt-utf8",
+      "family": "detached-pkcs7",
+      "extension": ".txt",
+      "state": "detached-signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\detached\\content-utf8.txt",
+      "path": "tests\\fixtures\\generated-signed\\detached\\content-utf8\\content-utf8.txt.p7",
+      "size_bytes": 1324,
+      "sha256": "5fc5346b47ab1afa1199ed8e6792e1deee32846479ed847694a0008b1cd9864c"
+    },
+    {
+      "id": "generated-detached-content-txt-utf16le-bom",
+      "family": "detached-pkcs7",
+      "extension": ".txt",
+      "state": "detached-signed",
+      "source_path": "tests\\fixtures\\generated-unsigned\\detached\\content-utf16le-bom.txt",
+      "path": "tests\\fixtures\\generated-signed\\detached\\content-utf16le-bom\\content-utf16le-bom.txt.p7",
+      "size_bytes": 1324,
+      "sha256": "8669b2f07aee0e66ac1538b40d1aed36486a7c34e603c2b8694d5aa9a67648bc"
+    }
+  ],
+  "skipped": [
+    {
+      "id": "generated-negative-not-pe-exe",
+      "family": "pe",
+      "extension": ".exe",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\negative\\not-pe.exe"
+    },
+    {
+      "id": "generated-powershell-ps1-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf16be-bom-crlf.ps1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-ps1-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1\\utf16be-bom-lf.ps1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psd1-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf16be-bom-crlf.psd1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psd1-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psd1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psd1\\utf16be-bom-lf.psd1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psm1-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf16be-bom-crlf.psm1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psm1-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psm1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psm1\\utf16be-bom-lf.psm1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf16be-bom-crlf.ps1xml",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-ps1xml-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".ps1xml",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\ps1xml\\utf16be-bom-lf.ps1xml",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psc1-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf16be-bom-crlf.psc1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-psc1-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".psc1",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\psc1\\utf16be-bom-lf.psc1",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-cdxml-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf16be-bom-crlf.cdxml",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-cdxml-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".cdxml",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\cdxml\\utf16be-bom-lf.cdxml",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-mof-utf16be-bom-crlf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf16be-bom-crlf.mof",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-powershell-mof-utf16be-bom-lf",
+      "family": "powershell-script",
+      "extension": ".mof",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\powershell\\mof\\utf16be-bom-lf.mof",
+      "message": "Done Adding Additional Store\nError information: \"Error: SignerSign() failed.\" (-2147024883/0x8007000d)\nSignTool Error: An unexpected internal error has occurred."
+    },
+    {
+      "id": "generated-wsh-probe-wsc-utf8",
+      "family": "wsh-script",
+      "extension": ".wsc",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\wsc\\utf8-crlf.wsc"
+    },
+    {
+      "id": "generated-wsh-probe-wsc-utf16le-bom",
+      "family": "wsh-script",
+      "extension": ".wsc",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\scripts\\wsh-probe\\wsc\\utf16le-bom-crlf.wsc"
+    },
+    {
+      "id": "generated-installer-tiny-mst",
+      "family": "installer",
+      "extension": ".mst",
+      "state": "signed-native-pa-verify-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\installer\\tiny-transform.mst",
+      "path": "tests\\fixtures\\generated-signed\\installer\\tiny-transform.mst",
+      "size_bytes": 20480,
+      "sha256": "3626d3f91744496841ec2fb12d2c485c6a4595485292185d07892082c2312a43",
+      "message": "File: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\installer\\tiny-transform.mst\nIndex  Algorithm  Timestamp    \n========================================\n\nSignTool Error: WinVerifyTrust returned error: 0x80096010\nNumber of errors: 1\n\n\n\tThe digital signature of the object did not verify.\n"
+    },
+    {
+      "id": "generated-catalog-member-sys",
+      "family": "catalog-member",
+      "extension": ".sys",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\catalog\\member.sys"
+    },
+    {
+      "id": "generated-encrypted-negative-eappx",
+      "family": "msix",
+      "extension": ".eappx",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix-encrypted-negative\\placeholder.eappx"
+    },
+    {
+      "id": "generated-encrypted-negative-eappxbundle",
+      "family": "msix",
+      "extension": ".eappxbundle",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix-encrypted-negative\\placeholder.eappxbundle"
+    },
+    {
+      "id": "generated-encrypted-negative-emsix",
+      "family": "msix",
+      "extension": ".emsix",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix-encrypted-negative\\placeholder.emsix"
+    },
+    {
+      "id": "generated-encrypted-negative-emsixbundle",
+      "family": "msix",
+      "extension": ".emsixbundle",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\msix-encrypted-negative\\placeholder.emsixbundle"
+    },
+    {
+      "id": "generated-wim-esd-bad-magic-wim",
+      "family": "wim-esd",
+      "extension": ".wim",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\bad-magic.wim"
+    },
+    {
+      "id": "generated-wim-esd-unsigned-header-wim",
+      "family": "wim-esd",
+      "extension": ".wim",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\unsigned-header.wim"
+    },
+    {
+      "id": "generated-wim-esd-bad-magic-esd",
+      "family": "wim-esd",
+      "extension": ".esd",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\bad-magic.esd"
+    },
+    {
+      "id": "generated-wim-esd-unsigned-header-esd",
+      "family": "wim-esd",
+      "extension": ".esd",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\wim-esd\\unsigned-header.esd"
+    },
+    {
+      "id": "generated-detached-placeholder-p7",
+      "family": "detached-pkcs7",
+      "extension": ".p7",
+      "state": "skipped",
+      "source_path": "tests\\fixtures\\generated-unsigned\\detached\\signature-placeholder.p7"
+    },
+    {
+      "id": "generated-p7x-sample",
+      "family": "p7x",
+      "extension": ".p7x",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\p7x\\sample.p7x",
+      "message": "Done Adding Additional Store\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\p7x\\sample.p7x\n\nNumber of errors: 1\n"
+    },
+    {
+      "id": "generated-appinstaller-sample",
+      "family": "appinstaller",
+      "extension": ".appinstaller",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\appinstaller\\sample.appinstaller",
+      "message": "Done Adding Additional Store\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\appinstaller\\sample.appinstaller\n\nNumber of errors: 1\n"
+    },
+    {
+      "id": "generated-optional-provider-vsix",
+      "family": "optional-provider",
+      "extension": ".vsix",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.vsix",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.vsix\n"
+    },
+    {
+      "id": "generated-optional-provider-vsto",
+      "family": "optional-provider",
+      "extension": ".vsto",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.vsto",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.vsto\n"
+    },
+    {
+      "id": "generated-optional-provider-application",
+      "family": "optional-provider",
+      "extension": ".application",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.application",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.application\n"
+    },
+    {
+      "id": "generated-optional-provider-deploy",
+      "family": "optional-provider",
+      "extension": ".deploy",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.deploy",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.deploy\n"
+    },
+    {
+      "id": "generated-optional-provider-manifest",
+      "family": "optional-provider",
+      "extension": ".manifest",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.manifest",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.manifest\n"
+    },
+    {
+      "id": "generated-optional-provider-docm",
+      "family": "optional-provider",
+      "extension": ".docm",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.docm",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.docm\n"
+    },
+    {
+      "id": "generated-optional-provider-xlsm",
+      "family": "optional-provider",
+      "extension": ".xlsm",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.xlsm",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.xlsm\n"
+    },
+    {
+      "id": "generated-optional-provider-pptm",
+      "family": "optional-provider",
+      "extension": ".pptm",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.pptm",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.pptm\n"
+    },
+    {
+      "id": "generated-optional-provider-xlam",
+      "family": "optional-provider",
+      "extension": ".xlam",
+      "state": "native-sign-rejected",
+      "source_path": "tests\\fixtures\\generated-unsigned\\optional-provider\\probe.xlam",
+      "message": "Done Adding Additional Store\n\nNumber of errors: 1\n\nSignTool Error: This file format cannot be signed because it is not recognized.\nSignTool Error: An error occurred while attempting to sign: C:\\Users\\mamoreau\\.copilot\\copilot-worktrees\\psign\\mamoreau-devolutions-reimagined-umbrella\\tests\\fixtures\\generated-signed\\optional-provider\\probe.xlam\n"
+    }
+  ],
+  "failed": []
+}

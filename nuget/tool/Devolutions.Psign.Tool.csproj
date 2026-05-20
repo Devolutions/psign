@@ -1,0 +1,80 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>psign-tool</ToolCommandName>
+    <PackageId>Devolutions.Psign.Tool</PackageId>
+
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <Authors>Devolutions</Authors>
+    <Description>RID-specific dotnet tool wrapper around prebuilt psign-tool native executables.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Devolutions/psign</PackageProjectUrl>
+    <PackageTags>authenticode;signtool;code-signing;dotnet-tool</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/Devolutions/psign</RepositoryUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+
+    <NoPackageAnalysis>true</NoPackageAnalysis>
+    <ToolPackageRuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64;any</ToolPackageRuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64;any</RuntimeIdentifiers>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PsignNugetStagingDir Condition="'$(PsignNugetStagingDir)' == ''">$(MSBuildProjectDirectory)\..\staging</PsignNugetStagingDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="README.md" />
+
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\win-x64\psign-tool.exe"
+          Pack="true"
+          PackagePath="tools\net10.0\win-x64\psign-tool.exe"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\win-x64\psign-tool.exe')" />
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\win-arm64\psign-tool.exe"
+          Pack="true"
+          PackagePath="tools\net10.0\win-arm64\psign-tool.exe"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'win-arm64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\win-arm64\psign-tool.exe')" />
+
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\linux-x64\psign-tool"
+          Pack="true"
+          PackagePath="tools\net10.0\linux-x64"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'linux-x64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\linux-x64\psign-tool')" />
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\linux-arm64\psign-tool"
+          Pack="true"
+          PackagePath="tools\net10.0\linux-arm64"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'linux-arm64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\linux-arm64\psign-tool')" />
+
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\osx-x64\psign-tool"
+          Pack="true"
+          PackagePath="tools\net10.0\osx-x64"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'osx-x64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\osx-x64\psign-tool')" />
+    <None Include="$(PsignNugetStagingDir)\tools\psign-tool\osx-arm64\psign-tool"
+          Pack="true"
+          PackagePath="tools\net10.0\osx-arm64"
+          Visible="false"
+          Condition="'$(RuntimeIdentifier)' == 'osx-arm64' and Exists('$(PsignNugetStagingDir)\tools\psign-tool\osx-arm64\psign-tool')" />
+  </ItemGroup>
+
+  <Target Name="ValidatePsignToolStaging"
+          BeforeTargets="GenerateNuspec"
+          Condition="'$(RuntimeIdentifier)' != '' and '$(RuntimeIdentifier)' != 'any'">
+    <PropertyGroup>
+      <_PsignToolBinaryPath>$(PsignNugetStagingDir)\tools\psign-tool\$(RuntimeIdentifier)\psign-tool</_PsignToolBinaryPath>
+      <_PsignToolBinaryPath Condition="'$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == 'win-arm64'">$(PsignNugetStagingDir)\tools\psign-tool\$(RuntimeIdentifier)\psign-tool.exe</_PsignToolBinaryPath>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(_PsignToolBinaryPath)')"
+           Text="Missing staged binary for RuntimeIdentifier '$(RuntimeIdentifier)': $(_PsignToolBinaryPath)" />
+  </Target>
+</Project>

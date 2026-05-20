@@ -1,0 +1,98 @@
+name: rust-sip-parity
+
+# Portable SIP digest parity: Windows fixture/script smoke plus Linux gates for CMS §5.4 RS256
+# prehash ↔ PKCS#1 signature (Azure KV `keys/sign` contract toward psign-tool portable signing).
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+  schedule:
+    - cron: "15 7 * * 0"
+
+jobs:
+  portable-cms-rs256-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: CMS authenticated-attribute RS256 prehash vs embedded signature (library)
+        run: cargo test -p psign-sip-digest --lib rsa_pkcs1v15_signed_attrs_verify --locked
+
+      - name: RS256 prehash CLI (PE + extracted PKCS#7, tiny32 + tiny64)
+        run: cargo test -p psign --test cli_pe_digest --locked signer_rs256_prehash
+
+      - name: CAB RS256 prehash + extract (signed fixture + unsigned errors)
+        run: cargo test -p psign --test cli_pe_digest --locked cab_rs256_
+
+      - name: "CAB RS256 prehash helper (library: signed fixture + unsigned rejection)"
+        run: cargo test -p psign-sip-digest --lib cab_rsa_sha256_signer_prehash --locked
+
+      - name: MSI PKCS#7 extract + RS256 prehash CLI (OLE stub vs PE parity)
+        run: cargo test -p psign --test cli_pe_digest --locked msi_rs256_
+
+      - name: MSI PKCS#7 + RS256 helper (library)
+        run: cargo test -p psign-sip-digest --lib msi_pkcs7_ --locked
+
+      - name: Catalog RS256 prehash CLI (PE PKCS#7 as .cat fixture)
+        run: cargo test -p psign --test cli_pe_digest --locked cat_rs256_
+
+      - name: Catalog RS256 helper (library)
+        run: cargo test -p psign-sip-digest --lib catalog_rsa_sha256_signer_prehash --locked
+
+      - name: WIM/ESD digest negative paths (library)
+        run: cargo test -p psign-sip-digest --lib wim_verify_rejects --locked
+
+      - name: Script digest unsigned paths (PowerShell + WSH library)
+        run: cargo test -p psign-sip-digest --lib _unsigned_errors_ --locked
+
+      - name: Portable verify-negative CLI (PE/ESD/MSIX/script/CAB/trust)
+        run: cargo test -p psign --test cli_pe_digest --locked portable_verify_negative_
+
+      - name: Inspect PKCS#7 parity (PE vs extracted blob, CLI vs library)
+        run: cargo test -p psign --test cli_pe_digest --locked inspect_pkcs7_parity_
+
+      - name: Detached PKCS#7 trust (library; tiny32 anchors + digest mismatch)
+        run: cargo test -p psign-authenticode-trust --lib detached_trust_ --locked
+
+      - name: RFC3161 TimeStampReq/Resp + timestamp policy (library + CLI)
+        run: |
+          cargo test -p psign-sip-digest --lib timestamp:: --locked
+          cargo test -p psign-authenticode-trust --lib tiny32_upstream --locked
+          cargo test -p psign-authenticode-trust --lib tiny64_upstream_pe_pkcs7_pkcs9_signing_time_extracts --locked
+          cargo test -p psign-authenticode-trust --lib tiny64_upstream_bare_signed --locked
+          cargo test -p psign-authenticode-trust --lib nested_tstinfo --locked
+          cargo test -p psign-authenticode-trust --lib time_rejects --locked
+          cargo test -p psign-authenticode-trust --lib resolve_verification_ --locked
+          cargo test -p psign --test cli_pe_digest --locked trust_verify_pe_ok_require_valid_timestamp_pkcs9_signing_time_on_tiny32
+          cargo test -p psign --test cli_pe_digest --locked trust_verify_pe_ok_require_valid_timestamp_pkcs9_signing_time_on_tiny64
+          cargo test -p psign --test cli_pe_digest --locked portable_rfc3161_timestamp
+
+      - name: Build psign-tool portable (timestamp-http feature, compile-only)
+        run: cargo build -p psign --bin psign-tool --features timestamp-http --locked
+
+      - name: "Artifact Signing REST (library + mock :sign LRO)"
+        run: cargo test -p psign-codesigning-rest --locked
+
+      - name: Azure Key Vault REST helpers (library unit tests)
+        run: cargo test -p psign-azure-kv-rest --lib --locked
+
+  rust-sip-golden:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: SIP digest crate (full portable lib tests)
+        run: cargo test -p psign-sip-digest --lib --locked
+
+      - name: Portable digest CLI (PE fixtures)
+        run: cargo test -p psign --test cli_pe_digest --locked
+
+      - name: Optional signing parity (machine env)
+        shell: pwsh
+        run: ./scripts/rust-sip-parity-pe.ps1 -WorkspaceRoot "${{ github.workspace }}"

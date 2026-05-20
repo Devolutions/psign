@@ -1,0 +1,64 @@
+name: ci-unix
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fmt-and-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable (rustfmt, clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: Cargo.lock consistency
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: clippy (portable digest + trust + Azure REST crates)
+        run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
+
+      - name: clippy (digest-cli with artifact-signing-rest)
+        run: cargo clippy -p psign-digest-cli --all-targets --features artifact-signing-rest --locked -- -D warnings
+
+      - name: clippy (digest-cli with azure-kv-sign-portable)
+        run: cargo clippy -p psign-digest-cli --all-targets --features azure-kv-sign-portable --locked -- -D warnings
+
+      - name: clippy (digest-cli with timestamp-http)
+        run: cargo clippy -p psign-digest-cli --all-targets --features timestamp-http --locked -- -D warnings
+
+      - name: clippy (psign portable lib)
+        run: cargo clippy -p psign --lib --locked -- -D warnings
+
+      - name: SIP digest crate tests (no Win32)
+        run: cargo test -p psign-sip-digest --lib --locked
+
+      - name: Authenticode trust crate tests (no Win32)
+        run: cargo test -p psign-authenticode-trust --lib --locked
+
+      - name: Codesigning REST crate tests (no Win32)
+        run: cargo test -p psign-codesigning-rest --locked
+
+      - name: Azure KV REST crate tests (no Win32)
+        run: cargo test -p psign-azure-kv-rest --locked
+
+      - name: Portable digest CLI (integration smoke)
+        run: cargo test -p psign --test cli_pe_digest --locked
+
+      - name: Portable digest CLI (artifact-signing-rest subcommand)
+        run: cargo test -p psign --test cli_pe_digest --features artifact-signing-rest --locked
+
+      - name: Portable digest CLI (azure-kv-sign-portable subcommand)
+        run: cargo test -p psign --test cli_pe_digest --features azure-kv-sign --locked
+
+      - name: Check psign stub binary + portable lib
+        run: cargo check -p psign --bins --lib --locked
+
+      - name: Portable lib unit tests (native argv / response files)
+        run: cargo test -p psign --lib --locked

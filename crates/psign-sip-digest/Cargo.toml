@@ -1,0 +1,30 @@
+[package]
+name = "psign-sip-digest"
+version = "0.1.0"
+edition = "2024"
+description = "Portable Authenticode SIP digest recomputation (PE, CAB, MSI, MSIX, scripts, …) without Win32"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+sha2 = "0.10"
+sha1 = { version = "0.10", default-features = false }
+digest = "0.10"
+object = { version = "0.37", default-features = false, features = ["pe", "read_core", "unaligned", "std"] }
+authenticode = { version = "0.5.0", features = ["std", "object"] }
+cms = { version = "0.2.3", features = ["builder"] }
+x509-cert = { version = "0.2.5", default-features = false, features = ["pem"] }
+der = { version = "0.7", features = ["derive"] }
+base64 = "0.22"
+cfb = "0.14"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.38"
+# PKCS#1 v1.5 **RS256** prehash verification (Azure KV `keys/sign` / `signtool` parity) + CMS trust fallback.
+rsa = { version = "0.9.10", default-features = true, features = ["sha2"] }
+
+[[bin]]
+name = "psign-gen-msi-signature-stub"
+path = "src/bin/gen_msi_sig_stub.rs"
+
+[dev-dependencies]

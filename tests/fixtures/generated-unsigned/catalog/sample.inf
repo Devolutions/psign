@@ -1,0 +1,33 @@
+[Version]
+Signature="$Windows NT$"
+Class=Sample
+ClassGuid={78A1C341-4539-11d3-B88D-00C04FAD5171}
+Provider=%ProviderName%
+CatalogFile=sample.cat
+DriverVer=01/01/2024,1.0.0.0
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64
+
+[Models.NTamd64]
+%DeviceName%=Install, ROOT\PSIGNCAT
+
+[Install]
+CopyFiles=Files
+
+[Files]
+member.sys
+
+[DestinationDirs]
+Files=12
+
+[SourceDisksNames]
+1=%DiskName%,,,.
+
+[SourceDisksFiles]
+member.sys=1
+
+[Strings]
+ProviderName="Devolutions"
+DeviceName="Psign Catalog Test Device"
+DiskName="Psign Catalog Test Disk"

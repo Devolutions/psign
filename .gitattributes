@@ -1,0 +1,31 @@
+# Fixture bytes are test inputs; do not let Git normalize line endings or encodings.
+tests/fixtures/*.js -text
+tests/fixtures/*.ps1 -text
+tests/fixtures/*.psd1 -text
+tests/fixtures/*.psm1 -text
+tests/fixtures/*.vbs -text
+tests/fixtures/*.wsf -text
+tests/fixtures/generated-unsigned/** -text
+tests/fixtures/generated-signed/** -text
+tests/fixtures/rdp/** -text -diff
+
+# Binary Authenticode fixtures.
+tests/fixtures/**/*.appx binary
+tests/fixtures/**/*.appxbundle binary
+tests/fixtures/**/*.cab binary
+tests/fixtures/**/*.cat binary
+tests/fixtures/**/*.crt binary
+tests/fixtures/**/*.der binary
+tests/fixtures/**/*.dll binary
+tests/fixtures/**/*.efi binary
+tests/fixtures/**/*.exe binary
+tests/fixtures/**/*.msix binary
+tests/fixtures/**/*.msixbundle binary
+tests/fixtures/**/*.msi binary
+tests/fixtures/**/*.msp binary
+tests/fixtures/**/*.mst binary
+tests/fixtures/**/*.ocx binary
+tests/fixtures/**/*.p7 binary
+tests/fixtures/**/*.pfx binary
+tests/fixtures/**/*.sys binary
+tests/fixtures/**/*.winmd binary

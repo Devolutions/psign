@@ -1,0 +1,154 @@
+name: windows
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  build-and-test:
+    # windows-2022: stable VS2022 + Kits; avoids windows-2025 → windows-2025-vs2026 redirect notices on latest.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Unit tests (workspace libs + bins)
+        run: cargo test --workspace --lib --bins
+
+      - name: Portable digest CLI integration test
+        run: cargo test -p psign --test cli_pe_digest --locked
+
+      - name: Cross-CLI parity (portable verify-pe vs Windows rust-sip PE digest routine)
+        run: cargo test -p psign --test cross_cli_windows --locked
+
+      - name: Generate dependency artifacts
+        shell: pwsh
+        run: |
+          function Test-SigntoolPath([string]$Path) {
+            if ($Path -and (Test-Path -LiteralPath $Path)) { return $Path }
+            return $null
+          }
+
+          function Find-SigntoolFast {
+            if ($env:SIGNTOOL_EXE) {
+              $p = Test-SigntoolPath $env:SIGNTOOL_EXE
+              if ($p) { return @{ Path = $p; Via = 'SIGNTOOL_EXE' } }
+            }
+            $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
+            if ($cmd) { return @{ Path = $cmd.Source; Via = 'PATH' } }
+
+            $kitRoots = @(
+              (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"),
+              (Join-Path $env:ProgramFiles "Windows Kits\10\bin")
+            )
+            foreach ($root in $kitRoots) {
+              if (-not (Test-Path -LiteralPath $root)) { continue }
+              $verDirs = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+\.\d+' } |
+                Sort-Object @{ Expression = { try { [version]$_.Name } catch { [version]'0.0.0' } } } -Descending
+              foreach ($ver in $verDirs) {
+                foreach ($arch in @('x64', 'amd64', 'arm64', 'x86')) {
+                  $candidate = Join-Path $ver.FullName (Join-Path $arch 'signtool.exe')
+                  $p = Test-SigntoolPath $candidate
+                  if ($p) { return @{ Path = $p; Via = "Windows Kits ($($ver.Name)\$arch)" } }
+                }
+              }
+            }
+            return $null
+          }
+
+          function Find-SigntoolDeep {
+            param([string]$Root)
+            if (-not (Test-Path -LiteralPath $Root)) { return $null }
+            $hit = Get-ChildItem -Path $Root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\x64\\|\\amd64\\' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+            return $null
+          }
+
+          $enteredVsDevShell = $false
+          $found = Find-SigntoolFast
+          if ($found) {
+            Write-Host "signtool.exe via $($found.Via): $($found.Path)"
+          }
+
+          if (-not $found) {
+            Write-Host "signtool.exe not on PATH or under common Windows Kits layouts; trying VsDevShell (https://github.com/awakecoding/VsDevShell)..."
+            try {
+              Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+              Install-Module VsDevShell -Scope CurrentUser -Force -Confirm:$false
+              Import-Module VsDevShell
+              Enter-VsDevShell -Arch x64 -HostArch x64
+              $enteredVsDevShell = $true
+              $found = Find-SigntoolFast
+              if ($found) { Write-Host "signtool.exe after VsDevShell ($($found.Via)): $($found.Path)" }
+            } catch {
+              Write-Warning "VsDevShell failed (non-fatal): $($_.Exception.Message)"
+            }
+          }
+
+          if (-not $found) {
+            $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+            $deep = Find-SigntoolDeep -Root $kits
+            if ($deep) {
+              $found = @{ Path = $deep; Via = 'deep search under Windows Kits' }
+              Write-Host "signtool.exe via $($found.Via): $($found.Path)"
+            }
+          }
+
+          if (-not $found) {
+            Write-Warning "signtool.exe not found; skipping psign-depgraph."
+            exit 0
+          }
+
+          if ($enteredVsDevShell) {
+            try {
+              Export-VsDevEnv -Arch x64 -HostArch x64 -Path $env:GITHUB_ENV -Mode Update -PathMode GitHubPath
+              Write-Host "Exported VsDevEnv to GITHUB_ENV for later workflow steps (native parity scripts)."
+            } catch {
+              Write-Warning "Export-VsDevEnv for GITHUB_ENV failed (non-fatal): $($_.Exception.Message)"
+            }
+          }
+
+          cargo run -p psign --bin psign-depgraph -- --signtool "$($found.Path)"
+
+      - name: Exhaustive native ↔ Rust parity (Devolutions test PKI)
+        shell: pwsh
+        run: ./scripts/ci/run-exhaustive-parity-ci.ps1 -WorkspaceRoot "${{ github.workspace }}"
+
+      - name: Validate parity artifacts
+        shell: pwsh
+        run: |
+          $ws = "${{ github.workspace }}"
+          $parityPath = Join-Path $ws "parity-output\parity-report.json"
+          $msixPath = Join-Path $ws "parity-output\msix-parity-sign-report.json"
+          $parity = Get-Content -LiteralPath $parityPath | ConvertFrom-Json
+          if ($parity.missingScenarioCount -ne 0) {
+            throw "Missing scenarios: $($parity.missingScenarioIds -join ', ')"
+          }
+          if ($parity.semanticMismatchCount -ne 0) {
+            throw "Semantic mismatches in parity report."
+          }
+          $msix = Get-Content -LiteralPath $msixPath | ConvertFrom-Json
+          if ($msix.classification -eq "semantic_mismatch") {
+            throw "MSIX parity semantic mismatch."
+          }
+
+      - name: Upload parity-output artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: parity-output-artifacts
+          path: parity-output/*.json
