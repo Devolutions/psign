@@ -237,6 +237,8 @@ fn digest_oid(d: DigestAlgorithm) -> &'static str {
     }
 }
 
+const SPC_DIGEST_SIGN_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x800);
+
 /// Path to `Azure.CodeSigning.Dlib.dll` under an extracted **Microsoft.ArtifactSigning.Client**-style layout.
 pub(crate) fn artifact_signing_dlib_path(root: &std::path::Path) -> std::path::PathBuf {
     let arch = if cfg!(target_pointer_width = "64") {
@@ -949,6 +951,9 @@ pub(crate) fn authenticode_sign_embedded(
     let mut flags = SIGNER_SIGN_FLAGS(0);
     if args.append_signature {
         flags |= SIG_APPEND;
+    }
+    if digest_ptr.is_some() {
+        flags |= SPC_DIGEST_SIGN_FLAG;
     }
 
     let mut signer_context: *mut SIGNER_CONTEXT = std::ptr::null_mut();
