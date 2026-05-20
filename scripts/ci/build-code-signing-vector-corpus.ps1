@@ -50,6 +50,21 @@ function Convert-ToManifestPath {
     return $Path
 }
 
+function Convert-ToManifestMessage {
+    param([string]$Message)
+    if (-not $Message) { return $Message }
+
+    $normalized = $Message
+    foreach ($path in @($SignedDir, $UnsignedDir, $WorkspaceRoot)) {
+        if (-not $path) { continue }
+        $absolute = (Resolve-Path -LiteralPath $path).Path
+        $relative = Convert-ToManifestPath -Path (Resolve-Path -LiteralPath $absolute -Relative)
+        if ($relative -eq "") { $relative = "." }
+        $normalized = $normalized.Replace($absolute, $relative)
+    }
+    return $normalized
+}
+
 if (-not $SignToolPath) {
     $SignToolPath = Resolve-File -Name "signtool.exe" -Candidates @(
         (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"),
@@ -111,7 +126,7 @@ function Add-ReportEntry {
         $entry.size_bytes = $file.Length
         $entry.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
     }
-    if ($Message) { $entry.message = $Message }
+    if ($Message) { $entry.message = Convert-ToManifestMessage -Message $Message }
     $List.Add($entry)
 }
 
