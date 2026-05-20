@@ -237,6 +237,35 @@ fn digest_oid(d: DigestAlgorithm) -> &'static str {
     }
 }
 
+const SPC_DIGEST_SIGN_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x400);
+const SPC_DIGEST_SIGN_EX_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x4000);
+
+pub(crate) struct DigestSignInfoParam {
+    ptr: *const SIGNER_DIGEST_SIGN_INFO,
+    flags: SIGNER_SIGN_FLAGS,
+}
+
+impl DigestSignInfoParam {
+    pub(crate) fn basic<T>(info: *const T) -> Self {
+        Self {
+            ptr: info.cast(),
+            flags: SPC_DIGEST_SIGN_FLAG,
+        }
+    }
+
+    fn from_windows_digest_info(info: &SIGNER_DIGEST_SIGN_INFO) -> Self {
+        let flags = if info.dwDigestSignChoice >= 3 {
+            SPC_DIGEST_SIGN_EX_FLAG
+        } else {
+            SPC_DIGEST_SIGN_FLAG
+        };
+        Self {
+            ptr: std::ptr::addr_of!(*info),
+            flags,
+        }
+    }
+}
+
 /// Path to `Azure.CodeSigning.Dlib.dll` under an extracted **Microsoft.ArtifactSigning.Client**-style layout.
 pub(crate) fn artifact_signing_dlib_path(root: &std::path::Path) -> std::path::PathBuf {
     let arch = if cfg!(target_pointer_width = "64") {
@@ -856,7 +885,7 @@ pub(crate) fn authenticode_sign_embedded(
     cert: &CertContext,
     resolved_digest: DigestAlgorithm,
     provider_ptr: Option<*const SIGNER_PROVIDER_INFO>,
-    digest_ptr: Option<*const SIGNER_DIGEST_SIGN_INFO>,
+    digest_info: Option<DigestSignInfoParam>,
     mode_report: &'static str,
     store_report_name: &str,
     free_library_target: Option<HMODULE>,
@@ -949,6 +978,18 @@ pub(crate) fn authenticode_sign_embedded(
     let mut flags = SIGNER_SIGN_FLAGS(0);
     if args.append_signature {
         flags |= SIG_APPEND;
+    }
+    let digest_ptr = digest_info.map(|d| {
+        flags |= d.flags;
+        d.ptr
+    });
+    if let Some(digest_ptr) = digest_ptr
+        && global.debug
+    {
+        eprintln!(
+            "[psign debug] SignerSignEx3 digest sign flags=0x{:x} ptr={digest_ptr:p}",
+            flags.0
+        );
     }
 
     let mut signer_context: *mut SIGNER_CONTEXT = std::ptr::null_mut();
@@ -1208,9 +1249,9 @@ pub fn sign_with_mssign32(
             .ok_or_else(|| anyhow!("internal error: decoupled mode without --dmdf"))?;
         decoupled_runtime = Some(load_decoupled_digest_info(&dlib, dmdf)?);
     }
-    let digest_ptr = decoupled_runtime
-        .as_ref()
-        .map(|(_, digest_info, _, _, _)| digest_info as *const SIGNER_DIGEST_SIGN_INFO);
+    let digest_param = decoupled_runtime.as_ref().map(|(_, digest_info, _, _, _)| {
+        DigestSignInfoParam::from_windows_digest_info(digest_info)
+    });
     let free_library_target = decoupled_runtime.as_ref().map(|(m, _, _, _, _)| *m);
     let decoupled_report = decoupled_runtime
         .as_ref()
@@ -1224,7 +1265,7 @@ pub fn sign_with_mssign32(
         &cert,
         resolved_digest,
         provider_ptr,
-        digest_ptr,
+        digest_param,
         if decoupled {
             "decoupled-rust-core"
         } else {

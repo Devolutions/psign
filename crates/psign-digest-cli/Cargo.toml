@@ -1,6 +1,6 @@
 [package]
 name = "psign-digest-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Linux/macOS-friendly CLI over portable Authenticode SIP digests (psign-sip-digest)"
 license.workspace = true
@@ -11,7 +11,7 @@ autobins = false
 default = []
 ## Azure Code Signing `:sign` LRO on Linux/macOS (same API as `psign-tool artifact-signing-submit`).
 artifact-signing-rest = ["dep:psign-codesigning-rest"]
-## Azure Key Vault `keys/sign` on Linux/macOS (digest file → signature bytes / base64); embedding still requires Windows.
+## Azure Key Vault `keys/sign` on Linux/macOS (digest file → signature bytes / base64, plus portable PE signing).
 azure-kv-sign-portable = ["dep:psign-azure-kv-rest", "dep:base64", "dep:reqwest"]
 ## RFC 3161 TSA HTTP POST (`rfc3161-timestamp-http-post`) using Rustls (same optional `reqwest` crate as KV portable).
 timestamp-http = ["dep:reqwest"]
@@ -32,6 +32,8 @@ psign-codesigning-rest = { path = "../psign-codesigning-rest", optional = true }
 psign-azure-kv-rest = { path = "../psign-azure-kv-rest", optional = true }
 base64 = { version = "0.22", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+sha1 = "0.10"
+sha2 = "0.10"
 
 [dev-dependencies]
 assert_cmd = "2"

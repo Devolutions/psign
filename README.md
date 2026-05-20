@@ -28,28 +28,44 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 cargo build
 ```
 
-At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package / REST crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Optional Cargo features: **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**), **`timestamp-http`** (portable RFC3161 HTTP POST), and **`timestamp-server`** (local RFC3161 test server).
+At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package / REST crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Default Cargo features include **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**), **`timestamp-http`** (portable RFC3161 HTTP POST), and **`timestamp-server`** (local RFC3161 test server); use **`--no-default-features`** for a minimal build.
 
-## Dotnet tool package (.NET 10+)
+## Dotnet tool package from NuGet.org (.NET 10+)
 
-`psign-tool` can be distributed as a RID-specific dotnet tool package:
+`psign-tool` is published as the RID-specific
+[`Devolutions.Psign.Tool`](https://www.nuget.org/packages/Devolutions.Psign.Tool)
+dotnet tool package:
 
 ```powershell
 dotnet tool install -g Devolutions.Psign.Tool
 psign-tool --help
 ```
 
-One-shot execution:
+Update an existing global install:
+
+```powershell
+dotnet tool update -g Devolutions.Psign.Tool
+```
+
+One-shot execution from NuGet.org:
 
 ```powershell
 dotnet tool exec Devolutions.Psign.Tool -- --help
 dnx Devolutions.Psign.Tool --help
 ```
 
+For repository-local tool manifests, omit `-g`:
+
+```powershell
+dotnet new tool-manifest
+dotnet tool install Devolutions.Psign.Tool
+dotnet tool run psign-tool -- --help
+```
+
 Create local dotnet tool packages from prebuilt release artifacts:
 
 ```powershell
-pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.1.0 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
+pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.2.0 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
 ```
 
 The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`, plus an `any` fallback package for unsupported runtimes.

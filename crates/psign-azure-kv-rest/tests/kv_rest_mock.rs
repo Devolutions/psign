@@ -39,7 +39,7 @@ fn fetch_certificate_and_sign_digest_against_mock_kv() {
         .create();
 
     let sig_bytes = vec![0xdeu8, 0xad, 0xbe, 0xef];
-    let sig_b64 = base64::engine::general_purpose::STANDARD.encode(&sig_bytes);
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&sig_bytes);
 
     let _m_sign = server
         .mock(

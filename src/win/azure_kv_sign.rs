@@ -3,7 +3,7 @@
 use crate::cli::{DigestAlgorithm, GlobalOpts, SignArgs};
 use crate::win::sealing::validate_sign_constraints_paths;
 use crate::win::sign_core::{
-    adopt_cert, authenticode_sign_embedded, encoding, infer_digest_for_cert,
+    DigestSignInfoParam, adopt_cert, authenticode_sign_embedded, encoding, infer_digest_for_cert,
     merge_additional_cert_file, open_memory_cert_store, validate_cert_constraints,
 };
 use anyhow::{Result, anyhow};
@@ -12,27 +12,36 @@ use psign_azure_kv_rest::{
     kv_decode_cer_b64, kv_jws_alg, kv_public_key_kind_from_cer_der, kv_sign_digest,
     kv_sign_url_from_kid,
 };
-use std::cell::RefCell;
 use std::mem::size_of;
+use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{E_FAIL, S_OK};
 use windows::Win32::Security::Cryptography::ALG_ID;
 use windows::Win32::Security::Cryptography::{
     CALG_SHA_256, CALG_SHA_384, CALG_SHA_512, CERT_CONTEXT, CERT_STORE_ADD_REPLACE_EXISTING,
     CRYPT_INTEGER_BLOB, CertAddCertificateContextToStore, CertCreateCertificateContext,
-    CertFreeCertificateContext, SIGNER_DIGEST_SIGN_INFO, SIGNER_DIGEST_SIGN_INFO_0,
+    CertFreeCertificateContext, PFN_AUTHENTICODE_DIGEST_SIGN,
 };
-use windows::Win32::System::Memory::{LMEM_FIXED, LocalAlloc};
+use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapAlloc};
 use windows::core::HRESULT;
 
-thread_local! {
-    static KV_HTTP: RefCell<Option<KvCallbackState>> = const { RefCell::new(None) };
-}
-
+#[derive(Clone)]
 struct KvCallbackState {
     client: reqwest::blocking::Client,
     token: String,
     sign_url: String,
     key_kind: KvPublicKeyKind,
+}
+
+fn kv_callback_state() -> &'static Mutex<Option<KvCallbackState>> {
+    static STATE: OnceLock<Mutex<Option<KvCallbackState>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+#[repr(C)]
+struct SignerDigestSignInfoV1 {
+    cb_size: u32,
+    pfn_authenticode_digest_sign: PFN_AUTHENTICODE_DIGEST_SIGN,
+    p_metadata_blob: *mut CRYPT_INTEGER_BLOB,
 }
 
 fn auth_params_from_sign_args(args: &SignArgs) -> KvAuthParams<'_> {
@@ -60,6 +69,49 @@ fn algid_to_kv_hash(algid: ALG_ID) -> Result<KvHashAlg> {
     }
 }
 
+fn sign_digest_with_key_vault(algid_hash: ALG_ID, digest: &[u8]) -> Result<Vec<u8>> {
+    let state = {
+        let guard = kv_callback_state()
+            .lock()
+            .map_err(|_| anyhow!("Azure Key Vault signing callback state mutex was poisoned"))?;
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow!("Azure Key Vault signing callback state was not installed"))?
+    };
+    let hash = algid_to_kv_hash(algid_hash)?;
+    let alg = kv_jws_alg(state.key_kind, hash)?;
+    kv_sign_digest(
+        &state.client,
+        &state.token,
+        &state.sign_url,
+        alg.as_str(),
+        digest,
+    )
+}
+
+unsafe fn write_heap_signature_blob(
+    sig: &[u8],
+    p_signature_blob: *mut CRYPT_INTEGER_BLOB,
+) -> HRESULT {
+    if p_signature_blob.is_null() || sig.is_empty() {
+        return E_FAIL;
+    }
+    let Ok(heap) = (unsafe { GetProcessHeap() }) else {
+        return E_FAIL;
+    };
+    let raw = unsafe { HeapAlloc(heap, HEAP_FLAGS(0), sig.len()) };
+    if raw.is_null() {
+        return E_FAIL;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(sig.as_ptr(), raw as *mut u8, sig.len());
+        (*p_signature_blob).cbData = sig.len() as u32;
+        (*p_signature_blob).pbData = raw as *mut u8;
+    }
+    S_OK
+}
+
 unsafe extern "system" fn azure_kv_digest_callback(
     _p_cert: *const CERT_CONTEXT,
     _p_metadata: *const CRYPT_INTEGER_BLOB,
@@ -73,49 +125,16 @@ unsafe extern "system" fn azure_kv_digest_callback(
     }
     let digest = unsafe { std::slice::from_raw_parts(pb_digest, cb_digest as usize) };
 
-    let outcome = KV_HTTP.with(|slot| {
-        let borrowed = slot.borrow();
-        let Some(state) = borrowed.as_ref() else {
-            return Err(anyhow!(
-                "Azure KV signing thread-local state was not installed"
-            ));
-        };
-        let hash = match algid_to_kv_hash(algid_hash) {
-            Ok(h) => h,
-            Err(_) => return Err(anyhow!("unsupported digest / key kind for KV")),
-        };
-        let alg = match kv_jws_alg(state.key_kind, hash) {
-            Ok(a) => a,
-            Err(_) => return Err(anyhow!("unsupported digest / key kind for KV")),
-        };
-        kv_sign_digest(
-            &state.client,
-            &state.token,
-            &state.sign_url,
-            alg.as_str(),
-            digest,
-        )
-    });
+    let outcome = sign_digest_with_key_vault(algid_hash, digest);
 
     let sig = match outcome {
         Ok(b) => b,
-        Err(_) => return E_FAIL,
+        Err(e) => {
+            eprintln!("Azure Key Vault digest callback failed: {e:#}");
+            return E_FAIL;
+        }
     };
-
-    // SAFETY: `LocalAlloc` matches native Authenticode expectations for out-of-band digest callbacks.
-    let raw = match unsafe { LocalAlloc(LMEM_FIXED, sig.len()) } {
-        Ok(h) => h,
-        Err(_) => return E_FAIL,
-    };
-    if raw.is_invalid() {
-        return E_FAIL;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(sig.as_ptr(), raw.0 as *mut u8, sig.len());
-        (*p_signature_blob).cbData = sig.len() as u32;
-        (*p_signature_blob).pbData = raw.0 as *mut u8;
-    }
-    S_OK
+    unsafe { write_heap_signature_blob(&sig, p_signature_blob) }
 }
 
 pub(crate) fn validate_azure_kv_mutex(args: &SignArgs) -> Result<()> {
@@ -299,31 +318,24 @@ pub(crate) fn sign_with_azure_key_vault(
         other => other,
     };
 
-    let mut empty_blob = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
+    let digest_info = SignerDigestSignInfoV1 {
+        cb_size: size_of::<SignerDigestSignInfoV1>() as u32,
+        pfn_authenticode_digest_sign: Some(azure_kv_digest_callback),
+        p_metadata_blob: std::ptr::null_mut(),
     };
-    let mut anon = SIGNER_DIGEST_SIGN_INFO_0::default();
-    anon.pfnAuthenticodeDigestSign = Some(azure_kv_digest_callback);
-    let digest_info = SIGNER_DIGEST_SIGN_INFO {
-        cbSize: size_of::<SIGNER_DIGEST_SIGN_INFO>() as u32,
-        dwDigestSignChoice: 1,
-        Anonymous: anon,
-        pMetadataBlob: std::ptr::addr_of_mut!(empty_blob),
-        dwReserved: 0,
-        dwReserved2: 0,
-        dwReserved3: 0,
-    };
-    let digest_ptr = std::ptr::addr_of!(digest_info);
+    let digest_param = DigestSignInfoParam::basic(std::ptr::addr_of!(digest_info));
 
-    KV_HTTP.with(|slot| {
-        *slot.borrow_mut() = Some(KvCallbackState {
+    {
+        let mut state = kv_callback_state()
+            .lock()
+            .map_err(|_| anyhow!("Azure Key Vault signing callback state mutex was poisoned"))?;
+        *state = Some(KvCallbackState {
             client: http,
             token,
             sign_url,
             key_kind,
         });
-    });
+    }
 
     let report = authenticode_sign_embedded(
         args,
@@ -333,16 +345,16 @@ pub(crate) fn sign_with_azure_key_vault(
         &signing,
         resolved_digest,
         None,
-        Some(digest_ptr),
+        Some(digest_param),
         "azure-key-vault",
         "MEMORY",
         None,
         None,
     );
 
-    KV_HTTP.with(|slot| {
-        slot.borrow_mut().take();
-    });
+    if let Ok(mut state) = kv_callback_state().lock() {
+        state.take();
+    }
 
     report
 }

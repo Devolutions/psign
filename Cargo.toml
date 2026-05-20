@@ -26,7 +26,7 @@ repository = "https://github.com/Devolutions/psign"
 
 [package]
 name = "psign"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Rust port of the Windows SDK signtool.exe (Authenticode sign/verify/timestamp) with portable digest helpers."
 license.workspace = true
@@ -34,7 +34,12 @@ readme = "README.md"
 repository.workspace = true
 
 [features]
-default = []
+default = [
+    "azure-kv-sign",
+    "artifact-signing-rest",
+    "timestamp-http",
+    "timestamp-server",
+]
 ## Azure Key Vault signing (`AuthenticatorDigestSign` callback + REST); enables Azure-shaped CLI flags on `sign`.
 azure-kv-sign = [
     "dep:psign-azure-kv-rest",
