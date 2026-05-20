@@ -237,7 +237,7 @@ fn digest_oid(d: DigestAlgorithm) -> &'static str {
     }
 }
 
-const SPC_DIGEST_SIGN_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x800);
+const SPC_DIGEST_SIGN_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x400);
 const SPC_DIGEST_SIGN_EX_FLAG: SIGNER_SIGN_FLAGS = SIGNER_SIGN_FLAGS(0x4000);
 
 /// Path to `Azure.CodeSigning.Dlib.dll` under an extracted **Microsoft.ArtifactSigning.Client**-style layout.

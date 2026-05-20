@@ -19,8 +19,7 @@ use windows::Win32::Security::Cryptography::ALG_ID;
 use windows::Win32::Security::Cryptography::{
     CALG_SHA_256, CALG_SHA_384, CALG_SHA_512, CERT_CONTEXT, CERT_STORE_ADD_REPLACE_EXISTING,
     CRYPT_INTEGER_BLOB, CertAddCertificateContextToStore, CertCreateCertificateContext,
-    CertDuplicateCertificateContext, CertFreeCertificateContext, HCERTSTORE,
-    SIGNER_DIGEST_SIGN_INFO, SIGNER_DIGEST_SIGN_INFO_0,
+    CertFreeCertificateContext, SIGNER_DIGEST_SIGN_INFO, SIGNER_DIGEST_SIGN_INFO_0,
 };
 use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapAlloc};
 use windows::core::HRESULT;
@@ -34,7 +33,6 @@ struct KvCallbackState {
     token: String,
     sign_url: String,
     key_kind: KvPublicKeyKind,
-    signing_cert: *const CERT_CONTEXT,
 }
 
 fn auth_params_from_sign_args(args: &SignArgs) -> KvAuthParams<'_> {
@@ -104,49 +102,20 @@ unsafe fn write_heap_signature_blob(
     S_OK
 }
 
-unsafe extern "system" fn azure_kv_digest_callback_ex(
+unsafe extern "system" fn azure_kv_digest_callback(
+    _p_cert: *const CERT_CONTEXT,
     _p_metadata: *const CRYPT_INTEGER_BLOB,
     algid_hash: ALG_ID,
     pb_digest: *const u8,
     cb_digest: u32,
     p_signature_blob: *mut CRYPT_INTEGER_BLOB,
-    pp_signer_cert: *mut *mut CERT_CONTEXT,
-    h_cert_chain_store: HCERTSTORE,
 ) -> HRESULT {
-    if pb_digest.is_null() || p_signature_blob.is_null() || pp_signer_cert.is_null() {
+    if pb_digest.is_null() || p_signature_blob.is_null() {
         return E_FAIL;
     }
     let digest = unsafe { std::slice::from_raw_parts(pb_digest, cb_digest as usize) };
 
-    let outcome = sign_digest_with_key_vault(algid_hash, digest).and_then(|sig| {
-        KV_HTTP.with(|slot| {
-            let borrowed = slot.borrow();
-            let Some(state) = borrowed.as_ref() else {
-                return Err(anyhow!(
-                    "Azure KV signing thread-local state was not installed"
-                ));
-            };
-            let signer_cert = unsafe { CertDuplicateCertificateContext(Some(state.signing_cert)) };
-            if signer_cert.is_null() {
-                return Err(anyhow!("failed to duplicate Azure KV signer certificate"));
-            }
-            if !h_cert_chain_store.is_invalid() {
-                unsafe {
-                    CertAddCertificateContextToStore(
-                        Some(h_cert_chain_store),
-                        state.signing_cert,
-                        CERT_STORE_ADD_REPLACE_EXISTING,
-                        None,
-                    )
-                    .map_err(|e| anyhow!("CertAddCertificateContextToStore(callback): {e}"))?;
-                }
-            }
-            unsafe {
-                *pp_signer_cert = signer_cert;
-            }
-            Ok(sig)
-        })
-    });
+    let outcome = sign_digest_with_key_vault(algid_hash, digest);
 
     let sig = match outcome {
         Ok(b) => b,
@@ -341,10 +310,10 @@ pub(crate) fn sign_with_azure_key_vault(
         pbData: std::ptr::null_mut(),
     };
     let mut anon = SIGNER_DIGEST_SIGN_INFO_0::default();
-    anon.pfnAuthenticodeDigestSignEx = Some(azure_kv_digest_callback_ex);
+    anon.pfnAuthenticodeDigestSign = Some(azure_kv_digest_callback);
     let digest_info = SIGNER_DIGEST_SIGN_INFO {
         cbSize: size_of::<SIGNER_DIGEST_SIGN_INFO>() as u32,
-        dwDigestSignChoice: 3,
+        dwDigestSignChoice: 1,
         Anonymous: anon,
         pMetadataBlob: std::ptr::addr_of_mut!(empty_blob),
         dwReserved: 0,
@@ -359,7 +328,6 @@ pub(crate) fn sign_with_azure_key_vault(
             token,
             sign_url,
             key_kind,
-            signing_cert: signing.0 as *const CERT_CONTEXT,
         });
     });
 
