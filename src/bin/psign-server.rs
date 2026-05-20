@@ -935,7 +935,7 @@ fn handle_azure_key_vault_client(
                 .get("value")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("Key Vault sign body missing value"))?;
-            let digest = base64::engine::general_purpose::STANDARD
+            let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(digest_b64.trim())
                 .context("decode Key Vault sign digest")?;
             let signature = authority.identity.sign_digest(alg, &digest)?;
@@ -945,7 +945,7 @@ fn handle_azure_key_vault_client(
                 "OK",
                 &serde_json::json!({
                     "kid": format!("{}keys/{}/versions/{}", authority.base_url, authority.key_name, authority.version),
-                    "value": base64::engine::general_purpose::STANDARD.encode(signature),
+                    "value": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature),
                 }),
             )
         }

@@ -3031,18 +3031,27 @@ fn psign_server_artifact_signing_submit_serves_portable_cli() {
     assert_eq!(sig.len(), 256, "RSA-2048 signature length");
 }
 
-#[cfg(all(windows, feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[cfg(all(
+    windows,
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "azure-kv-sign"
+))]
 #[test]
-#[ignore = "current Azure KV SignerSignEx3 path requires a local provider binding before full PE signing can be automated"]
 fn psign_server_azure_key_vault_signs_pe_with_windows_cli() {
     let dir = tempfile::tempdir().unwrap();
     let pe_path = dir.path().join("tiny32.kv-signed.exe");
     std::fs::copy(tiny32_unsigned_fixture(), &pe_path).expect("copy unsigned PE");
 
     let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
     let mut cmd = Command::cargo_bin("psign-tool").unwrap();
     cmd.arg("sign")
         .arg("--digest")
+        .arg("sha256")
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
         .arg("sha256")
         .arg("--azure-key-vault-url")
         .arg(&url)
@@ -3054,6 +3063,11 @@ fn psign_server_azure_key_vault_signs_pe_with_windows_cli() {
     cmd.assert().success();
     let status = guard.0.wait().expect("server exit");
     assert!(status.success(), "server failed with {status}");
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
 
     let mut verify = portable_cmd();
     verify.arg("verify-pe").arg(&pe_path);

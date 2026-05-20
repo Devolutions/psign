@@ -217,6 +217,12 @@ pub fn kv_jws_alg(kind: KvPublicKeyKind, hash: KvHashAlg) -> Result<String> {
     }
 }
 
+fn kv_base64url_decode(value: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.trim())
+        .context("signature base64url decode")
+}
+
 #[derive(Deserialize)]
 struct KeyVaultSignResponse {
     value: String,
@@ -231,7 +237,7 @@ pub fn kv_sign_digest(
 ) -> Result<Vec<u8>> {
     let body = serde_json::json!({
         "alg": jws_alg,
-        "value": base64::engine::general_purpose::STANDARD.encode(digest),
+        "value": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest),
     });
     let rsp = http
         .post(sign_url)
@@ -247,9 +253,7 @@ pub fn kv_sign_digest(
         ));
     }
     let parsed: KeyVaultSignResponse = rsp.json().context("Key Vault sign JSON")?;
-    base64::engine::general_purpose::STANDARD
-        .decode(parsed.value.trim())
-        .context("signature base64 decode")
+    kv_base64url_decode(&parsed.value)
 }
 
 /// Resolve **`kid`**, infer JWS alg from certificate **`cer`**, POST **`sign`**.
@@ -346,5 +350,13 @@ mod tests {
             kv_jws_alg(KvPublicKeyKind::Ec, KvHashAlg::Sha512).unwrap(),
             "ES512"
         );
+    }
+
+    #[test]
+    fn key_vault_signature_value_uses_base64url_without_padding() {
+        let raw = [0xff, 0xee, 0xdd, 0xcc, 0xbb];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        assert_eq!(encoded, "_-7dzLs");
+        assert_eq!(kv_base64url_decode(&encoded).unwrap(), raw);
     }
 }
