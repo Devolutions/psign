@@ -4,13 +4,17 @@
 (sign, verify, timestamp, remove, and related Authenticode flows), validated with
 differential parity tests against the native tool where CI fixtures allow.
 
-## Current command coverage
+Canonical repository: <https://github.com/Devolutions/psign>.
 
-- `verify`: WinVerifyTrust-backed implementation with policy modes (`default`, `pa`, `pg`).
+## CLI surface
+
+- `verify`, `remove`, `catdb`: Windows-compatible `signtool.exe` flows backed by WinTrust and CryptSIP where native APIs are required.
 - `sign`: Rust mssign32 core (`SignerSignEx3`) with PFX/system-store cert selection, RFC3161 sign-time timestamping, and decoupled-digest bridge flow (`--dlib` or `--trusted-signing-dlib-root` + `--dmdf`) for MSIX parity and [Azure Artifact Signing / Trusted Signing](docs/migration-artifact-signing.md).
 - `inspect-signature`: JSON dump of PKCS#7 signers, timestamp OIDs, and nested signatures (`1.3.6.1.4.1.311.2.4.1`) — same parser as **`psign-tool portable inspect-authenticode`** ([docs/psa-interoperability.md](docs/psa-interoperability.md)).
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
+- `cert-store`: Portable file-backed certificate store under `~/.psign/cert-store` by default, with Windows-style store/thumbprint selection.
+- `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs.
 
 ## MSIX parity notes
 
@@ -24,7 +28,7 @@ differential parity tests against the native tool where CI fixtures allow.
 cargo build
 ```
 
-At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Optional Cargo features: **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**).
+At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package / REST crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Optional Cargo features: **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**), **`timestamp-http`** (portable RFC3161 HTTP POST), and **`timestamp-server`** (local RFC3161 test server).
 
 ## Dotnet tool package (.NET 10+)
 
@@ -50,9 +54,9 @@ pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.1.0 -ArtifactsRoot ./dist -Ou
 
 The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`, plus an `any` fallback package for unsupported runtimes.
 
-## Linux / portable digest tooling
+## Linux / portable tooling
 
-The canonical **`psign-tool`** CLI (package **`psign`**) supports an optional backend selector: **`--mode auto|windows|portable`**. When omitted, **`auto`** is used; **`PSIGN_TOOL_MODE`** can set the same default for parity automation. Windows mode uses Win32 APIs and registered SIP DLLs. Portable mode and the **`psign-tool portable ...`** namespace use the cross-platform Rust implementations from **`psign-sip-digest`**, **`psign-authenticode-trust`**, and **`psign-opc-sign`** without **`WinVerifyTrust`**.
+The canonical **`psign-tool`** CLI (package **`psign`**) supports an optional backend selector: **`--mode auto|windows|portable`**. When omitted, **`auto`** is used; **`PSIGN_TOOL_MODE`** can set the same default for parity automation. Windows mode uses Win32 APIs and registered SIP DLLs. Portable mode and the **`psign-tool portable ...`** namespace use the cross-platform Rust implementations from **`psign-sip-digest`**, **`psign-authenticode-trust`**, **`psign-opc-sign`**, **`psign-codesigning-rest`**, and **`psign-azure-kv-rest`** without **`WinVerifyTrust`** or the OS trust store.
 
 **Feature gaps vs native `signtool`, AzureSignTool, and Azure Artifact Signing:** [`docs/gap-analysis-signing-platforms.md`](docs/gap-analysis-signing-platforms.md). **Linux workflows (verify, REST hash sign, hybrid embed):** [`docs/linux-signing-pipelines.md`](docs/linux-signing-pipelines.md). For Key Vault **`RS256`** over CMS authenticated attributes (not the PE image hash), use **`psign-tool portable pe-signer-rs256-prehash`** — see [`docs/migration-azuresigntool.md`](docs/migration-azuresigntool.md).
 
@@ -64,6 +68,8 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool portable rdp --cert cert.der --key key.pk8 file.rdp
 # Portable PE signing with a local RSA key:
 # psign-tool portable sign-pe --cert cert.der --key key.pk8 --output signed.exe unsigned.exe
+# Portable trust verification with explicit anchors:
+# psign-tool portable trust-verify-pe signed.exe --anchor-dir anchors
 # Portable unsigned CAB signing with a local RSA key:
 # psign-tool portable sign-cab --cert cert.der --key key.pk8 --output signed.cab unsigned.cab
 # Portable MSI/MSP signing with a local RSA key:
@@ -79,11 +85,11 @@ cargo build -p psign --bin psign-tool --locked
 # Optional portable REST helpers (Linux/macOS):
 # cargo build -p psign --bin psign-tool --locked --features artifact-signing-rest
 # cargo build -p psign --bin psign-tool --locked --features azure-kv-sign
-cargo test -p psign-sip-digest -p psign-authenticode-trust -p psign-codesigning-rest -p psign-azure-kv-rest -p psign-digest-cli -p psign --locked
-cargo check -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-codesigning-rest -p psign-azure-kv-rest --locked
+cargo test -p psign-sip-digest -p psign-authenticode-trust -p psign-opc-sign -p psign-codesigning-rest -p psign-azure-kv-rest -p psign-digest-cli -p psign --locked
+cargo check -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-opc-sign -p psign-codesigning-rest -p psign-azure-kv-rest --locked
 ```
 
-Unix CI (`ci-unix`) runs **`cargo fmt`**, strict **`clippy -D warnings`** on those crates plus the **`psign` library**, and the digest CLI tests. Local mirror (bash): **`scripts/linux-portable-validation.sh`** from the repo root.
+Unix CI (`ci-unix`) runs **`cargo fmt`**, strict **`clippy -D warnings`** on portable / REST crates plus the **`psign` library**, and the digest CLI tests. Local mirror (bash): **`scripts/linux-portable-validation.sh`** from the repo root.
 
 ## Portable certificate store
 
@@ -153,7 +159,9 @@ Writes **`parity-output/vendor-binaries/`** (WOW64 under **`syswow64/`**): inbox
 ## Run tests
 
 ```powershell
-cargo test --workspace
+cargo fmt --all
+cargo clippy --workspace --all-targets --locked
+cargo test --workspace --locked
 cargo test --test parity_signtool -- --ignored --nocapture
 ./scripts/run-parity-diff.ps1 -FailOnSemantic
 ```

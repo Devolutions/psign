@@ -61,7 +61,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
 
       - name: Install Linux ARM64 linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -81,6 +81,13 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cargo build --locked --release -p psign --bin psign-tool --target "${{ matrix.target }}"
+
+      - name: Verify Windows version info
+        if: contains(matrix.target, 'windows-msvc')
+        shell: pwsh
+        run: |
+          ./scripts/ci/test-windows-version-info.ps1 `
+            -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}"
 
       - name: Package artifact
         shell: pwsh
@@ -157,6 +164,16 @@ jobs:
             -ArtifactsRoot "dist" `
             -StagingRoot $stagingRoot `
             -OutputDir "dist/nuget"
+
+      - name: Smoke-test dotnet tool package install
+        shell: pwsh
+        env:
+          CI_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          ./nuget/scripts/Test-PsignDotnetToolPackage.ps1 `
+            -Version "0.0.0-ci.$env:CI_RUN_NUMBER" `
+            -PackageDir "dist/nuget" `
+            -ToolPath (Join-Path $env:RUNNER_TEMP "psign-tool-package-smoke")
 
       - name: Upload dry-run dotnet tool artifact
         uses: actions/upload-artifact@v7

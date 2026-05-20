@@ -12,6 +12,15 @@ on:
         required: false
         default: false
         type: boolean
+      github-env:
+        description: GitHub environment selection
+        required: false
+        type: choice
+        options:
+          - auto
+          - test
+          - prod
+        default: auto
       dry_run_nuget:
         description: Dry-run NuGet publish and GitHub release asset upload
         required: false
@@ -83,11 +92,34 @@ jobs:
 
           $releaseTag = "v$releaseVersion"
           $isMasterBranch = $sourceBranch -eq 'master'
-          $publishEnv = if ($isMasterBranch) { 'publish-prod' } else { 'publish-test' }
           $publishNuget = Parse-BoolOrDefault '${{ github.event.inputs.publish_nuget }}' $false
           $dryRun = Parse-BoolOrDefault '${{ github.event.inputs.dry_run_nuget }}' $true
+          $requestedEnvironment = '${{ inputs['github-env'] }}'.Trim().ToLowerInvariant()
+          if ([string]::IsNullOrWhiteSpace($requestedEnvironment)) {
+            $requestedEnvironment = 'auto'
+          }
 
-          if (-not $isMasterBranch) {
+          switch ($requestedEnvironment) {
+            'auto' {
+              $publishEnv = if ($isMasterBranch) { 'publish-prod' } else { 'publish-test' }
+            }
+            'test' {
+              $publishEnv = 'publish-test'
+            }
+            'prod' {
+              $publishEnv = 'publish-prod'
+            }
+            default {
+              throw "Unsupported github-env value: $requestedEnvironment (expected auto, test, or prod)."
+            }
+          }
+
+          if ($requestedEnvironment -eq 'test' -and ($isMasterBranch -or ((-not $dryRun) -and $publishNuget))) {
+            $publishEnv = 'publish-prod'
+            Write-Host '::notice::github-env=test was promoted to publish-prod'
+          }
+
+          if ((-not $isMasterBranch) -and $publishEnv -ne 'publish-prod') {
             $dryRun = $true
           }
 
@@ -104,6 +136,7 @@ jobs:
           Write-Host "::notice::Release tag: $releaseTag"
           Write-Host "::notice::Build ref: $buildRef"
           Write-Host "::notice::Source branch: $sourceBranch"
+          Write-Host "::notice::GitHub environment mode: $requestedEnvironment"
           Write-Host "::notice::Publish environment: $publishEnv"
           Write-Host "::notice::Publish NuGet: $($publishNuget.ToString().ToLowerInvariant())"
           Write-Host "::notice::NuGet dry-run: $($dryRun.ToString().ToLowerInvariant())"
@@ -165,7 +198,7 @@ jobs:
           rustup default stable
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
 
       - name: Install Linux ARM64 linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -185,6 +218,17 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cargo build --locked --release -p psign --bin psign-tool --target "${{ matrix.target }}"
+
+      - name: Verify Windows version info
+        if: contains(matrix.target, 'windows-msvc')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          ./scripts/ci/test-windows-version-info.ps1 `
+            -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+            -ExpectedVersion $version
 
       - name: Package artifact
         if: ${{ !contains(matrix.target, 'windows-msvc') }}
@@ -415,6 +459,21 @@ jobs:
             -ArtifactsRoot "dist" `
             -StagingRoot $stagingRoot `
             -OutputDir "dist/nuget"
+
+      - name: Smoke-test dotnet tool package install
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if (-not $tag.StartsWith('v')) {
+            throw "Release tag must start with 'v'. Actual: $tag"
+          }
+
+          ./nuget/scripts/Test-PsignDotnetToolPackage.ps1 `
+            -Version $tag.Substring(1) `
+            -PackageDir "dist/nuget" `
+            -ToolPath (Join-Path $env:RUNNER_TEMP "psign-tool-package-smoke")
 
       - name: Upload dotnet tool artifact
         uses: actions/upload-artifact@v7

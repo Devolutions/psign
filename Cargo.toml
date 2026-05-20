@@ -96,6 +96,9 @@ tempfile = "3"
 x509-cert = { version = "0.2.5", features = ["builder"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
+[build-dependencies]
+winresource = "0.1.31"
+
 [[bin]]
 name = "psign-tool"
 path = "src/main.rs"
