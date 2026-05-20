@@ -28,7 +28,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 cargo build
 ```
 
-At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package / REST crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Optional Cargo features: **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**), **`timestamp-http`** (portable RFC3161 HTTP POST), and **`timestamp-server`** (local RFC3161 test server).
+At the repo root, **`cargo build`** targets **`default-members`**, including the unified **`psign-tool`** executable from `src\main.rs` plus the portable digest / trust / package / REST crates. On Windows, **`cargo build -p psign --bin psign-tool`** remains the explicit way to build only that executable. Default Cargo features include **`azure-kv-sign`** (Key Vault digest callback), **`artifact-signing-rest`** (**`artifact-signing-submit`** LRO against **`*.codesigning.azure.net`**), **`timestamp-http`** (portable RFC3161 HTTP POST), and **`timestamp-server`** (local RFC3161 test server); use **`--no-default-features`** for a minimal build.
 
 ## Dotnet tool package from NuGet.org (.NET 10+)
 

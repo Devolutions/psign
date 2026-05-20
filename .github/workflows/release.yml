@@ -230,10 +230,6 @@ jobs:
             $target
           )
 
-          if ($target.Contains('windows-msvc')) {
-            $cargoArgs += @('--features', 'azure-kv-sign')
-          }
-
           cargo @cargoArgs
 
       - name: Verify Windows version info

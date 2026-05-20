@@ -34,7 +34,12 @@ readme = "README.md"
 repository.workspace = true
 
 [features]
-default = []
+default = [
+    "azure-kv-sign",
+    "artifact-signing-rest",
+    "timestamp-http",
+    "timestamp-server",
+]
 ## Azure Key Vault signing (`AuthenticatorDigestSign` callback + REST); enables Azure-shaped CLI flags on `sign`.
 azure-kv-sign = [
     "dep:psign-azure-kv-rest",
