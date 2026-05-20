@@ -1,6 +1,8 @@
 //! End-to-end CLI smoke test (runs on Linux CI).
 
 use assert_cmd::Command;
+#[cfg(feature = "artifact-signing-rest")]
+use base64::Engine as _;
 use predicates::prelude::*;
 use psign_authenticode_trust::pe_first_pkcs7_terminal_root;
 use psign_authenticode_trust::{inspect_authenticode_pkcs7_der, inspect_pe_authenticode};
@@ -2733,6 +2735,69 @@ fn spawn_psign_pki_server_requests(
     (guard, url)
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+fn spawn_psign_azure_key_vault_server(max_requests: u64) -> (PsignServerGuard, String, String) {
+    let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
+    let max_requests = max_requests.to_string();
+    server_cmd.args([
+        "azure-key-vault-server",
+        "--listen",
+        "127.0.0.1:0",
+        "--max-requests",
+        max_requests.as_str(),
+    ]);
+    server_cmd.stdout(std::process::Stdio::piped());
+    server_cmd.stderr(std::process::Stdio::piped());
+    let mut guard = PsignServerGuard(server_cmd.spawn().expect("spawn psign-server"));
+    let stdout = guard.0.stdout.take().expect("server stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut listen_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut listen_line).expect("read listening line");
+    let mut cert_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut cert_line).expect("read certificate line");
+    let mut ignored = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut ignored).expect("read leaf line");
+    let url = listen_line
+        .trim()
+        .strip_prefix("psign-server azure-key-vault-server listening on ")
+        .expect("listening URL")
+        .to_string();
+    let certificate = cert_line
+        .trim()
+        .strip_prefix("psign-server azure-key-vault-server certificate ")
+        .expect("certificate name")
+        .to_string();
+    (guard, url, certificate)
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+fn spawn_psign_artifact_signing_server(max_requests: u64) -> (PsignServerGuard, String) {
+    let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
+    let max_requests = max_requests.to_string();
+    server_cmd.args([
+        "artifact-signing-server",
+        "--listen",
+        "127.0.0.1:0",
+        "--max-requests",
+        max_requests.as_str(),
+    ]);
+    server_cmd.stdout(std::process::Stdio::piped());
+    server_cmd.stderr(std::process::Stdio::piped());
+    let mut guard = PsignServerGuard(server_cmd.spawn().expect("spawn psign-server"));
+    let stdout = guard.0.stdout.take().expect("server stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut listen_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut listen_line).expect("read listening line");
+    let mut ignored = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut ignored).expect("read endpoint line");
+    let url = listen_line
+        .trim()
+        .strip_prefix("psign-server artifact-signing-server listening on ")
+        .expect("listening URL")
+        .to_string();
+    (guard, url)
+}
+
 #[cfg(feature = "timestamp-server")]
 fn http_get_bytes(url: &str) -> Vec<u8> {
     use std::io::{Read, Write};
@@ -2884,6 +2949,155 @@ fn psign_server_pki_server_serves_signed_crls() {
     assert!(
         revoked_crl.len() > crl.len(),
         "revoked CRL should include a revoked certificate entry"
+    );
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn psign_server_azure_key_vault_signs_digest_for_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    let sig_path = dir.path().join("sig.bin");
+    std::fs::write(&digest_path, [0xabu8; 32]).expect("write digest");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("azure-key-vault-sign-digest")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--digest-algorithm")
+        .arg("sha256")
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg("--signature-output")
+        .arg(&sig_path);
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let sig = std::fs::read(&sig_path).expect("read signature");
+    assert_eq!(sig.len(), 256, "RSA-2048 signature length");
+    assert!(
+        sig.iter().any(|b| *b != 0),
+        "signature should not be all zeros"
+    );
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_submit_serves_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0xcdu8; 32]).expect("write digest");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("artifact-signing-submit")
+        .arg("--region")
+        .arg("local")
+        .arg("--account-name")
+        .arg("acct")
+        .arg("--profile-name")
+        .arg("prof")
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--access-token")
+        .arg("test-token")
+        .arg("--endpoint-base-url")
+        .arg(&endpoint);
+    let output = cmd.output().expect("run artifact-signing-submit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let json: Value = serde_json::from_slice(&output.stdout).expect("parse submit JSON");
+    assert_eq!(
+        json.get("status").and_then(Value::as_str),
+        Some("Succeeded")
+    );
+    let sig = json
+        .get("signature")
+        .and_then(Value::as_str)
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .expect("base64 signature");
+    assert_eq!(sig.len(), 256, "RSA-2048 signature length");
+}
+
+#[cfg(all(windows, feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+#[ignore = "current Azure KV SignerSignEx3 path requires a local provider binding before full PE signing can be automated"]
+fn psign_server_azure_key_vault_signs_pe_with_windows_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir.path().join("tiny32.kv-signed.exe");
+    std::fs::copy(tiny32_unsigned_fixture(), &pe_path).expect("copy unsigned PE");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&pe_path);
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&pe_path);
+    verify.assert().success();
+}
+
+#[cfg(all(
+    windows,
+    feature = "timestamp-server",
+    feature = "artifact-signing-rest"
+))]
+#[test]
+fn psign_server_artifact_signing_submit_serves_windows_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0x11u8; 32]).expect("write digest");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("artifact-signing-submit")
+        .arg("--region")
+        .arg("local")
+        .arg("--account-name")
+        .arg("acct")
+        .arg("--profile-name")
+        .arg("prof")
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--access-token")
+        .arg("test-token")
+        .arg("--endpoint-base-url")
+        .arg(&endpoint);
+    let output = cmd.output().expect("run artifact-signing-submit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("parse submit JSON");
+    assert_eq!(
+        json.get("status").and_then(Value::as_str),
+        Some("Succeeded")
     );
 }
 

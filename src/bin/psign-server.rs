@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
 use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
@@ -9,13 +10,16 @@ use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::EncodePrivateKey;
-use rsa::signature::{Keypair, SignatureEncoding, Signer};
+use rsa::signature::{Keypair, SignatureEncoding, Signer, hazmat::PrehashSigner};
+use serde_json::Value;
 use sha1::Sha1;
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha384, Sha512};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use x509_cert::Certificate;
@@ -55,6 +59,10 @@ enum Command {
     TimestampServer(TimestampServerArgs),
     /// Serve local code-signing PKI material for online certificate feature tests.
     PkiServer(PkiServerArgs),
+    /// Serve a local Azure Key Vault-compatible signing endpoint for tests.
+    AzureKeyVaultServer(AzureKeyVaultServerArgs),
+    /// Serve a local Azure Code Signing / Trusted Signing data-plane endpoint for tests.
+    ArtifactSigningServer(ArtifactSigningServerArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -107,6 +115,50 @@ struct PkiServerArgs {
     max_requests: u64,
 }
 
+#[derive(Parser, Debug)]
+struct AzureKeyVaultServerArgs {
+    /// Address to bind, for example 127.0.0.1:0 for an ephemeral port.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    listen: String,
+    /// Certificate name accepted under /certificates/{name}.
+    #[arg(long, default_value = "psign-test-cert")]
+    certificate_name: String,
+    /// Key name embedded in the returned certificate kid.
+    #[arg(long, default_value = "psign-test-key")]
+    key_name: String,
+    /// Key/certificate version accepted in versioned URLs.
+    #[arg(long, default_value = "v1")]
+    version: String,
+    /// Write the generated root certificate as DER for local trust-anchor setup.
+    #[arg(long, value_name = "PATH")]
+    root_cert_output: Option<PathBuf>,
+    /// Write the generated code-signing leaf certificate as DER.
+    #[arg(long, value_name = "PATH")]
+    leaf_cert_output: Option<PathBuf>,
+    /// Exit after serving this many requests. Zero means run until interrupted.
+    #[arg(long, default_value_t = 0)]
+    max_requests: u64,
+}
+
+#[derive(Parser, Debug)]
+struct ArtifactSigningServerArgs {
+    /// Address to bind, for example 127.0.0.1:0 for an ephemeral port.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    listen: String,
+    /// Deterministic response variant for positive and negative-path tests.
+    #[arg(long, value_enum, default_value_t = ArtifactResponseMode::Valid)]
+    response_mode: ArtifactResponseMode,
+    /// Write the generated root certificate as DER for local trust-anchor setup.
+    #[arg(long, value_name = "PATH")]
+    root_cert_output: Option<PathBuf>,
+    /// Write the generated code-signing leaf certificate as DER.
+    #[arg(long, value_name = "PATH")]
+    leaf_cert_output: Option<PathBuf>,
+    /// Exit after serving this many requests. Zero means run until interrupted.
+    #[arg(long, default_value_t = 0)]
+    max_requests: u64,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ServerStatus {
     Granted,
@@ -119,6 +171,20 @@ enum PkiOcspStatus {
     Good,
     Revoked,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ArtifactResponseMode {
+    /// Return a normal accepted operation followed by a Succeeded poll body.
+    Valid,
+    /// Return HTTP 500 for the submit request.
+    HttpError,
+    /// Return an accepted operation whose poll body is Failed.
+    Failed,
+    /// Return an accepted operation whose poll body is Canceled.
+    Canceled,
+    /// Return HTTP 200 with malformed JSON for the submit request.
+    MalformedJson,
 }
 
 impl ServerStatus {
@@ -172,6 +238,8 @@ fn run() -> Result<()> {
     match Cli::parse().command {
         Command::TimestampServer(args) => run_timestamp_server(args),
         Command::PkiServer(args) => run_pki_server(args),
+        Command::AzureKeyVaultServer(args) => run_azure_key_vault_server(args),
+        Command::ArtifactSigningServer(args) => run_artifact_signing_server(args),
     }
 }
 
@@ -287,7 +355,17 @@ fn handle_client(
 struct HttpRequest {
     method: String,
     path: String,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+impl HttpRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
@@ -325,6 +403,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         .to_string();
     let content_len = headers
         .lines()
+        .skip(1)
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
             name.eq_ignore_ascii_case("content-length")
@@ -332,6 +411,14 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
                 .flatten()
         })
         .unwrap_or(0);
+    let parsed_headers = headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect();
     let body_start = header_end + 4;
     while buf.len() < body_start + content_len {
         let n = stream.read(&mut tmp).context("read HTTP body")?;
@@ -343,6 +430,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     Ok(HttpRequest {
         method,
         path,
+        headers: parsed_headers,
         body: buf[body_start..body_start + content_len].to_vec(),
     })
 }
@@ -358,12 +446,27 @@ fn write_http_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
+    write_http_response_with_headers(stream, status, reason, content_type, &[], body)
+}
+
+fn write_http_response_with_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     )
     .context("write HTTP response headers")?;
+    for (name, value) in headers {
+        write!(stream, "{name}: {value}\r\n").context("write HTTP response header")?;
+    }
+    write!(stream, "\r\n").context("finish HTTP response headers")?;
     stream.write_all(body).context("write HTTP response body")
 }
 
@@ -373,6 +476,28 @@ struct PkiAuthority {
     leaf_key_der: Vec<u8>,
     crl_der: Vec<u8>,
     ocsp_der: Vec<u8>,
+}
+
+struct AzureSigningIdentity {
+    root_cert: Certificate,
+    leaf_cert: Certificate,
+    leaf_key: RsaPrivateKey,
+}
+
+struct AzureKeyVaultAuthority {
+    identity: AzureSigningIdentity,
+    certificate_name: String,
+    key_name: String,
+    version: String,
+    base_url: String,
+}
+
+struct ArtifactSigningAuthority {
+    identity: AzureSigningIdentity,
+    response_mode: ArtifactResponseMode,
+    base_url: String,
+    next_operation: AtomicU64,
+    operations: Mutex<HashMap<String, Value>>,
 }
 
 fn run_pki_server(args: PkiServerArgs) -> Result<()> {
@@ -529,6 +654,458 @@ impl PkiAuthority {
             ocsp_der,
         })
     }
+}
+
+impl AzureSigningIdentity {
+    fn new(
+        root_common_name: &str,
+        leaf_common_name: &str,
+        root_serial: u32,
+        leaf_serial: u32,
+    ) -> Result<Self> {
+        let root_private_key =
+            RsaPrivateKey::new(&mut OsRng, 2048).context("generate Azure test root RSA key")?;
+        let root_key = SigningKey::<Sha256>::new(root_private_key);
+        let root_subject =
+            Name::from_str(&format!("CN={root_common_name}")).context("Azure test root subject")?;
+        let root_spki = SubjectPublicKeyInfoOwned::from_key(root_key.verifying_key())
+            .context("Azure test root subject public key info")?;
+        let root_builder = CertificateBuilder::new(
+            Profile::Root,
+            SerialNumber::from(root_serial),
+            Validity::from_now(Duration::from_secs(86_400 * 365))
+                .context("Azure test root validity")?,
+            root_subject.clone(),
+            root_spki,
+            &root_key,
+        )
+        .context("Azure test root certificate builder")?;
+        let root_cert = root_builder
+            .build::<rsa::pkcs1v15::Signature>()
+            .context("self-sign Azure test root certificate")?;
+
+        let leaf_key =
+            RsaPrivateKey::new(&mut OsRng, 2048).context("generate Azure test leaf RSA key")?;
+        let leaf_signing_key = SigningKey::<Sha256>::new(leaf_key.clone());
+        let leaf_subject =
+            Name::from_str(&format!("CN={leaf_common_name}")).context("Azure test leaf subject")?;
+        let leaf_spki = SubjectPublicKeyInfoOwned::from_key(leaf_signing_key.verifying_key())
+            .context("Azure test leaf subject public key info")?;
+        let mut leaf_builder = CertificateBuilder::new(
+            Profile::Leaf {
+                issuer: root_subject,
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            SerialNumber::from(leaf_serial),
+            Validity::from_now(Duration::from_secs(86_400 * 365))
+                .context("Azure test leaf validity")?,
+            leaf_subject,
+            leaf_spki,
+            &root_key,
+        )
+        .context("Azure test leaf certificate builder")?;
+        leaf_builder
+            .add_extension(&ExtendedKeyUsage(vec![OID_CODE_SIGNING]))
+            .context("add Azure test code-signing EKU")?;
+        let leaf_cert = leaf_builder
+            .build::<rsa::pkcs1v15::Signature>()
+            .context("sign Azure test leaf certificate")?;
+
+        Ok(Self {
+            root_cert,
+            leaf_cert,
+            leaf_key,
+        })
+    }
+
+    fn leaf_der(&self) -> Result<Vec<u8>> {
+        self.leaf_cert
+            .to_der()
+            .context("encode Azure test leaf certificate")
+    }
+
+    fn sign_digest(&self, alg: &str, digest: &[u8]) -> Result<Vec<u8>> {
+        match alg.trim() {
+            "RS256" => {
+                if digest.len() != 32 {
+                    return Err(anyhow!("RS256 requires a 32-byte SHA-256 digest"));
+                }
+                let key = SigningKey::<Sha256>::new(self.leaf_key.clone());
+                Ok(key
+                    .sign_prehash(digest)
+                    .map_err(|e| anyhow!("RS256 prehash sign: {e}"))?
+                    .to_bytes()
+                    .to_vec())
+            }
+            "RS384" => {
+                if digest.len() != 48 {
+                    return Err(anyhow!("RS384 requires a 48-byte SHA-384 digest"));
+                }
+                let key = SigningKey::<Sha384>::new(self.leaf_key.clone());
+                Ok(key
+                    .sign_prehash(digest)
+                    .map_err(|e| anyhow!("RS384 prehash sign: {e}"))?
+                    .to_bytes()
+                    .to_vec())
+            }
+            "RS512" => {
+                if digest.len() != 64 {
+                    return Err(anyhow!("RS512 requires a 64-byte SHA-512 digest"));
+                }
+                let key = SigningKey::<Sha512>::new(self.leaf_key.clone());
+                Ok(key
+                    .sign_prehash(digest)
+                    .map_err(|e| anyhow!("RS512 prehash sign: {e}"))?
+                    .to_bytes()
+                    .to_vec())
+            }
+            other => Err(anyhow!("unsupported Azure test signing algorithm {other}")),
+        }
+    }
+}
+
+fn write_generated_azure_certs(
+    identity: &AzureSigningIdentity,
+    root_output: &Option<PathBuf>,
+    leaf_output: &Option<PathBuf>,
+) -> Result<()> {
+    if let Some(path) = root_output {
+        std::fs::write(
+            path,
+            identity
+                .root_cert
+                .to_der()
+                .context("encode generated Azure test root certificate")?,
+        )
+        .with_context(|| {
+            format!(
+                "write generated Azure test root certificate {}",
+                path.display()
+            )
+        })?;
+    }
+    if let Some(path) = leaf_output {
+        std::fs::write(path, identity.leaf_der()?).with_context(|| {
+            format!(
+                "write generated Azure test leaf certificate {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn run_azure_key_vault_server(args: AzureKeyVaultServerArgs) -> Result<()> {
+    let listener =
+        TcpListener::bind(&args.listen).with_context(|| format!("bind {}", args.listen))?;
+    let local = listener.local_addr().context("read listener address")?;
+    let base_url = format!("http://{local}/");
+    let authority = AzureKeyVaultAuthority {
+        identity: AzureSigningIdentity::new(
+            "psign local Azure Key Vault test root CA",
+            "psign local Azure Key Vault code signing leaf",
+            20,
+            21,
+        )?,
+        certificate_name: args.certificate_name,
+        key_name: args.key_name,
+        version: args.version,
+        base_url: base_url.clone(),
+    };
+    write_generated_azure_certs(
+        &authority.identity,
+        &args.root_cert_output,
+        &args.leaf_cert_output,
+    )?;
+
+    println!("psign-server azure-key-vault-server listening on {base_url}");
+    println!(
+        "psign-server azure-key-vault-server certificate {}",
+        authority.certificate_name
+    );
+    println!(
+        "psign-server azure-key-vault-server leaf {base_url}certificates/{}",
+        authority.certificate_name
+    );
+    std::io::stdout().flush().ok();
+
+    for (served, stream) in listener.incoming().enumerate() {
+        let stream = stream.context("accept HTTP client")?;
+        if let Err(e) = handle_azure_key_vault_client(stream, &authority) {
+            eprintln!("request failed: {e:#}");
+        }
+        if args.max_requests != 0 && (served as u64 + 1) >= args.max_requests {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn run_artifact_signing_server(args: ArtifactSigningServerArgs) -> Result<()> {
+    let listener =
+        TcpListener::bind(&args.listen).with_context(|| format!("bind {}", args.listen))?;
+    let local = listener.local_addr().context("read listener address")?;
+    let base_url = format!("http://{local}/");
+    let authority = ArtifactSigningAuthority {
+        identity: AzureSigningIdentity::new(
+            "psign local Artifact Signing test root CA",
+            "psign local Artifact Signing code signing leaf",
+            30,
+            31,
+        )?,
+        response_mode: args.response_mode,
+        base_url: base_url.clone(),
+        next_operation: AtomicU64::new(1),
+        operations: Mutex::new(HashMap::new()),
+    };
+    write_generated_azure_certs(
+        &authority.identity,
+        &args.root_cert_output,
+        &args.leaf_cert_output,
+    )?;
+
+    println!("psign-server artifact-signing-server listening on {base_url}");
+    println!("psign-server artifact-signing-server endpoint {base_url}");
+    std::io::stdout().flush().ok();
+
+    for (served, stream) in listener.incoming().enumerate() {
+        let stream = stream.context("accept HTTP client")?;
+        if let Err(e) = handle_artifact_signing_client(stream, &authority) {
+            eprintln!("request failed: {e:#}");
+        }
+        if args.max_requests != 0 && (served as u64 + 1) >= args.max_requests {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn handle_azure_key_vault_client(
+    mut stream: TcpStream,
+    authority: &AzureKeyVaultAuthority,
+) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .context("set read timeout")?;
+    let request = read_http_request(&mut stream)?;
+    if !has_bearer_token(&request) {
+        return write_json_response(
+            &mut stream,
+            401,
+            "Unauthorized",
+            &serde_json::json!({"error":{"code":"Unauthorized","message":"missing bearer token"}}),
+        );
+    }
+
+    let path = path_without_query(&request.path);
+    let cert_path = format!("/certificates/{}", authority.certificate_name);
+    let cert_version_path = format!("{cert_path}/{}", authority.version);
+    let sign_path = format!(
+        "/keys/{}/versions/{}/sign",
+        authority.key_name, authority.version
+    );
+
+    match (request.method.as_str(), path) {
+        ("GET", p) if p == cert_path || p == cert_version_path => {
+            let leaf_der = authority.identity.leaf_der()?;
+            let kid = format!(
+                "{}keys/{}/versions/{}",
+                authority.base_url, authority.key_name, authority.version
+            );
+            write_json_response(
+                &mut stream,
+                200,
+                "OK",
+                &serde_json::json!({
+                    "id": format!("{}certificates/{}/{}", authority.base_url, authority.certificate_name, authority.version),
+                    "kid": kid,
+                    "cer": base64::engine::general_purpose::STANDARD.encode(leaf_der),
+                }),
+            )
+        }
+        ("POST", p) if p == sign_path => {
+            let body: Value =
+                serde_json::from_slice(&request.body).context("Key Vault sign JSON")?;
+            let alg = body
+                .get("alg")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Key Vault sign body missing alg"))?;
+            let digest_b64 = body
+                .get("value")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("Key Vault sign body missing value"))?;
+            let digest = base64::engine::general_purpose::STANDARD
+                .decode(digest_b64.trim())
+                .context("decode Key Vault sign digest")?;
+            let signature = authority.identity.sign_digest(alg, &digest)?;
+            write_json_response(
+                &mut stream,
+                200,
+                "OK",
+                &serde_json::json!({
+                    "kid": format!("{}keys/{}/versions/{}", authority.base_url, authority.key_name, authority.version),
+                    "value": base64::engine::general_purpose::STANDARD.encode(signature),
+                }),
+            )
+        }
+        _ => write_http_response(&mut stream, 404, "Not Found", "text/plain", b"not found\n"),
+    }
+}
+
+fn handle_artifact_signing_client(
+    mut stream: TcpStream,
+    authority: &ArtifactSigningAuthority,
+) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .context("set read timeout")?;
+    let request = read_http_request(&mut stream)?;
+    if !has_bearer_token(&request) {
+        return write_json_response(
+            &mut stream,
+            401,
+            "Unauthorized",
+            &serde_json::json!({"error":{"code":"Unauthorized","message":"missing bearer token"}}),
+        );
+    }
+
+    let path = path_without_query(&request.path);
+    if request.method == "GET" {
+        if let Some(id) = path.strip_prefix("/operations/") {
+            let operations = authority
+                .operations
+                .lock()
+                .map_err(|_| anyhow!("artifact signing operation store poisoned"))?;
+            if let Some(body) = operations.get(id) {
+                return write_json_response(&mut stream, 200, "OK", body);
+            }
+        }
+        return write_http_response(&mut stream, 404, "Not Found", "text/plain", b"not found\n");
+    }
+
+    if request.method != "POST" {
+        return write_http_response(
+            &mut stream,
+            405,
+            "Method Not Allowed",
+            "text/plain",
+            b"method not allowed\n",
+        );
+    }
+    let Some((account, profile)) = parse_artifact_sign_path(path) else {
+        return write_http_response(&mut stream, 404, "Not Found", "text/plain", b"not found\n");
+    };
+
+    match authority.response_mode {
+        ArtifactResponseMode::HttpError => {
+            return write_json_response(
+                &mut stream,
+                500,
+                "Internal Server Error",
+                &serde_json::json!({"error":{"code":"InjectedFailure"}}),
+            );
+        }
+        ArtifactResponseMode::MalformedJson => {
+            return write_http_response(&mut stream, 200, "OK", "application/json", b"{not-json");
+        }
+        ArtifactResponseMode::Valid
+        | ArtifactResponseMode::Failed
+        | ArtifactResponseMode::Canceled => {}
+    }
+
+    let body: Value =
+        serde_json::from_slice(&request.body).context("Artifact Signing submit JSON")?;
+    let alg = body
+        .get("signatureAlgorithm")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Artifact Signing submit body missing signatureAlgorithm"))?;
+    let digest_b64 = body
+        .get("digest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Artifact Signing submit body missing digest"))?;
+    let digest = base64::engine::general_purpose::STANDARD
+        .decode(digest_b64.trim())
+        .context("decode Artifact Signing digest")?;
+
+    let operation_id = format!(
+        "op-{}",
+        authority.next_operation.fetch_add(1, Ordering::Relaxed)
+    );
+    let operation_body = match authority.response_mode {
+        ArtifactResponseMode::Valid => {
+            let signature = authority.identity.sign_digest(alg, &digest)?;
+            serde_json::json!({
+                "id": operation_id,
+                "status": "Succeeded",
+                "signature": base64::engine::general_purpose::STANDARD.encode(signature),
+                "signingCertificate": base64::engine::general_purpose::STANDARD.encode(authority.identity.leaf_der()?),
+                "codeSigningAccountName": account,
+                "certificateProfileName": profile,
+            })
+        }
+        ArtifactResponseMode::Failed => serde_json::json!({
+            "id": operation_id,
+            "status": "Failed",
+            "error": {"code": "InjectedFailure", "message": "psign-server injected failure"}
+        }),
+        ArtifactResponseMode::Canceled => serde_json::json!({
+            "id": operation_id,
+            "status": "Canceled"
+        }),
+        ArtifactResponseMode::HttpError | ArtifactResponseMode::MalformedJson => unreachable!(),
+    };
+    authority
+        .operations
+        .lock()
+        .map_err(|_| anyhow!("artifact signing operation store poisoned"))?
+        .insert(operation_id.clone(), operation_body);
+
+    let operation_location = format!("{}operations/{operation_id}", authority.base_url);
+    write_http_response_with_headers(
+        &mut stream,
+        202,
+        "Accepted",
+        "application/json",
+        &[("Operation-Location", operation_location)],
+        br#"{"status":"InProgress"}"#,
+    )
+}
+
+fn path_without_query(path: &str) -> &str {
+    path.split_once('?').map(|(p, _)| p).unwrap_or(path)
+}
+
+fn has_bearer_token(request: &HttpRequest) -> bool {
+    request
+        .header("authorization")
+        .and_then(|h| h.trim().strip_prefix("Bearer "))
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn parse_artifact_sign_path(path: &str) -> Option<(&str, &str)> {
+    let mut segments = path.trim_matches('/').split('/');
+    let first = segments.next()?;
+    let account = segments.next()?;
+    let third = segments.next()?;
+    let profile_sign = segments.next()?;
+    if segments.next().is_some() || first != "codesigningaccounts" || third != "certificateprofiles"
+    {
+        return None;
+    }
+    let profile = profile_sign.strip_suffix(":sign")?;
+    Some((account, profile))
+}
+
+fn write_json_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &Value,
+) -> Result<()> {
+    let body = serde_json::to_vec(body).context("encode JSON response")?;
+    write_http_response(stream, status, reason, "application/json", &body)
 }
 
 fn build_ocsp_response_der(
