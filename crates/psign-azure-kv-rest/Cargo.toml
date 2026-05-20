@@ -1,6 +1,6 @@
 [package]
 name = "psign-azure-kv-rest"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Azure Key Vault certificate metadata + keys/sign REST (portable, blocking HTTP)"
 license.workspace = true
