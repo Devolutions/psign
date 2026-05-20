@@ -320,7 +320,7 @@ pub struct ArtifactSigningSubmitArgs {
     pub digest_file: PathBuf,
     #[arg(long, default_value = "RS256")]
     pub signature_algorithm: String,
-    #[arg(long, default_value = "2023-06-15-preview")]
+    #[arg(long, default_value = "2024-06-15")]
     pub api_version: String,
     #[arg(long)]
     pub correlation_id: Option<String>,
@@ -696,6 +696,40 @@ pub struct SignArgs {
     /// OAuth authority host prefix (`-au`), e.g. `https://login.microsoftonline.com`.
     #[arg(long = "azure-authority", visible_alias = "au")]
     pub azure_authority: Option<String>,
+    /// Artifact Signing metadata JSON (same shape as Microsoft's dlib `/dmdf` file) for REST-backed portable signing.
+    #[arg(long = "artifact-signing-metadata")]
+    pub artifact_signing_metadata: Option<PathBuf>,
+    /// Artifact Signing regional hostname segment, e.g. `westus`, when not using metadata `Endpoint`.
+    #[arg(long = "artifact-signing-region")]
+    pub artifact_signing_region: Option<String>,
+    /// Artifact Signing data-plane endpoint, e.g. `https://wus2.codesigning.azure.net`.
+    #[arg(long = "artifact-signing-endpoint")]
+    pub artifact_signing_endpoint: Option<String>,
+    #[arg(long = "artifact-signing-account-name")]
+    pub artifact_signing_account_name: Option<String>,
+    #[arg(long = "artifact-signing-profile-name")]
+    pub artifact_signing_profile_name: Option<String>,
+    #[arg(long = "artifact-signing-signature-algorithm")]
+    pub artifact_signing_signature_algorithm: Option<String>,
+    #[arg(long = "artifact-signing-api-version")]
+    pub artifact_signing_api_version: Option<String>,
+    #[arg(long = "artifact-signing-correlation-id")]
+    pub artifact_signing_correlation_id: Option<String>,
+    #[arg(long = "artifact-signing-access-token")]
+    pub artifact_signing_access_token: Option<String>,
+    #[arg(long = "artifact-signing-managed-identity")]
+    pub artifact_signing_managed_identity: bool,
+    #[arg(long = "artifact-signing-tenant-id")]
+    pub artifact_signing_tenant_id: Option<String>,
+    #[arg(long = "artifact-signing-client-id")]
+    pub artifact_signing_client_id: Option<String>,
+    #[arg(long = "artifact-signing-client-secret")]
+    pub artifact_signing_client_secret: Option<String>,
+    #[arg(long = "artifact-signing-authority")]
+    pub artifact_signing_authority: Option<String>,
+    /// Override Artifact Signing data-plane origin for deterministic local tests.
+    #[arg(long = "artifact-signing-endpoint-base-url", hide = true)]
+    pub artifact_signing_endpoint_base_url: Option<String>,
     /// Optional text file listing extra inputs to sign, one path per line (`-ifl`).
     #[arg(long = "input-file-list", visible_alias = "ifl")]
     pub sign_input_file_list: Option<PathBuf>,

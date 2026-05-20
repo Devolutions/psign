@@ -1,6 +1,7 @@
 use crate::cli::{DigestAlgorithm, GlobalOpts, SignArgs};
 use crate::win::code_sign_format;
 use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
 use std::ffi::CString;
 use std::iter::once;
 use std::mem::size_of;
@@ -288,6 +289,61 @@ pub(crate) fn resolved_decoupled_dlib_path(args: &SignArgs) -> Option<std::path:
         .map(|p| artifact_signing_dlib_path(p))
 }
 
+#[derive(Deserialize)]
+#[allow(non_snake_case)]
+struct ArtifactSigningMetadataDoc {
+    Endpoint: String,
+    CodeSigningAccountName: String,
+    CertificateProfileName: String,
+    #[serde(default)]
+    ExcludeCredentials: Option<Vec<String>>,
+}
+
+fn validate_artifact_signing_metadata_if_azure_dlib(
+    dlib: &std::path::Path,
+    dmdf: &std::path::Path,
+    metadata: &[u8],
+) -> Result<()> {
+    let is_azure_dlib = dlib
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("Azure.CodeSigning.Dlib.dll"));
+    if !is_azure_dlib {
+        return Ok(());
+    }
+    let doc: ArtifactSigningMetadataDoc = serde_json::from_slice(metadata)
+        .with_context(|| format!("parse Azure Artifact Signing metadata '{}'", dmdf.display()))?;
+    if doc.Endpoint.trim().is_empty() {
+        return Err(anyhow!(
+            "Azure Artifact Signing metadata '{}' has an empty Endpoint",
+            dmdf.display()
+        ));
+    }
+    if doc.CodeSigningAccountName.trim().is_empty() {
+        return Err(anyhow!(
+            "Azure Artifact Signing metadata '{}' has an empty CodeSigningAccountName",
+            dmdf.display()
+        ));
+    }
+    if doc.CertificateProfileName.trim().is_empty() {
+        return Err(anyhow!(
+            "Azure Artifact Signing metadata '{}' has an empty CertificateProfileName",
+            dmdf.display()
+        ));
+    }
+    if let Some(excluded) = &doc.ExcludeCredentials {
+        for (i, value) in excluded.iter().enumerate() {
+            if value.trim().is_empty() {
+                return Err(anyhow!(
+                    "Azure Artifact Signing metadata '{}' has an empty ExcludeCredentials[{i}]",
+                    dmdf.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_decoupled_digest_info(
     dlib: &std::path::Path,
     dmdf: &std::path::Path,
@@ -303,6 +359,7 @@ fn load_decoupled_digest_info(
     if metadata.is_empty() {
         return Err(anyhow!("dmdf metadata file must not be empty"));
     }
+    validate_artifact_signing_metadata_if_azure_dlib(dlib, dmdf, &metadata)?;
     let mut metadata_owned = metadata;
     let mut blob = CRYPT_INTEGER_BLOB {
         cbData: metadata_owned.len() as u32,

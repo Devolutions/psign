@@ -1,6 +1,6 @@
 # Linux signing pipelines (what works today)
 
-**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys or Azure Key Vault RSA signing, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. It still does not provide a broad native-compatible `sign` verb, MSIX signing/embed, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
+**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys, Azure Key Vault RSA signing, or Azure Artifact Signing REST, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. It still does not provide a broad native-compatible `sign` verb, MSIX signing/embed, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
 
 For tool-by-tool gaps vs **`signtool.exe`**, AzureSignTool, and Artifact Signing, see [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md). On Windows, for writable copies of native signing binaries outside protected install paths, see [`writable-signing-binaries.md`](writable-signing-binaries.md).
 
@@ -59,6 +59,34 @@ psign-tool --mode portable sign \
 
 Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
 
+## 1.3 Portable PE signing with Azure Artifact Signing REST
+
+With **`--features artifact-signing-rest`**, PE/WinMD signing can use Azure Artifact Signing as a REST remote signer without Microsoft client DLLs or SignTool:
+
+```bash
+psign-tool portable sign-pe ./MyApp.exe \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --timestamp-url http://timestamp.acs.microsoft.com/ \
+  --timestamp-digest sha256 \
+  --digest sha256 \
+  --output ./MyApp.signed.exe
+```
+
+The native-shaped in-place form accepts the same metadata file through `--dmdf`:
+
+```bash
+psign-tool --mode portable sign \
+  --dmdf ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --timestamp-url http://timestamp.acs.microsoft.com/ \
+  --timestamp-digest sha256 \
+  --digest sha256 \
+  ./MyApp.exe
+```
+
+This path builds Authenticode CMS locally, sends the CMS authenticated-attributes digest to Artifact Signing `:sign`, embeds the returned RSA signature and signing certificate, then attaches the RFC3161 timestamp before PE embedding. For production, keep timestamping enabled because Artifact Signing profile certificates are short-lived.
+
 ## 1.5 RFC 3161 TSA query/reply (DER only; no embed)
 
 **`psign-tool portable rfc3161-timestamp-req`** builds **`TimeStampReq`** DER from **`--digest-hex`** / **`--digest-file`** (message-imprint preimage; optional **`--nonce`**, **`--cert-req`**). **`rfc3161-timestamp-resp-inspect`** prints **`pki_status`** / **`pki_status_int`** (raw **`PKIStatus`** INTEGER) / **`granted`** / token length, **`time_stamp_token_prefix_hex`** (first **16** octets of the **`timeStampToken`** TLV), **`status_strings_json`**, **`fail_info_tlv_hex`**, and **`fail_info_flags_json`** from **`TimeStampResp`** DER. When the token is a parseable CMS **`id-ct-TSTInfo`** timestamp token, it also prints structural **`tst_info_*`** fields for policy OID, message-imprint digest OID/hash, serial, **`genTime`**, and nonce; **`--expect-digest-hex`** and **`--expect-nonce`** add request-binding diagnostics (`tst_info_message_imprint_match`, `tst_info_nonce_match`). These fields are diagnostic only and do not imply TSA trust or CMS signature validation. Build with **`--features timestamp-http`** for **`rfc3161-timestamp-http-post --url …`** (Rustls POST **`application/timestamp-query`**, response DER to stdout / **`--output`**); otherwise use **`curl`** or OpenSSL **`ts`**. **`timestamp-pe-rfc3161`** can attach the granted token to an existing PE Authenticode `SignerInfo`; non-PE timestamp mutation still goes through **`psign-tool`** / **`SignerTimeStampEx3`** today.
@@ -74,9 +102,9 @@ It serves RFC 3161 **`POST`** requests as **`application/timestamp-reply`** with
 
 For Windows parser/trust experiments, **`--cert-output PATH`** writes the generated root CA certificate and **`--tsa-cert-output PATH`** writes the generated TSA leaf certificate. The token includes the leaf and root certificates; local trust-store setup is still test-only.
 
-## 2. Azure Artifact Signing — digest + REST on Linux, embed on Windows
+## 2. Azure Artifact Signing — low-level digest + REST helper
 
-Build **`psign-tool portable`** with **`--features artifact-signing-rest`**.
+Build **`psign-tool portable`** with **`--features artifact-signing-rest`**. For PE/WinMD, prefer section 1.3. Use this lower-level helper only when another pipeline already prepared the exact digest that the service should sign.
 
 1. **Subject digest** (raw bytes for REST body):
 
@@ -101,7 +129,7 @@ Build **`psign-tool portable`** with **`--features artifact-signing-rest`**.
      --managed-identity   # or --access-token / tenant + client-id + client-secret
    ```
 
-3. **Embed** PKCS#7 / complete Authenticode: still **`psign-tool`** + **`SignerSignEx3`** (and typically **`--dlib`** / **`--dmdf`** for Trusted Signing) until a portable embedder exists.
+3. **Embed** PKCS#7 / complete Authenticode: PE/WinMD is now handled by `portable sign-pe --artifact-signing-*`; non-PE remote-sign embedding still requires Windows mode or future portable remote-signer support.
 
 Optional debug: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 

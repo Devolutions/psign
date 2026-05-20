@@ -4,13 +4,13 @@ Microsoft **Artifact Signing** (often called **Trusted Signing**) integrates wit
 
 **psign-tool** uses the same Win32 bridge as SignTool: **`SignerSignEx3`** with **`SIGNER_DIGEST_SIGN_INFO`** pointing at the DLL exports (this repo prefers **`AuthenticodeDigestSignExWithFileHandle`** when present, matching Microsoft’s Azure dlib).
 
-**psign-tool portable** cannot load the mixed-mode/.NET dlib or call **`SignerSignEx3`**; use it **after** embedding for digest consistency checks and **anchor-based trust verification** (see [Portable post-sign verification](#portable-post-sign-verification) below). With **`--features artifact-signing-rest`** it can still call the same **`:sign`** REST LRO as **`psign-tool`** (hash in → JSON out — embedding remains a separate step).
+**psign-tool portable** cannot load the mixed-mode/.NET dlib or call **`SignerSignEx3`**. For PE/WinMD, it can now avoid Microsoft client-side signing tools entirely by building Authenticode CMS locally, asking Artifact Signing REST to sign the CMS authenticated-attributes digest, optionally adding an RFC3161 timestamp, and embedding the PKCS#7 as a PE `WIN_CERTIFICATE`. Other SIP formats still use Windows mode or the dlib bridge until their portable embedders are implemented.
 
-### Optional: Azure Code Signing **REST** hash signing (experimental)
+### Azure Code Signing **REST** hash signing
 
 PowerShell OpenAuthenticode can sign via the **`Azure.CodeSigning.Sdk`** client against the same **data-plane** API documented in Azure REST specs (**`CertificateProfileOperations_Sign`**, host template **`https://{region}.codesigning.azure.net/`**, OAuth scope **`https://codesigning.azure.net/.default`**).
 
-With **`cargo build -p psign --features artifact-signing-rest --bin psign-tool`**:
+With **`cargo build -p psign --features artifact-signing-rest --bin psign-tool`**, the low-level helper remains available:
 
 ```powershell
 psign-tool.exe artifact-signing-submit `
@@ -22,17 +22,17 @@ psign-tool.exe artifact-signing-submit `
   --managed-identity
 ```
 
-This runs the **`:sign`** LRO and prints the final JSON (**`signature`**, **`signingCertificate`**, …). It does **not** embed an Authenticode PKCS#7 into a PE by itself — combine with your signing pipeline or continue using **`--dlib`** / **`--trusted-signing-dlib-root`** for **`SignerSignEx3`** embedding.
+This runs the **`:sign`** LRO and prints the final JSON. The helper accepts both the current stable wrapped result shape (`result.signature`, `result.signingCertificate`) and older top-level test/service shapes.
 
 #### Linux / CI: same REST helper from **`psign-tool portable`**
 
-Build or install with **`--features artifact-signing-rest`**, then use **`artifact-signing-submit`** with the same flags as Windows. Produce a raw Authenticode digest file from an unsigned PE with **`pe-digest --encoding raw --output digest.bin`** (SHA-256 → 32 bytes).
+Build or install with **`--features artifact-signing-rest`**, then use **`artifact-signing-submit`** with the same flags as Windows when you need a low-level digest-to-signature call.
 
 **Do not confuse digest roles:** **`pe-digest`** is the **PE Authenticode image** fingerprint (typical **`:sign`** subject-hash samples for **unsigned** binaries). **`pe-signer-rs256-prehash --encoding raw`** is the **CMS RFC 5652 §5.4** **SHA-256** over the signer’s authenticated-attribute **`SET`** — the raw input Azure Key Vault **`keys/sign`** uses for **`RS256`** when you are re-signing **`SignerInfo`** on an **embedded PKCS#7** (see [`migration-azuresigntool.md`](migration-azuresigntool.md)). Trusted Signing **`:sign`** contracts follow Microsoft’s profile/docs; use the digest shape your integration expects.
 
 ```bash
 cargo build -p psign-digest-cli --features artifact-signing-rest --locked
-./target/debug/psign-tool portable pe-digest --algorithm sha256 --encoding raw --output digest.bin ./MyApp.exe
+./target/debug/psign-tool portable pe-signer-rs256-prehash --encoding raw --output digest.bin ./MyApp.signed-template.exe
 ./target/debug/psign-tool portable artifact-signing-submit \
   --region westus --account-name myAccount --profile-name myProfile \
   --digest-file digest.bin --signature-algorithm RS256 --managed-identity
@@ -40,13 +40,43 @@ cargo build -p psign-digest-cli --features artifact-signing-rest --locked
 
 Optional debug logs: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 
+## Pure REST PE/WinMD signing (no Microsoft client tools)
+
+For PE/WinMD, prefer the first-class portable signer instead of manually staging a digest:
+
+```bash
+psign-tool portable sign-pe ./MyApp.exe \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --timestamp-url http://timestamp.acs.microsoft.com/ \
+  --timestamp-digest sha256 \
+  --digest sha256 \
+  --output ./MyApp.signed.exe
+```
+
+The native-shaped in-place form is also available:
+
+```bash
+psign-tool --mode portable sign \
+  --dmdf ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --timestamp-url http://timestamp.acs.microsoft.com/ \
+  --timestamp-digest sha256 \
+  --digest sha256 \
+  ./MyApp.exe
+```
+
+Authentication choices are mutually exclusive: use **`--artifact-signing-managed-identity`**, **`--artifact-signing-access-token`**, or the service-principal trio **`--artifact-signing-tenant-id`**, **`--artifact-signing-client-id`**, and **`--artifact-signing-client-secret`**. Without metadata, pass **`--artifact-signing-endpoint`** or **`--artifact-signing-region`** plus **`--artifact-signing-account-name`** and **`--artifact-signing-profile-name`**.
+
+Artifact Signing certificates are short-lived; include **`--timestamp-url http://timestamp.acs.microsoft.com/ --timestamp-digest sha256`** for production signatures.
+
 ## Flag mapping (Microsoft sample → psign-tool)
 
 | SignTool / docs | psign-tool |
 |-----------------|------------------|
 | `/dlib` path to `Azure.CodeSigning.Dlib.dll` | `--dlib <path>` |
 | Same, but NuGet extract root | `--trusted-signing-dlib-root <root>` → resolves to `<root>\bin\x64\Azure.CodeSigning.Dlib.dll` or `<root>\bin\x86\...` matching **this executable’s** architecture (`cfg!(target_pointer_width)`) |
-| `/dmdf` metadata JSON | `--dmdf <path>` |
+| `/dmdf` metadata JSON | Windows dlib: `--dmdf <path>`; portable REST PE: `--dmdf <path>` or `--artifact-signing-metadata <path>` |
 | `/fd SHA256` | `--digest sha256` |
 | `/tr` RFC3161 URL | `--timestamp-url <url>` |
 | `/td SHA256` | `--timestamp-digest sha256` |

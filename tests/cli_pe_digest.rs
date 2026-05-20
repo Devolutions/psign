@@ -2772,6 +2772,14 @@ fn spawn_psign_azure_key_vault_server(max_requests: u64) -> (PsignServerGuard, S
 
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
 fn spawn_psign_artifact_signing_server(max_requests: u64) -> (PsignServerGuard, String) {
+    spawn_psign_artifact_signing_server_with_args(max_requests, &[])
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+fn spawn_psign_artifact_signing_server_with_args(
+    max_requests: u64,
+    extra_args: &[&str],
+) -> (PsignServerGuard, String) {
     let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
     let max_requests = max_requests.to_string();
     server_cmd.args([
@@ -2781,6 +2789,7 @@ fn spawn_psign_artifact_signing_server(max_requests: u64) -> (PsignServerGuard, 
         "--max-requests",
         max_requests.as_str(),
     ]);
+    server_cmd.args(extra_args);
     server_cmd.stdout(std::process::Stdio::piped());
     server_cmd.stderr(std::process::Stdio::piped());
     let mut guard = PsignServerGuard(server_cmd.spawn().expect("spawn psign-server"));
@@ -3153,12 +3162,201 @@ fn psign_server_artifact_signing_submit_serves_portable_cli() {
         json.get("status").and_then(Value::as_str),
         Some("Succeeded")
     );
-    let sig = json
+    let result = json.get("result").unwrap_or(&json);
+    let sig = result
         .get("signature")
         .and_then(Value::as_str)
         .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
         .expect("base64 signature");
     assert_eq!(sig.len(), 256, "RSA-2048 signature length");
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_pe_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_pe = dir.path().join("tiny32.artifact-portable-signed.exe");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-pe")
+        .arg(tiny32_unsigned_fixture())
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_pe);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-pe: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&out_pe);
+    verify.assert().success();
+
+    let signed = std::fs::read(&out_pe).expect("read signed PE");
+    let pkcs7 = verify_pe::pe_nth_pkcs7_signed_data_der(&signed, 0).expect("extract PKCS#7");
+    let sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7).expect("parse SignedData");
+    let indirect = pkcs7::signed_data_spc_indirect_message_digest_octets(&sd).expect("indirect");
+    pkcs7::verify_signed_data_authenticode_indirect_digest_and_rsa_sha256_pkcs1v15_signature(
+        &sd, 0, &indirect,
+    )
+    .expect("portable Artifact Signing Authenticode RSA signature verifies");
+}
+
+#[cfg(all(
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "artifact-signing-rest"
+))]
+#[test]
+fn psign_server_artifact_signing_signs_and_timestamps_pe_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_pe = dir.path().join("tiny32.artifact-portable-timestamped.exe");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-pe")
+        .arg(tiny32_unsigned_fixture())
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_pe);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-pe: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
+
+    let mut inspect = portable_cmd();
+    inspect
+        .arg("inspect-authenticode")
+        .arg(&out_pe)
+        .arg("--input")
+        .arg("pe");
+    inspect
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "microsoft_nested_rfc3161_attribute",
+        ))
+        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+}
+
+#[cfg(all(
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "artifact-signing-rest"
+))]
+#[test]
+fn mode_portable_sign_uses_artifact_signing_metadata_and_rfc3161_timestamp_for_pe() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir
+        .path()
+        .join("tiny32.artifact-mode-portable-timestamped.exe");
+    let metadata_path = dir.path().join("metadata.json");
+    std::fs::copy(tiny32_unsigned_fixture(), &pe_path).expect("copy unsigned PE");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
+    std::fs::write(
+        &metadata_path,
+        format!(
+            r#"{{"Endpoint":"{}","CodeSigningAccountName":"acct","CertificateProfileName":"prof","CorrelationId":"test-corr"}}"#,
+            endpoint.trim_end_matches('/')
+        ),
+    )
+    .expect("write metadata");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--dmdf")
+        .arg(&metadata_path)
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg(&pe_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
+
+    let mut inspect = portable_cmd();
+    inspect
+        .arg("inspect-authenticode")
+        .arg(&pe_path)
+        .arg("--input")
+        .arg("pe");
+    inspect
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_failed_status_fails_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0xcdu8; 32]).expect("write digest");
+
+    let (mut guard, endpoint) =
+        spawn_psign_artifact_signing_server_with_args(2, &["--response-mode", "failed"]);
+    let mut cmd = portable_cmd();
+    cmd.arg("artifact-signing-submit")
+        .arg("--region")
+        .arg("local")
+        .arg("--account-name")
+        .arg("acct")
+        .arg("--profile-name")
+        .arg("prof")
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--access-token")
+        .arg("test-token")
+        .arg("--endpoint-base-url")
+        .arg(&endpoint);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("codesign operation failed"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
 }
 
 #[cfg(all(
