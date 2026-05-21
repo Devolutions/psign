@@ -24,3 +24,4 @@ pub mod verify_catalog_resolve;
 pub mod verify_chain;
 pub mod verify_detached;
 pub mod verify_format;
+pub mod zip_authenticode;

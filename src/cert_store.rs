@@ -548,7 +548,7 @@ fn write_private_key_file(path: &Path, bytes: &[u8]) -> Result<()> {
     }
 }
 
-fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, String)> {
+pub(crate) fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, String)> {
     let crypto_context = Pkcs12CryptoContext::new_with_password(password)?;
     let parsing_params = Pkcs12ParsingParams::default();
     let pfx = Pfx::from_der(bytes, &crypto_context, &parsing_params)?;

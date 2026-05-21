@@ -11,6 +11,13 @@ use digest::Digest;
 use sha1::Sha1;
 use sha2::{Sha256, Sha384, Sha512};
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScriptAuthenticodeDigestReport {
+    pub pkcs7_der: Vec<u8>,
+    pub embedded_digest: Vec<u8>,
+    pub computed_digest: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MarkerFamily {
     Hash,
@@ -142,7 +149,7 @@ pub(crate) fn hash_payload(kind: PeAuthenticodeHashKind, payload: &[u8]) -> Resu
 }
 
 fn looks_like_b64_token(s: &str) -> bool {
-    s.len() >= 16
+    s.len() >= 4
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
 }
@@ -236,7 +243,10 @@ pub fn is_wsh_extension(ext: &str) -> bool {
 }
 
 /// Compare PKCS#7 indirect digest with a heuristic UTF-16 hash over the file excluding the sig block.
-pub(crate) fn verify_powershell_class_digest(raw: &[u8], ext: &str) -> Result<()> {
+pub fn powershell_class_digest_report(
+    raw: &[u8],
+    ext: &str,
+) -> Result<ScriptAuthenticodeDigestReport> {
     let ext_l = ext.to_ascii_lowercase();
     if !extension_supported(&ext_l) {
         return Err(anyhow!(
@@ -261,6 +271,16 @@ pub(crate) fn verify_powershell_class_digest(raw: &[u8], ext: &str) -> Result<()
             "script Authenticode digest mismatch (experimental UTF-16 strip heuristic vs PKCS#7)"
         ));
     }
+    Ok(ScriptAuthenticodeDigestReport {
+        pkcs7_der: pkcs7,
+        embedded_digest: embedded.to_vec(),
+        computed_digest: computed,
+    })
+}
+
+/// Compare PKCS#7 indirect digest with a heuristic UTF-16 hash over the file excluding the sig block.
+pub(crate) fn verify_powershell_class_digest(raw: &[u8], ext: &str) -> Result<()> {
+    powershell_class_digest_report(raw, ext)?;
     Ok(())
 }
 

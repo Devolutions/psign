@@ -13,6 +13,7 @@ use psign_authenticode_trust::{
     policy::{OnlineTrustOptions, RevocationMode},
     trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_detached_bytes,
     trust_verify_msi_bytes, trust_verify_pe_bytes, trust_verify_wim_esd_path,
+    trust_verify_zip_bytes,
 };
 #[cfg(feature = "azure-kv-sign-portable")]
 use psign_azure_kv_rest::{
@@ -48,6 +49,7 @@ use psign_sip_digest::timestamp::{
 };
 use psign_sip_digest::verify_pe;
 use psign_sip_digest::verify_script_digest_consistency;
+use psign_sip_digest::zip_authenticode;
 use serde::Deserialize;
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
@@ -596,6 +598,12 @@ enum Command {
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
     },
+    /// Custom ZIP Authenticode comment signature: verify ZIP digest binding plus PKCS#7 chain to anchors.
+    TrustVerifyZip {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
     /// Print whether embedded PKCS#7 bytes contain **SPC_PE_IMAGE_PAGE_HASHES** attribute OIDs (V1/V2 DER scan).
     ///
     /// Outputs `yes` or `no` (does **not** validate page segments vs file bytes — use **`verify-pe-page-hashes`** for the experimental Rust check).
@@ -884,6 +892,8 @@ enum Command {
     },
     /// CAB with embedded PKCS#7: compare indirect digest to Rust CAB hash.
     VerifyCab { path: PathBuf },
+    /// Custom ZIP Authenticode comment signature: compare ZIP digest binding and reconstructed script digest.
+    VerifyZip { path: PathBuf },
     /// Write **`\\u{5}DigitalSignature`** stream (**raw PKCS#7 DER**) from an **`.msi`** to stdout or **`--output`**.
     ///
     /// Same blob as **`pkcs7-signer-rs256-prehash`** input for that signature. For real signed MSIs only; see **`tests/fixtures/msi-authenticode-upstream/README.md`** for the PKCS#7-only stub used in CI.
@@ -2088,6 +2098,13 @@ where
                 .with_context(|| format!("trust-verify-detached {}", content.display()))?;
             print_trust_ok("trust-verify-detached", &report);
         }
+        Command::TrustVerifyZip { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = trust_verify_zip_bytes(&bytes, &opts)
+                .with_context(|| format!("trust-verify-zip {}", path.display()))?;
+            print_trust_ok("trust-verify-zip", &report);
+        }
         Command::PeHasPageHashes { path } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             let present = page_hashes::pe_embedded_pkcs7_contains_page_hash_attribute(&bytes)
@@ -2747,6 +2764,15 @@ where
         Command::VerifyCab { path } => {
             verify_cab_digest_consistency(&path)
                 .with_context(|| format!("verify-cab {}", path.display()))?;
+        }
+        Command::VerifyZip { path } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let sig = zip_authenticode::verify_zip_digest_binding(&bytes)
+                .with_context(|| format!("verify-zip {}", path.display()))?;
+            let script =
+                zip_authenticode::signature_script_from_parts(&sig.digest, &sig.pkcs7_base64);
+            verify_script_digest_consistency(script.as_bytes(), "ps1")
+                .with_context(|| format!("verify-zip reconstructed signature {}", path.display()))?;
         }
         Command::ExtractMsiPkcs7 { path, output } => {
             use std::io::Write;

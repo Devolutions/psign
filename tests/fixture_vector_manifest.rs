@@ -312,6 +312,44 @@ fn package_signing_fixture_manifest_matches_files() {
     );
 }
 
+#[test]
+fn zip_authenticode_fixture_manifest_matches_files() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/zip-authenticode/zip-authenticode-fixtures.json"
+    ))
+    .expect("ZIP Authenticode fixture manifest JSON");
+
+    assert_eq!(
+        manifest["generated_by"],
+        "scripts/ci/build-zip-authenticode-fixtures.ps1"
+    );
+    assert_eq!(
+        manifest["pfx_thumbprint"],
+        "A9FDF3593E91689CC93B1CEBED5E8FFC1F6FEE38"
+    );
+
+    let entries = manifest["entries"]
+        .as_array()
+        .expect("ZIP Authenticode entries must be an array");
+    assert_eq!(entries.len(), 2, "ZIP Authenticode fixture count");
+    assert_hash_entries(entries);
+
+    let states: HashSet<_> = entries
+        .iter()
+        .map(|entry| entry["state"].as_str().expect("state").to_owned())
+        .collect();
+    assert_eq!(
+        states,
+        HashSet::from(["unsigned".to_owned(), "signed".to_owned()])
+    );
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["family"].as_str().expect("family") == "zip"),
+        "ZIP fixture manifest should contain only zip family entries"
+    );
+}
+
 fn manifest() -> serde_json::Value {
     serde_json::from_str(include_str!("fixtures/code-signing-vectors.json"))
         .expect("code-signing vector manifest JSON")

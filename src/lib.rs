@@ -141,6 +141,7 @@ fn portable_command_for_path(path: &std::path::Path) -> anyhow::Result<&'static 
         "msi" | "msp" => Ok("verify-msi"),
         "wim" | "esd" => Ok("verify-esd"),
         "msix" | "appx" | "msixbundle" | "appxbundle" => Ok("verify-msix"),
+        "zip" => Ok("verify-zip"),
         "cat" => Ok("verify-catalog"),
         "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "vbs" | "wsf" => {
             Ok("verify-script")
@@ -224,6 +225,7 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
                 "verify-msi" => "trust-verify-msi",
                 "verify-esd" => "trust-verify-esd",
                 "verify-catalog" => "trust-verify-catalog",
+                "verify-zip" => "trust-verify-zip",
                 other => {
                     return Err(anyhow::anyhow!(
                         "--mode portable verify trust options are not supported for inferred command {other}"

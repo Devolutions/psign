@@ -1,0 +1,25 @@
+{
+  "generated_by": "scripts/ci/build-zip-authenticode-fixtures.ps1",
+  "pfx": "tests\\fixtures\\devolutions-authenticode\\authenticode-test-cert.pfx",
+  "pfx_thumbprint": "A9FDF3593E91689CC93B1CEBED5E8FFC1F6FEE38",
+  "entries": [
+    {
+      "id": "zip-authenticode-unsigned",
+      "family": "zip",
+      "state": "unsigned",
+      "path": "tests\\fixtures\\zip-authenticode\\unsigned\\sample.zip",
+      "size_bytes": 311,
+      "sha256": "3fd305d81093b7e74768acb9889e742cd710b9d52bbadcd7cdf657c8f6b82fc1"
+    },
+    {
+      "id": "zip-authenticode-signed",
+      "family": "zip",
+      "state": "signed",
+      "path": "tests\\fixtures\\zip-authenticode\\signed\\sample.signed.zip",
+      "size_bytes": 2331,
+      "sha256": "8ea210d406f6b241b5c7b934e6a24543a2234339d0aa10224dec001015f45fdb",
+      "source_path": "tests\\fixtures\\zip-authenticode\\unsigned\\sample.zip",
+      "tool": "psign ZIP Authenticode"
+    }
+  ]
+}

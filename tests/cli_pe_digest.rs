@@ -59,9 +59,11 @@ fn help_lists_core_subcommands() {
         "verify-pe",
         "trust-verify-pe",
         "trust-verify-cab",
+        "trust-verify-zip",
         "trust-verify-catalog",
         "trust-verify-detached",
         "verify-cab",
+        "verify-zip",
         "extract-cab-pkcs7",
         "cab-signer-rs256-prehash",
         "verify-msi",
@@ -199,6 +201,13 @@ fn package_fixture(rel: &str) -> PathBuf {
     let separator = std::path::MAIN_SEPARATOR.to_string();
     repo_root()
         .join("tests/fixtures/package-signing")
+        .join(rel.replace('/', &separator))
+}
+
+fn zip_fixture(rel: &str) -> PathBuf {
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    repo_root()
+        .join("tests/fixtures/zip-authenticode")
         .join(rel.replace('/', &separator))
 }
 
@@ -1886,6 +1895,41 @@ fn portable_verify_negative_trust_cab_no_anchors_cli() {
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("no trust anchors"));
+}
+
+#[test]
+fn portable_verify_zip_fixture_cli() {
+    let signed = zip_fixture("signed/sample.signed.zip");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-zip").arg(&signed);
+    verify.assert().success();
+
+    let mut trust = portable_cmd();
+    trust
+        .arg("trust-verify-zip")
+        .arg(&signed)
+        .arg("--anchor-dir")
+        .arg(anchor_dir(&repo_root()));
+    trust
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-zip: ok"));
+}
+
+#[test]
+fn portable_verify_zip_fixture_detects_tamper_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let tampered = dir.path().join("tampered.zip");
+    let mut bytes = std::fs::read(zip_fixture("signed/sample.signed.zip")).unwrap();
+    bytes[30] ^= 0x01;
+    std::fs::write(&tampered, bytes).unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("verify-zip").arg(&tampered);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("ZIP Authenticode digest mismatch"));
 }
 
 #[test]

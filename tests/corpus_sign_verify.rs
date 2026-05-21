@@ -216,6 +216,56 @@ fn unsigned_corpus_freshly_signed_with_psign_verifies_with_psign() {
     }
 }
 
+#[test]
+fn committed_zip_authenticode_fixture_verifies_with_psign() {
+    let repo = repo_root();
+    verify_embedded_with_psign(
+        &repo.join("tests\\fixtures\\zip-authenticode\\signed\\sample.signed.zip"),
+        "zip-authenticode-signed",
+    );
+}
+
+#[test]
+fn unsigned_zip_freshly_signed_with_psign_verifies_and_detects_tamper() {
+    let repo = repo_root();
+    let temp = TempDir::new("psign-zip-authenticode");
+    let dest = temp.path().join("sample.signed.zip");
+    std::fs::copy(
+        repo.join("tests\\fixtures\\zip-authenticode\\unsigned\\sample.zip"),
+        &dest,
+    )
+    .expect("copy unsigned ZIP fixture");
+
+    let sign = psign()
+        .args(["sign", "--pfx"])
+        .arg(test_pfx_path(&repo))
+        .args(["--password", TEST_PFX_PASSWORD, "--digest", "sha256"])
+        .arg(&dest)
+        .output()
+        .expect("run psign ZIP sign");
+    assert_success(sign, "psign sign ZIP");
+    verify_embedded_with_psign(&dest, "fresh ZIP");
+
+    let mut bytes = std::fs::read(&dest).expect("read signed ZIP");
+    bytes[30] ^= 0x01;
+    std::fs::write(&dest, bytes).expect("write tampered ZIP");
+    let verify = psign()
+        .args(["verify", "--policy", "pa", "--allow-test-root"])
+        .arg(&dest)
+        .output()
+        .expect("run psign verify tampered ZIP");
+    assert!(
+        !verify.status.success(),
+        "tampered ZIP unexpectedly verified\n{}",
+        output_text(&verify)
+    );
+    assert!(
+        output_text(&verify).contains("ZIP Authenticode digest mismatch"),
+        "tampered ZIP should fail on digest mismatch\n{}",
+        output_text(&verify)
+    );
+}
+
 fn verify_embedded_with_psign(path: &Path, label: &str) {
     let verify = psign()
         .args(["verify", "--policy", "pa", "--allow-test-root"])

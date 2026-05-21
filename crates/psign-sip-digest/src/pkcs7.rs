@@ -62,6 +62,12 @@ const SPC_MSI_SIGINFO_VALUE_DER: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
     0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
 ];
+/// Stable PowerShell `SpcSigInfo` value DER observed in `signtool sign` script signatures.
+const SPC_SCRIPT_SIGINFO_VALUE_DER: &[u8] = &[
+    0x30, 0x26, 0x02, 0x03, 0x01, 0x00, 0x00, 0x04, 0x10, 0x1f, 0xcc, 0x3b, 0x60, 0x59, 0x4b, 0x08,
+    0x4e, 0xb7, 0x24, 0xd2, 0xc6, 0x29, 0x7e, 0xf3, 0x51, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x02,
+    0x01, 0x00, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00,
+];
 
 /// **`SignerInfo.digestAlgorithm`** / **`DigestInfo.digestAlgorithm`** SHA-1 OID.
 const DIGEST_OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
@@ -184,6 +190,21 @@ pub fn msi_spc_indirect_data(
     )
 }
 
+/// Build the Authenticode `SpcIndirectDataContent` for a PowerShell-class script digest.
+pub fn script_spc_indirect_data(
+    digest_algorithm: AuthenticodeSigningDigest,
+    script_digest: &[u8],
+) -> Result<SpcIndirectDataContent> {
+    spc_indirect_data(
+        digest_algorithm,
+        script_digest,
+        SPC_MSI_SIGINFO_OBJID,
+        Any::from_der(SPC_SCRIPT_SIGINFO_VALUE_DER)
+            .map_err(|e| anyhow!("SPC_SCRIPT_SIGINFO Any: {e}"))?,
+        "script",
+    )
+}
+
 fn spc_indirect_data(
     digest_algorithm: AuthenticodeSigningDigest,
     subject_digest: &[u8],
@@ -268,6 +289,29 @@ pub fn create_pe_authenticode_pkcs7_der_rsa(
     let pe_digest =
         crate::pe_digest::pe_authenticode_digest(pe_image, digest_algorithm.pe_hash_kind())?;
     let indirect = pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
+    create_authenticode_pkcs7_der_rsa(
+        indirect,
+        digest_algorithm,
+        signer_cert,
+        chain_certs,
+        private_key,
+    )
+}
+
+/// Create PKCS#7 `ContentInfo(SignedData)` DER for a PowerShell-class Authenticode script.
+pub fn create_script_authenticode_pkcs7_der_rsa(
+    script: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+    signer_cert: Certificate,
+    chain_certs: Vec<Certificate>,
+    private_key: RsaPrivateKey,
+) -> Result<Vec<u8>> {
+    let units = crate::ps_script::file_utf16_units(script);
+    let script_digest = crate::ps_script::hash_payload(
+        digest_algorithm.pe_hash_kind(),
+        &crate::ps_script::utf16le_bytes(&units),
+    )?;
+    let indirect = script_spc_indirect_data(digest_algorithm, &script_digest)?;
     create_authenticode_pkcs7_der_rsa(
         indirect,
         digest_algorithm,

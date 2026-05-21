@@ -21,6 +21,7 @@ pub mod trust_verify_detached;
 pub mod trust_verify_esd;
 pub mod trust_verify_msi;
 pub mod trust_verify_pe;
+pub mod trust_verify_zip;
 pub mod verification_instant;
 
 pub use inspect::{
@@ -37,4 +38,5 @@ pub use trust_verify_pe::{
     TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material, pe_first_pkcs7_terminal_root,
     pkcs7_signed_data_der_terminal_root, trust_verify_pe_bytes,
 };
+pub use trust_verify_zip::trust_verify_zip_bytes;
 pub use verification_instant::parse_verification_date_ymd;
