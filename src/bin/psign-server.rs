@@ -148,6 +148,15 @@ struct ArtifactSigningServerArgs {
     /// Deterministic response variant for positive and negative-path tests.
     #[arg(long, value_enum, default_value_t = ArtifactResponseMode::Valid)]
     response_mode: ArtifactResponseMode,
+    /// Require this signatureAlgorithm value in Artifact Signing submit JSON.
+    #[arg(long)]
+    expect_signature_algorithm: Option<String>,
+    /// Require this api-version query value on Artifact Signing submit requests.
+    #[arg(long)]
+    expect_api_version: Option<String>,
+    /// Require this correlation ID in both Artifact Signing correlation headers.
+    #[arg(long)]
+    expect_correlation_id: Option<String>,
     /// Write the generated root certificate as DER for local trust-anchor setup.
     #[arg(long, value_name = "PATH")]
     root_cert_output: Option<PathBuf>,
@@ -177,14 +186,26 @@ enum PkiOcspStatus {
 enum ArtifactResponseMode {
     /// Return a normal accepted operation followed by a Succeeded poll body.
     Valid,
+    /// Return HTTP 200 with a Succeeded body from the submit request.
+    SyncSuccess,
+    /// Return HTTP 200 with an id field, then require polling through the id fallback URL.
+    BodyId,
+    /// Return HTTP 200 with an operationId field, then require polling through the id fallback URL.
+    BodyOperationId,
+    /// Return a normal success whose signingCertificate field is a PEM leaf+root bundle.
+    PemChain,
     /// Return HTTP 500 for the submit request.
     HttpError,
+    /// Return HTTP 503 for the poll request.
+    PollHttpError,
     /// Return an accepted operation whose poll body is Failed.
     Failed,
     /// Return an accepted operation whose poll body is Canceled.
     Canceled,
     /// Return HTTP 200 with malformed JSON for the submit request.
     MalformedJson,
+    /// Return HTTP 200 with malformed JSON for the poll request.
+    PollMalformedJson,
 }
 
 impl ServerStatus {
@@ -495,6 +516,9 @@ struct AzureKeyVaultAuthority {
 struct ArtifactSigningAuthority {
     identity: AzureSigningIdentity,
     response_mode: ArtifactResponseMode,
+    expect_signature_algorithm: Option<String>,
+    expect_api_version: Option<String>,
+    expect_correlation_id: Option<String>,
     base_url: String,
     next_operation: AtomicU64,
     operations: Mutex<HashMap<String, Value>>,
@@ -725,6 +749,17 @@ impl AzureSigningIdentity {
             .context("encode Azure test leaf certificate")
     }
 
+    fn leaf_root_pem_bundle(&self) -> Result<Vec<u8>> {
+        let mut pem = der_cert_to_pem(&self.leaf_der()?);
+        pem.push_str(&der_cert_to_pem(
+            &self
+                .root_cert
+                .to_der()
+                .context("encode Azure test root certificate")?,
+        ));
+        Ok(pem.into_bytes())
+    }
+
     fn sign_digest(&self, alg: &str, digest: &[u8]) -> Result<Vec<u8>> {
         match alg.trim() {
             "RS256" => {
@@ -763,6 +798,17 @@ impl AzureSigningIdentity {
             other => Err(anyhow!("unsupported Azure test signing algorithm {other}")),
         }
     }
+}
+
+fn der_cert_to_pem(der: &[u8]) -> String {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is UTF-8"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
 }
 
 fn write_generated_azure_certs(
@@ -855,6 +901,9 @@ fn run_artifact_signing_server(args: ArtifactSigningServerArgs) -> Result<()> {
             31,
         )?,
         response_mode: args.response_mode,
+        expect_signature_algorithm: args.expect_signature_algorithm,
+        expect_api_version: args.expect_api_version,
+        expect_correlation_id: args.expect_correlation_id,
         base_url: base_url.clone(),
         next_operation: AtomicU64::new(1),
         operations: Mutex::new(HashMap::new()),
@@ -961,6 +1010,32 @@ fn handle_artifact_signing_client(
         .set_read_timeout(Some(Duration::from_secs(10)))
         .context("set read timeout")?;
     let request = read_http_request(&mut stream)?;
+    let path = path_without_query(&request.path);
+    if request.method == "GET" && path == "/metadata/identity/oauth2/token" {
+        return write_json_response(
+            &mut stream,
+            200,
+            "OK",
+            &serde_json::json!({
+                "access_token": "psign-server-managed-identity-token",
+                "expires_in": "3600",
+                "resource": "https://codesigning.azure.net",
+                "token_type": "Bearer"
+            }),
+        );
+    }
+    if request.method == "POST" && path.ends_with("/oauth2/v2.0/token") {
+        return write_json_response(
+            &mut stream,
+            200,
+            "OK",
+            &serde_json::json!({
+                "access_token": "psign-server-client-credentials-token",
+                "expires_in": 3600,
+                "token_type": "Bearer"
+            }),
+        );
+    }
     if !has_bearer_token(&request) {
         return write_json_response(
             &mut stream,
@@ -970,9 +1045,57 @@ fn handle_artifact_signing_client(
         );
     }
 
-    let path = path_without_query(&request.path);
     if request.method == "GET" {
         if let Some(id) = path.strip_prefix("/operations/") {
+            match authority.response_mode {
+                ArtifactResponseMode::PollHttpError => {
+                    return write_json_response(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        &serde_json::json!({"error":{"code":"InjectedPollFailure"}}),
+                    );
+                }
+                ArtifactResponseMode::PollMalformedJson => {
+                    return write_http_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        "application/json",
+                        b"{not-json",
+                    );
+                }
+                _ => {}
+            }
+            let operations = authority
+                .operations
+                .lock()
+                .map_err(|_| anyhow!("artifact signing operation store poisoned"))?;
+            if let Some(body) = operations.get(id) {
+                return write_json_response(&mut stream, 200, "OK", body);
+            }
+        }
+        if let Some(id) = parse_artifact_poll_path(path) {
+            match authority.response_mode {
+                ArtifactResponseMode::PollHttpError => {
+                    return write_json_response(
+                        &mut stream,
+                        503,
+                        "Service Unavailable",
+                        &serde_json::json!({"error":{"code":"InjectedPollFailure"}}),
+                    );
+                }
+                ArtifactResponseMode::PollMalformedJson => {
+                    return write_http_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        "application/json",
+                        b"{not-json",
+                    );
+                }
+                _ => {}
+            }
             let operations = authority
                 .operations
                 .lock()
@@ -1010,8 +1133,39 @@ fn handle_artifact_signing_client(
             return write_http_response(&mut stream, 200, "OK", "application/json", b"{not-json");
         }
         ArtifactResponseMode::Valid
+        | ArtifactResponseMode::SyncSuccess
+        | ArtifactResponseMode::BodyId
+        | ArtifactResponseMode::BodyOperationId
+        | ArtifactResponseMode::PemChain
+        | ArtifactResponseMode::PollHttpError
         | ArtifactResponseMode::Failed
-        | ArtifactResponseMode::Canceled => {}
+        | ArtifactResponseMode::Canceled
+        | ArtifactResponseMode::PollMalformedJson => {}
+    }
+
+    if let Some(expected) = authority.expect_api_version.as_deref() {
+        let actual = query_param(&request.path, "api-version").unwrap_or_default();
+        if actual != expected.trim() {
+            return write_json_response(
+                &mut stream,
+                400,
+                "Bad Request",
+                &serde_json::json!({"error":{"code":"UnexpectedApiVersion","expected":expected,"actual":actual}}),
+            );
+        }
+    }
+    if let Some(expected) = authority.expect_correlation_id.as_deref() {
+        let expected = expected.trim();
+        let stable = request.header("x-correlation-id").unwrap_or_default();
+        let azure = request.header("x-ms-correlation-id").unwrap_or_default();
+        if stable != expected || azure != expected {
+            return write_json_response(
+                &mut stream,
+                400,
+                "Bad Request",
+                &serde_json::json!({"error":{"code":"UnexpectedCorrelationId","expected":expected,"x-correlation-id":stable,"x-ms-correlation-id":azure}}),
+            );
+        }
     }
 
     let body: Value =
@@ -1020,6 +1174,16 @@ fn handle_artifact_signing_client(
         .get("signatureAlgorithm")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Artifact Signing submit body missing signatureAlgorithm"))?;
+    if let Some(expected) = authority.expect_signature_algorithm.as_deref() {
+        if alg != expected.trim() {
+            return write_json_response(
+                &mut stream,
+                400,
+                "Bad Request",
+                &serde_json::json!({"error":{"code":"UnexpectedSignatureAlgorithm","expected":expected,"actual":alg}}),
+            );
+        }
+    }
     let digest_b64 = body
         .get("digest")
         .and_then(Value::as_str)
@@ -1033,14 +1197,26 @@ fn handle_artifact_signing_client(
         authority.next_operation.fetch_add(1, Ordering::Relaxed)
     );
     let operation_body = match authority.response_mode {
-        ArtifactResponseMode::Valid => {
+        ArtifactResponseMode::Valid
+        | ArtifactResponseMode::SyncSuccess
+        | ArtifactResponseMode::BodyId
+        | ArtifactResponseMode::BodyOperationId
+        | ArtifactResponseMode::PemChain
+        | ArtifactResponseMode::PollHttpError
+        | ArtifactResponseMode::PollMalformedJson => {
             let signature = authority.identity.sign_digest(alg, &digest)?;
+            let cert_payload = if matches!(authority.response_mode, ArtifactResponseMode::PemChain)
+            {
+                authority.identity.leaf_root_pem_bundle()?
+            } else {
+                authority.identity.leaf_der()?
+            };
             serde_json::json!({
                 "id": operation_id,
                 "status": "Succeeded",
                 "result": {
                     "signature": base64::engine::general_purpose::STANDARD.encode(signature),
-                    "signingCertificate": base64::engine::general_purpose::STANDARD.encode(authority.identity.leaf_der()?),
+                    "signingCertificate": base64::engine::general_purpose::STANDARD.encode(cert_payload),
                     "codeSigningAccountName": account,
                     "certificateProfileName": profile,
                 }
@@ -1057,11 +1233,32 @@ fn handle_artifact_signing_client(
         }),
         ArtifactResponseMode::HttpError | ArtifactResponseMode::MalformedJson => unreachable!(),
     };
+    if matches!(authority.response_mode, ArtifactResponseMode::SyncSuccess) {
+        return write_json_response(&mut stream, 200, "OK", &operation_body);
+    }
     authority
         .operations
         .lock()
         .map_err(|_| anyhow!("artifact signing operation store poisoned"))?
         .insert(operation_id.clone(), operation_body);
+
+    if matches!(
+        authority.response_mode,
+        ArtifactResponseMode::BodyId | ArtifactResponseMode::BodyOperationId
+    ) {
+        let accept_body = if matches!(authority.response_mode, ArtifactResponseMode::BodyId) {
+            serde_json::json!({
+                "id": operation_id,
+                "status": "InProgress"
+            })
+        } else {
+            serde_json::json!({
+                "operationId": operation_id,
+                "status": "InProgress"
+            })
+        };
+        return write_json_response(&mut stream, 200, "OK", &accept_body);
+    }
 
     let operation_location = format!("{}operations/{operation_id}", authority.base_url);
     write_http_response_with_headers(
@@ -1076,6 +1273,17 @@ fn handle_artifact_signing_client(
 
 fn path_without_query(path: &str) -> &str {
     path.split_once('?').map(|(p, _)| p).unwrap_or(path)
+}
+
+fn query_param(path: &str, name: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    for pair in query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key == name {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn has_bearer_token(request: &HttpRequest) -> bool {
@@ -1098,6 +1306,24 @@ fn parse_artifact_sign_path(path: &str) -> Option<(&str, &str)> {
     }
     let profile = profile_sign.strip_suffix(":sign")?;
     Some((account, profile))
+}
+
+fn parse_artifact_poll_path(path: &str) -> Option<&str> {
+    let mut segments = path.trim_matches('/').split('/');
+    let first = segments.next()?;
+    let _account = segments.next()?;
+    let third = segments.next()?;
+    let _profile = segments.next()?;
+    let sign = segments.next()?;
+    let id = segments.next()?;
+    if segments.next().is_some()
+        || first != "codesigningaccounts"
+        || third != "certificateprofiles"
+        || sign != "sign"
+    {
+        return None;
+    }
+    Some(id)
 }
 
 fn write_json_response(
