@@ -20,7 +20,11 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
       - run: cargo build -p psign --bin psign-tool
       - name: Bootstrap Devolutions test PKI + pack minimal MSIX
         shell: pwsh
@@ -45,7 +49,11 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
       - run: cargo build -p psign --bin psign-tool
       - name: Catalog verify (Rust)
         shell: pwsh
