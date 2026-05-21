@@ -1,0 +1,56 @@
+name: powershell-module
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_test:
+    name: Build PowerShell module (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: windows-x64
+            os: windows-2022
+          - name: macos-arm64
+            os: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Build psign portable shared library and PowerShell module
+        shell: pwsh
+        run: ./PowerShell/build.ps1 -Configuration Release
+
+      - name: Run PowerShell module end-to-end tests
+        shell: pwsh
+        run: ./PowerShell/tests/Invoke-PortableSignatureTests.ps1 -Configuration Release
+
+      - name: Upload staged module
+        uses: actions/upload-artifact@v7
+        with:
+          name: Devolutions.Psign-${{ matrix.name }}
+          path: PowerShell/Devolutions.Psign
+          if-no-files-found: error

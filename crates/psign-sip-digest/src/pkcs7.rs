@@ -275,6 +275,49 @@ pub fn create_msi_authenticode_pkcs7_der_rsa(
     )
 }
 
+/// Create PKCS#7 `ContentInfo(SignedData)` DER for a cleartext MSIX / APPX package.
+///
+/// `package_with_signature_part` must already contain the final `[Content_Types].xml`
+/// declaration and an `AppxSignature.p7x` placeholder. The signature part bytes are
+/// excluded from the APPX digest blob by the MSIX SIP hash routine.
+pub fn create_msix_authenticode_pkcs7_der_rsa(
+    package_with_signature_part: &[u8],
+    extension: &str,
+    digest_algorithm: AuthenticodeSigningDigest,
+    signer_cert: Certificate,
+    chain_certs: Vec<Certificate>,
+    private_key: RsaPrivateKey,
+) -> Result<Vec<u8>> {
+    let (kind, appx_blob) =
+        crate::msix_digest::msix_authenticode_digest_blob(package_with_signature_part, extension)?;
+    if kind != digest_algorithm.pe_hash_kind() {
+        return Err(anyhow!(
+            "MSIX AppxBlockMap HashMethod {:?} does not match requested signing digest {:?}",
+            kind,
+            digest_algorithm
+        ));
+    }
+    let indirect = SpcIndirectDataContent {
+        data: SpcAttributeTypeAndOptionalValue {
+            value_type: SPC_MSI_SIGINFO_OBJID,
+            value: Any::from_der(SPC_MSI_SIGINFO_VALUE_DER)
+                .map_err(|e| anyhow!("SPC_MSIX_SIGINFO Any: {e}"))?,
+        },
+        message_digest: DigestInfo {
+            digest_algorithm: digest_algorithm.digest_algorithm(),
+            digest: OctetString::new(appx_blob)
+                .map_err(|e| anyhow!("APPX SpcIndirectData digest OCTET STRING: {e}"))?,
+        },
+    };
+    create_authenticode_pkcs7_der_rsa(
+        indirect,
+        digest_algorithm,
+        signer_cert,
+        chain_certs,
+        private_key,
+    )
+}
+
 /// Create PKCS#7 `ContentInfo(SignedData)` DER for a PE Authenticode signature using an RSA private key.
 ///
 /// This is the portable CMS producer used before format-specific embedding (for PE, `pe_embed` wraps the

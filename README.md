@@ -109,6 +109,20 @@ cargo check -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust 
 
 Unix CI (`ci-unix`) runs **`cargo fmt`**, strict **`clippy -D warnings`** on portable / REST crates plus the **`psign` library**, and the digest CLI tests. Local mirror (bash): **`scripts/linux-portable-validation.sh`** from the repo root.
 
+## PowerShell portable Authenticode module
+
+The repository also builds a PowerShell 7.4 / .NET 8 module, **`Devolutions.Psign`**, with portable cmdlets backed by the Rust `psign_portable` shared library through P/Invoke:
+
+```powershell
+Import-Module .\PowerShell\Devolutions.Psign\Devolutions.Psign.psd1
+Set-PortableSignature -LiteralPath .\script.ps1 -Certificate $cert
+Get-PortableSignature -LiteralPath .\script.ps1
+Set-PortableSignature -LiteralPath .\ModuleDirectory -CertificatePath .\signer.cer -PrivateKeyPath .\signer.key
+Set-PortableSignature -LiteralPath .\package.msix -PfxPath .\signer.pfx -Password $password
+```
+
+`Set-PortableSignature` and `Get-PortableSignature` avoid Win32 SIPs and support PE, CAB, MSI, ZIP Authenticode, MSIX/AppX, PowerShell scripts, and whole PowerShell module directories (`.ps1`, `.psm1`, `.psd1`). See [`docs/portable-powershell-module.md`](docs/portable-powershell-module.md) and [`docs/portable-core-ffi.md`](docs/portable-core-ffi.md).
+
 ## Portable certificate store
 
 `psign-tool cert-store ...` manages a simple file-based certificate store for portable workflows. The default base directory is **`~/.psign/cert-store`**; set **`PSIGN_CERT_STORE`** or pass **`--cert-store-dir`** to override it. Certificates are stored as DER-encoded X.509 files named by Windows-style SHA-1 thumbprint over the full DER certificate. Optional local private keys live beside the certificate as PEM-encoded, unencrypted PKCS#8 **`.key`** files with the same thumbprint name.
@@ -149,7 +163,7 @@ psign-tool cert-store import-pfx --store MY --password "pfx-password" cert.pfx
 psign-tool --mode portable sign /sha1 ABCDEF0123456789ABCDEF0123456789ABCDEF01 /s MY /fd SHA256 file.exe
 ```
 
-The portable signing MVP supports local RSA/SHA-256 PE/WinMD Authenticode signing only. Unsupported native signing options, timestamping options, CSP/KSP selection, auto-selection, direct PFX signing, and non-PE formats return explicit errors in portable mode.
+The portable signing path supports local RSA/SHA-2 Authenticode signing for PE/WinMD plus the package/script formats exposed by the portable core. Unsupported native signing options, CSP/KSP selection, auto-selection, and non-exportable local keys return explicit errors in portable mode.
 
 ## Generate binary manifest and dependency graph
 

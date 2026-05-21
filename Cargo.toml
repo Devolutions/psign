@@ -6,6 +6,8 @@ members = [
     "crates/psign-codesigning-rest",
     "crates/psign-azure-kv-rest",
     "crates/psign-opc-sign",
+    "crates/psign-portable-core",
+    "crates/psign-portable-ffi",
 ]
 # Bare `cargo build` / `cargo test` at the repo root includes the unified `psign-tool`
 # target plus the portable crates.
@@ -17,6 +19,8 @@ default-members = [
     "crates/psign-codesigning-rest",
     "crates/psign-azure-kv-rest",
     "crates/psign-opc-sign",
+    "crates/psign-portable-core",
+    "crates/psign-portable-ffi",
 ]
 resolver = "2"
 

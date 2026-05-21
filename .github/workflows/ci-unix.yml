@@ -22,8 +22,8 @@ jobs:
       - name: Cargo.lock consistency
         run: cargo metadata --locked --format-version 1 > /dev/null
 
-      - name: clippy (portable digest + trust + Azure REST crates)
-        run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
+      - name: clippy (portable digest + trust + core + Azure REST crates)
+        run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-portable-core -p psign-portable-ffi -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
 
       - name: clippy (digest-cli with artifact-signing-rest)
         run: cargo clippy -p psign-digest-cli --all-targets --features artifact-signing-rest --locked -- -D warnings
@@ -42,6 +42,12 @@ jobs:
 
       - name: Authenticode trust crate tests (no Win32)
         run: cargo test -p psign-authenticode-trust --lib --locked
+
+      - name: Portable core crate tests (no Win32)
+        run: cargo test -p psign-portable-core --locked
+
+      - name: Portable FFI crate tests (no Win32)
+        run: cargo test -p psign-portable-ffi --locked
 
       - name: Codesigning REST crate tests (no Win32)
         run: cargo test -p psign-codesigning-rest --locked

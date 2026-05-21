@@ -2120,6 +2120,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "psign-portable-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "psign-authenticode-trust",
+ "psign-sip-digest",
+ "rsa 0.9.10",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "x509-cert",
+ "zip",
+]
+
+[[package]]
+name = "psign-portable-ffi"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "psign-portable-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "psign-sip-digest"
 version = "0.2.0"
 dependencies = [

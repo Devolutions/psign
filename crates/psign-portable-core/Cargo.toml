@@ -1,0 +1,20 @@
+[package]
+name = "psign-portable-core"
+version = "0.2.0"
+edition = "2024"
+description = "Reusable portable Authenticode signing and inspection APIs for psign"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+psign-authenticode-trust = { path = "../psign-authenticode-trust" }
+psign-sip-digest = { path = "../psign-sip-digest" }
+rsa = "0.9.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+x509-cert = { version = "0.2.5", default-features = false, features = ["pem"] }
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+

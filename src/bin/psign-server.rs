@@ -54,6 +54,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum Command {
     /// Serve a local RFC 3161 timestamp authority for deterministic tests.
     TimestampServer(TimestampServerArgs),
@@ -1174,15 +1175,15 @@ fn handle_artifact_signing_client(
         .get("signatureAlgorithm")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("Artifact Signing submit body missing signatureAlgorithm"))?;
-    if let Some(expected) = authority.expect_signature_algorithm.as_deref() {
-        if alg != expected.trim() {
-            return write_json_response(
-                &mut stream,
-                400,
-                "Bad Request",
-                &serde_json::json!({"error":{"code":"UnexpectedSignatureAlgorithm","expected":expected,"actual":alg}}),
-            );
-        }
+    if let Some(expected) = authority.expect_signature_algorithm.as_deref()
+        && alg != expected.trim()
+    {
+        return write_json_response(
+            &mut stream,
+            400,
+            "Bad Request",
+            &serde_json::json!({"error":{"code":"UnexpectedSignatureAlgorithm","expected":expected,"actual":alg}}),
+        );
     }
     let digest_b64 = body
         .get("digest")
