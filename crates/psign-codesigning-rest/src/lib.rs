@@ -87,12 +87,15 @@ fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String>
             Ok(t.to_string())
         }
         CodesigningAuth::ManagedIdentity => {
+            let endpoint = std::env::var("PSIGN_CODESIGNING_IMDS_ENDPOINT").unwrap_or_else(|_| {
+                "http://169.254.169.254/metadata/identity/oauth2/token".to_string()
+            });
             let http = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(120))
                 .build()
                 .map_err(|e| anyhow!("HTTP client: {e}"))?;
             let rsp = http
-                .get("http://169.254.169.254/metadata/identity/oauth2/token")
+                .get(endpoint)
                 .query(&[("api-version", "2018-02-01"), ("resource", MI_RESOURCE)])
                 .header("Metadata", "true")
                 .send()
@@ -244,7 +247,6 @@ pub fn submit_codesign_hash_blocking(
         .map(|s| s.to_string());
 
     let body_bytes = rsp.bytes().context(":sign body")?;
-    let accept_json: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
 
     if !status.is_success() {
         return Err(anyhow!(
@@ -253,6 +255,11 @@ pub fn submit_codesign_hash_blocking(
             String::from_utf8_lossy(&body_bytes)
         ));
     }
+    let accept_json: Value = if body_bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body_bytes).context(":sign JSON")?
+    };
 
     let poll_url = if let Some(loc) = op_location {
         operation_location_url(&base, &loc)

@@ -184,7 +184,7 @@ fn timestamp_token_from_signer_unsigned_attrs(
 
 fn timestamp_token_from_attribute(attr: &Attribute) -> Option<(ContentInfo, Vec<u8>, UtcDate)> {
     for val in attr.values.iter() {
-        let token = decode_content_info_loose(attribute_value_bytes(val))?;
+        let token = timestamp_content_info_from_attribute_value(val)?;
         if token.content_type != ID_SIGNED_DATA {
             continue;
         }
@@ -198,6 +198,14 @@ fn timestamp_token_from_attribute(attr: &Attribute) -> Option<(ContentInfo, Vec<
         return Some((token, tstinfo_der.to_vec(), gen_date));
     }
     None
+}
+
+fn timestamp_content_info_from_attribute_value(val: &der::asn1::Any) -> Option<ContentInfo> {
+    val.to_der()
+        .ok()
+        .as_deref()
+        .and_then(decode_content_info_loose)
+        .or_else(|| decode_content_info_loose(attribute_value_bytes(val)))
 }
 
 fn digest_for_oid(oid: &str, data: &[u8]) -> Result<Vec<u8>> {

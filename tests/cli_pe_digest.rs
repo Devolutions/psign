@@ -1058,6 +1058,10 @@ fn tiny32_unsigned_fixture() -> PathBuf {
     repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi")
 }
 
+fn tiny32_unsigned_winmd_fixture() -> PathBuf {
+    repo_root().join("tests/fixtures/generated-unsigned/winmd/tiny32-pe-copy.winmd")
+}
+
 fn tiny64_fixture() -> PathBuf {
     repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi")
 }
@@ -3173,6 +3177,162 @@ fn psign_server_artifact_signing_submit_serves_portable_cli() {
 
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
 #[test]
+fn psign_server_artifact_signing_submit_forwards_options_and_uses_body_id_polling() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0xabu8; 48]).expect("write digest");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server_with_args(
+        2,
+        &[
+            "--response-mode",
+            "body-id",
+            "--expect-signature-algorithm",
+            "RS384",
+            "--expect-api-version",
+            "2024-06-15-test",
+            "--expect-correlation-id",
+            "trace-abc",
+        ],
+    );
+    let mut cmd = portable_cmd();
+    cmd.arg("artifact-signing-submit")
+        .arg("--region")
+        .arg("local")
+        .arg("--account-name")
+        .arg("acct")
+        .arg("--profile-name")
+        .arg("prof")
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--signature-algorithm")
+        .arg("RS384")
+        .arg("--api-version")
+        .arg("2024-06-15-test")
+        .arg("--correlation-id")
+        .arg("trace-abc")
+        .arg("--access-token")
+        .arg("test-token")
+        .arg("--endpoint-base-url")
+        .arg(&endpoint);
+    let output = cmd.output().expect("run artifact-signing-submit");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("parse submit JSON");
+    assert_eq!(
+        json.get("status").and_then(Value::as_str),
+        Some("Succeeded")
+    );
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_submit_uses_client_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0x22u8; 32]).expect("write digest");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(3);
+    let mut cmd = portable_cmd();
+    cmd.arg("artifact-signing-submit")
+        .arg("--region")
+        .arg("local")
+        .arg("--account-name")
+        .arg("acct")
+        .arg("--profile-name")
+        .arg("prof")
+        .arg("--digest-file")
+        .arg(&digest_path)
+        .arg("--tenant-id")
+        .arg("tenant")
+        .arg("--client-id")
+        .arg("client")
+        .arg("--client-secret")
+        .arg("secret")
+        .arg("--authority")
+        .arg(endpoint.trim_end_matches('/'))
+        .arg("--endpoint-base-url")
+        .arg(&endpoint);
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_submit_uses_managed_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest_path = dir.path().join("digest.bin");
+    std::fs::write(&digest_path, [0x33u8; 32]).expect("write digest");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(3);
+    let mut cmd = portable_cmd();
+    cmd.env(
+        "PSIGN_CODESIGNING_IMDS_ENDPOINT",
+        format!("{endpoint}metadata/identity/oauth2/token"),
+    )
+    .arg("artifact-signing-submit")
+    .arg("--region")
+    .arg("local")
+    .arg("--account-name")
+    .arg("acct")
+    .arg("--profile-name")
+    .arg("prof")
+    .arg("--digest-file")
+    .arg(&digest_path)
+    .arg("--managed-identity")
+    .arg("--endpoint-base-url")
+    .arg(&endpoint);
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_submit_surfaces_non_success_shapes() {
+    let cases = [
+        ("http-error", 1, "sign HTTP 500"),
+        ("malformed-json", 1, "sign JSON"),
+        ("canceled", 2, "codesign operation canceled"),
+        ("poll-http-error", 2, "poll HTTP 503"),
+        ("poll-malformed-json", 2, "poll JSON"),
+    ];
+    for (mode, max_requests, stderr) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let digest_path = dir.path().join("digest.bin");
+        std::fs::write(&digest_path, [0x44u8; 32]).expect("write digest");
+        let (mut guard, endpoint) =
+            spawn_psign_artifact_signing_server_with_args(max_requests, &["--response-mode", mode]);
+        let mut cmd = portable_cmd();
+        cmd.arg("artifact-signing-submit")
+            .arg("--region")
+            .arg("local")
+            .arg("--account-name")
+            .arg("acct")
+            .arg("--profile-name")
+            .arg("prof")
+            .arg("--digest-file")
+            .arg(&digest_path)
+            .arg("--access-token")
+            .arg("test-token")
+            .arg("--endpoint-base-url")
+            .arg(&endpoint);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(stderr));
+        let status = guard.0.wait().expect("server exit");
+        assert!(status.success(), "server failed with {status}");
+    }
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
 fn psign_server_artifact_signing_signs_pe_with_portable_cli() {
     let dir = tempfile::tempdir().unwrap();
     let out_pe = dir.path().join("tiny32.artifact-portable-signed.exe");
@@ -3211,6 +3371,58 @@ fn psign_server_artifact_signing_signs_pe_with_portable_cli() {
     .expect("portable Artifact Signing Authenticode RSA signature verifies");
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_pe_with_pem_chain_and_trust_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_pe = dir.path().join("tiny32.artifact-pem-chain-signed.exe");
+    let root_path = dir.path().join("artifact-root.der");
+    let root_arg = root_path.to_str().unwrap();
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server_with_args(
+        2,
+        &[
+            "--response-mode",
+            "pem-chain",
+            "--root-cert-output",
+            root_arg,
+        ],
+    );
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-pe")
+        .arg(tiny32_unsigned_fixture())
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_pe);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-pe: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-pe").arg(&out_pe);
+    verify.assert().success();
+
+    let mut trust = portable_cmd();
+    trust
+        .arg("trust-verify-pe")
+        .arg("--trusted-ca")
+        .arg(&root_path)
+        .arg(&out_pe);
+    trust
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-pe: ok"));
+}
+
 #[cfg(all(
     feature = "timestamp-server",
     feature = "timestamp-http",
@@ -3220,9 +3432,18 @@ fn psign_server_artifact_signing_signs_pe_with_portable_cli() {
 fn psign_server_artifact_signing_signs_and_timestamps_pe_with_portable_cli() {
     let dir = tempfile::tempdir().unwrap();
     let out_pe = dir.path().join("tiny32.artifact-portable-timestamped.exe");
+    let artifact_root_path = dir.path().join("artifact-root.der");
+    let tsa_root_path = dir.path().join("tsa-root.der");
+    let artifact_root_arg = artifact_root_path.to_str().unwrap();
+    let tsa_root_arg = tsa_root_path.to_str().unwrap();
 
-    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
-    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server_with_args(
+        2,
+        &["--root-cert-output", artifact_root_arg],
+    );
+    let gen_time = generalized_time_tomorrow_noon_utc();
+    let (mut timestamp_guard, timestamp_url) =
+        spawn_psign_server_with_gen_time(&gen_time, &["--cert-output", tsa_root_arg]);
     let mut cmd = portable_cmd();
     cmd.arg("sign-pe")
         .arg(tiny32_unsigned_fixture())
@@ -3264,6 +3485,87 @@ fn psign_server_artifact_signing_signs_and_timestamps_pe_with_portable_cli() {
             "microsoft_nested_rfc3161_attribute",
         ))
         .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+
+    let mut trust = portable_cmd();
+    trust
+        .arg("trust-verify-pe")
+        .arg("--trusted-ca")
+        .arg(&artifact_root_path)
+        .arg("--trusted-ca")
+        .arg(&tsa_root_path)
+        .arg("--prefer-timestamp-signing-time")
+        .arg("--require-valid-timestamp")
+        .arg(&out_pe);
+    trust
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-pe: ok"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_winmd_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_winmd = dir.path().join("tiny32.artifact-signed.winmd");
+    let root_path = dir.path().join("artifact-root.der");
+    let root_arg = root_path.to_str().unwrap();
+
+    let (mut guard, endpoint) =
+        spawn_psign_artifact_signing_server_with_args(2, &["--root-cert-output", root_arg]);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-pe")
+        .arg(tiny32_unsigned_winmd_fixture())
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_winmd);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-pe: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut trust = portable_cmd();
+    trust
+        .arg("trust-verify-pe")
+        .arg("--trusted-ca")
+        .arg(&root_path)
+        .arg(&out_winmd);
+    trust
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-pe: ok"));
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+#[test]
+fn mode_portable_artifact_signing_rejects_non_pe_targets_before_remote_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let cab_path = dir.path().join("unsigned.cab");
+    std::fs::write(&cab_path, minimal_unsigned_cab_bytes()).expect("write CAB");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg(&cab_path);
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "portable Artifact Signing is currently implemented only for PE/WinMD targets",
+    ));
 }
 
 #[cfg(all(
