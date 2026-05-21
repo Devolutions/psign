@@ -477,12 +477,13 @@ fn run_portable_sign_pe_azure_key_vault(
     output: &Path,
     args: &SignArgs,
 ) -> Result<()> {
-    let mut argv = Vec::new();
-    argv.push(OsString::from("psign-tool"));
-    argv.push(OsString::from("sign-pe"));
-    argv.push(target.as_os_str().to_os_string());
-    argv.push(OsString::from("--digest"));
-    argv.push(OsString::from(portable_digest_name(args.digest)?));
+    let mut argv = vec![
+        OsString::from("psign-tool"),
+        OsString::from("sign-pe"),
+        target.as_os_str().to_os_string(),
+        OsString::from("--digest"),
+        OsString::from(portable_digest_name(args.digest)?),
+    ];
     for chain_cert in &args.additional_certs {
         argv.push(OsString::from("--chain-cert"));
         argv.push(chain_cert.as_os_str().to_os_string());
@@ -548,12 +549,13 @@ fn run_portable_sign_pe_artifact_signing(
     output: &Path,
     args: &SignArgs,
 ) -> Result<()> {
-    let mut argv = Vec::new();
-    argv.push(OsString::from("psign-tool"));
-    argv.push(OsString::from("sign-pe"));
-    argv.push(target.as_os_str().to_os_string());
-    argv.push(OsString::from("--digest"));
-    argv.push(OsString::from(portable_digest_name(args.digest)?));
+    let mut argv = vec![
+        OsString::from("psign-tool"),
+        OsString::from("sign-pe"),
+        target.as_os_str().to_os_string(),
+        OsString::from("--digest"),
+        OsString::from(portable_digest_name(args.digest)?),
+    ];
     for chain_cert in &args.additional_certs {
         argv.push(OsString::from("--chain-cert"));
         argv.push(chain_cert.as_os_str().to_os_string());

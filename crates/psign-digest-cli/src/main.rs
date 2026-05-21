@@ -4,7 +4,7 @@
 // for formats implemented in `psign-sip-digest`. This does not replace full `psign` verify.
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(any(feature = "azure-kv-sign-portable", feature = "artifact-signing-rest"))]
+#[cfg(feature = "azure-kv-sign-portable")]
 use base64::Engine as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use psign_authenticode_trust::{
@@ -724,7 +724,7 @@ enum Command {
         #[arg(long = "azure-authority")]
         azure_authority: Option<String>,
         #[command(flatten)]
-        artifact_signing: ArtifactSigningPortableOptions,
+        artifact_signing: Box<ArtifactSigningPortableOptions>,
         /// Output signed PE path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -1778,7 +1778,7 @@ fn parse_artifact_signing_certificates(bytes: &[u8]) -> Result<(x509_cert::Certi
             };
             let end = end + "-----END CERTIFICATE-----".len();
             certs.push(
-                rdp::parse_certificate(rest[..end].as_bytes())
+                rdp::parse_certificate(&rest.as_bytes()[..end])
                     .context("parse Artifact Signing PEM certificate")?,
             );
             rest = &rest[end..];
@@ -2344,7 +2344,7 @@ where
                     "portable sign-pe accepts only one signing source: --cert/--key, --azure-key-vault-*, or --artifact-signing-*"
                 ));
             }
-            let mut pkcs7 = if has_artifact {
+            let pkcs7 = if has_artifact {
                 #[cfg(feature = "artifact-signing-rest")]
                 {
                     create_pe_authenticode_pkcs7_der_artifact_signing(
@@ -2437,17 +2437,18 @@ where
                     )
                 })?
             };
-            match (timestamp_url, timestamp_digest) {
+            let pkcs7 = match (timestamp_url, timestamp_digest) {
                 (Some(url), Some(timestamp_digest)) => {
                     #[cfg(feature = "timestamp-http")]
                     {
-                        pkcs7 = timestamp_pkcs7_der_rfc3161(&pkcs7, &url, timestamp_digest)
-                            .with_context(|| {
+                        timestamp_pkcs7_der_rfc3161(&pkcs7, &url, timestamp_digest).with_context(
+                            || {
                                 format!(
                                     "RFC3161 timestamp portable Authenticode signature for {}",
                                     path.display()
                                 )
-                            })?;
+                            },
+                        )?
                     }
                     #[cfg(not(feature = "timestamp-http"))]
                     {
@@ -2467,8 +2468,8 @@ where
                         "portable sign-pe requires --timestamp-url with --timestamp-digest"
                     ));
                 }
-                (None, None) => {}
-            }
+                (None, None) => pkcs7,
+            };
             let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             std::fs::write(&output, signed).with_context(|| format!("write {}", output.display()))?;

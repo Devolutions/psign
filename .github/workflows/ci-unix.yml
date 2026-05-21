@@ -11,9 +11,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable (rustfmt, clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt clippy --toolchain stable
 
       - name: rustfmt
         run: cargo fmt --all --check

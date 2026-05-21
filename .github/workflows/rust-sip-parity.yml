@@ -16,7 +16,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - name: CMS authenticated-attribute RS256 prehash vs embedded signature (library)
         run: cargo test -p psign-sip-digest --lib rsa_pkcs1v15_signed_attrs_verify --locked
@@ -85,7 +88,10 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - name: SIP digest crate (full portable lib tests)
         run: cargo test -p psign-sip-digest --lib --locked
