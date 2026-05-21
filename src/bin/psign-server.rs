@@ -1038,10 +1038,12 @@ fn handle_artifact_signing_client(
             serde_json::json!({
                 "id": operation_id,
                 "status": "Succeeded",
-                "signature": base64::engine::general_purpose::STANDARD.encode(signature),
-                "signingCertificate": base64::engine::general_purpose::STANDARD.encode(authority.identity.leaf_der()?),
-                "codeSigningAccountName": account,
-                "certificateProfileName": profile,
+                "result": {
+                    "signature": base64::engine::general_purpose::STANDARD.encode(signature),
+                    "signingCertificate": base64::engine::general_purpose::STANDARD.encode(authority.identity.leaf_der()?),
+                    "codeSigningAccountName": account,
+                    "certificateProfileName": profile,
+                }
             })
         }
         ArtifactResponseMode::Failed => serde_json::json!({

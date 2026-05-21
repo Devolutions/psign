@@ -14,7 +14,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
 - `cert-store`: Portable file-backed certificate store under `~/.psign/cert-store` by default, with Windows-style store/thumbprint selection.
-- `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs.
+- `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs, including PE/WinMD signing through Azure Artifact Signing REST without Microsoft client DLLs.
 
 ## MSIX parity notes
 

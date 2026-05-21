@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::thread;
 use std::time::Duration;
 
+pub const DEFAULT_API_VERSION: &str = "2024-06-15";
 const DEFAULT_SCOPE: &str = "https://codesigning.azure.net/.default";
 const MI_RESOURCE: &str = "https://codesigning.azure.net";
 
@@ -41,6 +42,13 @@ pub struct CodesigningSubmitParams {
     pub endpoint_base_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodesigningSignatureResult {
+    pub signature: Vec<u8>,
+    pub signing_certificate: Vec<u8>,
+    pub final_json: Value,
+}
+
 fn data_plane_base_url(params: &CodesigningSubmitParams) -> String {
     if let Some(ref u) = params.endpoint_base_url {
         let t = u.trim().trim_end_matches('/');
@@ -49,6 +57,17 @@ fn data_plane_base_url(params: &CodesigningSubmitParams) -> String {
         }
     }
     format!("https://{}.codesigning.azure.net", params.region.trim())
+}
+
+fn operation_location_url(base: &str, location: &str) -> String {
+    let trimmed = location.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('/') {
+        return format!("{}{}", base.trim_end_matches('/'), trimmed);
+    }
+    format!("{}/{}", base.trim_end_matches('/'), trimmed)
 }
 
 fn normalize_authority(authority: Option<&str>) -> String {
@@ -210,7 +229,9 @@ pub fn submit_codesign_hash_blocking(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        req = req.header("x-ms-correlation-id", c);
+        req = req
+            .header("x-correlation-id", c)
+            .header("x-ms-correlation-id", c);
     }
 
     let rsp = req.send().context("codesign :sign POST")?;
@@ -234,8 +255,14 @@ pub fn submit_codesign_hash_blocking(
     }
 
     let poll_url = if let Some(loc) = op_location {
-        loc
-    } else if let Some(id) = accept_json.get("id").and_then(|v| v.as_str()) {
+        operation_location_url(&base, &loc)
+    } else if accept_json.get("status").and_then(Value::as_str) == Some("Succeeded") {
+        return Ok(accept_json);
+    } else if let Some(id) = accept_json
+        .get("id")
+        .or_else(|| accept_json.get("operationId"))
+        .and_then(Value::as_str)
+    {
         format!(
             "{base}/codesigningaccounts/{account}/certificateprofiles/{profile}/sign/{id}?api-version={api}",
         )
@@ -246,6 +273,39 @@ pub fn submit_codesign_hash_blocking(
     debug(&format!("artifact-signing poll URL={poll_url}"));
 
     poll_operation(&http, &token, &poll_url)
+}
+
+fn sign_result_object(v: &Value) -> &Value {
+    v.get("result").unwrap_or(v)
+}
+
+fn decode_standard_base64_field(obj: &Value, field: &str) -> Result<Vec<u8>> {
+    let s = obj
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("codesign result missing {field}"))?;
+    base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .with_context(|| format!("decode codesign result {field}"))
+}
+
+pub fn codesign_signature_result_from_json(
+    final_json: Value,
+) -> Result<CodesigningSignatureResult> {
+    let result = sign_result_object(&final_json);
+    Ok(CodesigningSignatureResult {
+        signature: decode_standard_base64_field(result, "signature")?,
+        signing_certificate: decode_standard_base64_field(result, "signingCertificate")?,
+        final_json,
+    })
+}
+
+pub fn submit_codesign_hash_signature_blocking(
+    params: &CodesigningSubmitParams,
+    debug: impl Fn(&str),
+) -> Result<CodesigningSignatureResult> {
+    let final_json = submit_codesign_hash_blocking(params, debug)?;
+    codesign_signature_result_from_json(final_json)
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 // for formats implemented in `psign-sip-digest`. This does not replace full `psign` verify.
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(feature = "azure-kv-sign-portable")]
+#[cfg(any(feature = "azure-kv-sign-portable", feature = "artifact-signing-rest"))]
 use base64::Engine as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use psign_authenticode_trust::{
@@ -21,7 +21,8 @@ use psign_azure_kv_rest::{
 };
 #[cfg(feature = "artifact-signing-rest")]
 use psign_codesigning_rest::{
-    CodesigningAuth, CodesigningSubmitParams, submit_codesign_hash_blocking,
+    CodesigningAuth, CodesigningSubmitParams, DEFAULT_API_VERSION,
+    submit_codesign_hash_blocking, submit_codesign_hash_signature_blocking,
 };
 use psign_opc_sign::{nuget, vsix};
 use psign_sip_digest::cab_digest::{self,
@@ -722,6 +723,8 @@ enum Command {
         azure_key_vault_client_secret: Option<String>,
         #[arg(long = "azure-authority")]
         azure_authority: Option<String>,
+        #[command(flatten)]
+        artifact_signing: ArtifactSigningPortableOptions,
         /// Output signed PE path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -1201,7 +1204,7 @@ struct ArtifactSigningSubmitPortableArgs {
     digest_file: PathBuf,
     #[arg(long, default_value = "RS256")]
     signature_algorithm: String,
-    #[arg(long, default_value = "2023-06-15-preview")]
+    #[arg(long, default_value = DEFAULT_API_VERSION)]
     api_version: String,
     #[arg(long)]
     correlation_id: Option<String>,
@@ -1219,6 +1222,44 @@ struct ArtifactSigningSubmitPortableArgs {
     authority: Option<String>,
     /// Override data-plane origin for deterministic local tests.
     #[arg(long, hide = true)]
+    endpoint_base_url: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+struct ArtifactSigningPortableOptions {
+    /// Artifact Signing metadata JSON (same shape as Microsoft's dlib /dmdf file).
+    #[arg(long = "artifact-signing-metadata", value_name = "PATH")]
+    metadata: Option<PathBuf>,
+    /// Regional hostname segment, e.g. `westus`, when not using metadata Endpoint.
+    #[arg(long = "artifact-signing-region")]
+    region: Option<String>,
+    /// Explicit data-plane endpoint, e.g. `https://wus2.codesigning.azure.net`.
+    #[arg(long = "artifact-signing-endpoint")]
+    endpoint: Option<String>,
+    #[arg(long = "artifact-signing-account-name")]
+    account_name: Option<String>,
+    #[arg(long = "artifact-signing-profile-name")]
+    profile_name: Option<String>,
+    #[arg(long = "artifact-signing-signature-algorithm")]
+    signature_algorithm: Option<String>,
+    #[arg(long = "artifact-signing-api-version")]
+    api_version: Option<String>,
+    #[arg(long = "artifact-signing-correlation-id")]
+    correlation_id: Option<String>,
+    #[arg(long = "artifact-signing-access-token")]
+    access_token: Option<String>,
+    #[arg(long = "artifact-signing-managed-identity")]
+    managed_identity: bool,
+    #[arg(long = "artifact-signing-tenant-id")]
+    tenant_id: Option<String>,
+    #[arg(long = "artifact-signing-client-id")]
+    client_id: Option<String>,
+    #[arg(long = "artifact-signing-client-secret")]
+    client_secret: Option<String>,
+    #[arg(long = "artifact-signing-authority")]
+    authority: Option<String>,
+    /// Override data-plane origin for deterministic local tests.
+    #[arg(long = "artifact-signing-endpoint-base-url", hide = true)]
     endpoint_base_url: Option<String>,
 }
 
@@ -1581,7 +1622,218 @@ struct ArtifactSigningMetadataDoc {
     CodeSigningAccountName: String,
     CertificateProfileName: String,
     #[serde(default)]
+    CorrelationId: Option<String>,
+    #[serde(default)]
     ExcludeCredentials: Option<Vec<String>>,
+}
+
+fn text_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn artifact_signature_algorithm_for_digest(digest: PortableSignDigest) -> &'static str {
+    match digest {
+        PortableSignDigest::Sha256 => "RS256",
+        PortableSignDigest::Sha384 => "RS384",
+        PortableSignDigest::Sha512 => "RS512",
+    }
+}
+
+fn artifact_signing_requested(args: &ArtifactSigningPortableOptions) -> bool {
+    args.metadata.is_some()
+        || text_opt(args.region.as_deref()).is_some()
+        || text_opt(args.endpoint.as_deref()).is_some()
+        || text_opt(args.account_name.as_deref()).is_some()
+        || text_opt(args.profile_name.as_deref()).is_some()
+        || text_opt(args.signature_algorithm.as_deref()).is_some()
+        || text_opt(args.api_version.as_deref()).is_some()
+        || text_opt(args.correlation_id.as_deref()).is_some()
+        || text_opt(args.access_token.as_deref()).is_some()
+        || args.managed_identity
+        || text_opt(args.tenant_id.as_deref()).is_some()
+        || text_opt(args.client_id.as_deref()).is_some()
+        || text_opt(args.client_secret.as_deref()).is_some()
+        || text_opt(args.authority.as_deref()).is_some()
+        || text_opt(args.endpoint_base_url.as_deref()).is_some()
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn portable_submit_auth_parts(
+    access_token: Option<&str>,
+    managed_identity: bool,
+    tenant_id: Option<&str>,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+) -> Result<CodesigningAuth> {
+    let has_tok = text_opt(access_token).is_some();
+    let tenant = text_opt(tenant_id);
+    let client = text_opt(client_id);
+    let secret = text_opt(client_secret);
+    let sp_count = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
+    if managed_identity {
+        if has_tok || sp_count != 0 {
+            return Err(anyhow!(
+                "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
+            ));
+        }
+        return Ok(CodesigningAuth::ManagedIdentity);
+    }
+    if let Some(tok) = text_opt(access_token) {
+        if sp_count != 0 {
+            return Err(anyhow!(
+                "use either Artifact Signing access token or client credentials, not both"
+            ));
+        }
+        return Ok(CodesigningAuth::Bearer(tok));
+    }
+    if sp_count != 0 && sp_count != 3 {
+        return Err(anyhow!(
+            "Artifact Signing client credentials require all of tenant-id, client-id, and client-secret"
+        ));
+    }
+    if sp_count == 0 {
+        return Err(anyhow!(
+            "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
+        ));
+    }
+    Ok(CodesigningAuth::ClientCredentials {
+        tenant_id: tenant.unwrap(),
+        client_id: client.unwrap(),
+        client_secret: secret.unwrap(),
+    })
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn artifact_signing_params_for_digest(
+    args: &ArtifactSigningPortableOptions,
+    digest: Vec<u8>,
+    default_signature_algorithm: &str,
+) -> Result<CodesigningSubmitParams> {
+    let metadata = if let Some(path) = args.metadata.as_deref() {
+        let raw = read_json_input(Some(path))?;
+        Some(
+            serde_json::from_slice::<ArtifactSigningMetadataDoc>(&raw)
+                .context("parse Artifact Signing metadata JSON")?,
+        )
+    } else {
+        None
+    };
+    let endpoint = text_opt(args.endpoint_base_url.as_deref())
+        .or_else(|| text_opt(args.endpoint.as_deref()))
+        .or_else(|| metadata.as_ref().and_then(|m| text_opt(Some(&m.Endpoint))));
+    let region = text_opt(args.region.as_deref()).unwrap_or_else(|| "unused".to_string());
+    let account_name = text_opt(args.account_name.as_deref())
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .and_then(|m| text_opt(Some(&m.CodeSigningAccountName)))
+        })
+        .ok_or_else(|| anyhow!("Artifact Signing requires --artifact-signing-account-name or metadata CodeSigningAccountName"))?;
+    let profile_name = text_opt(args.profile_name.as_deref())
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .and_then(|m| text_opt(Some(&m.CertificateProfileName)))
+        })
+        .ok_or_else(|| anyhow!("Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName"))?;
+    let auth = portable_submit_auth_parts(
+        args.access_token.as_deref(),
+        args.managed_identity,
+        args.tenant_id.as_deref(),
+        args.client_id.as_deref(),
+        args.client_secret.as_deref(),
+    )?;
+    Ok(CodesigningSubmitParams {
+        region,
+        account_name,
+        profile_name,
+        digest,
+        signature_algorithm: text_opt(args.signature_algorithm.as_deref())
+            .unwrap_or_else(|| default_signature_algorithm.to_string()),
+        api_version: text_opt(args.api_version.as_deref())
+            .unwrap_or_else(|| DEFAULT_API_VERSION.to_string()),
+        correlation_id: text_opt(args.correlation_id.as_deref())
+            .or_else(|| metadata.as_ref().and_then(|m| text_opt(m.CorrelationId.as_deref()))),
+        authority: text_opt(args.authority.as_deref()),
+        auth,
+        endpoint_base_url: endpoint,
+    })
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn parse_artifact_signing_certificates(bytes: &[u8]) -> Result<(x509_cert::Certificate, Vec<x509_cert::Certificate>)> {
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && text.contains("-----BEGIN CERTIFICATE-----")
+    {
+        let mut certs = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
+            rest = &rest[start..];
+            let Some(end) = rest.find("-----END CERTIFICATE-----") else {
+                return Err(anyhow!("unterminated PEM certificate in Artifact Signing signingCertificate"));
+            };
+            let end = end + "-----END CERTIFICATE-----".len();
+            certs.push(
+                rdp::parse_certificate(rest[..end].as_bytes())
+                    .context("parse Artifact Signing PEM certificate")?,
+            );
+            rest = &rest[end..];
+        }
+        let mut iter = certs.into_iter();
+        let signer = iter
+            .next()
+            .ok_or_else(|| anyhow!("Artifact Signing signingCertificate did not contain a certificate"))?;
+        return Ok((signer, iter.collect()));
+    }
+    Ok((
+        rdp::parse_certificate(bytes).context("parse Artifact Signing DER signing certificate")?,
+        Vec::new(),
+    ))
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn create_pe_authenticode_pkcs7_der_artifact_signing(
+    pe: &[u8],
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: &ArtifactSigningPortableOptions,
+) -> Result<Vec<u8>> {
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let pe_digest = pe_authenticode_digest(pe, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
+    let signer_prehash =
+        pkcs7::authenticode_remote_rsa_signed_attrs_digest(&indirect, digest_algorithm)?;
+    let params = artifact_signing_params_for_digest(
+        args,
+        signer_prehash,
+        artifact_signature_algorithm_for_digest(digest),
+    )?;
+    let debug_portable = std::env::var_os("SIGNTOOL_PORTABLE_DEBUG").is_some();
+    let signed = submit_codesign_hash_signature_blocking(&params, |msg| {
+        if debug_portable {
+            eprintln!("[debug] {msg}");
+        }
+    })?;
+    let (signer_cert, mut chain) = parse_artifact_signing_certificates(&signed.signing_certificate)?;
+    for chain_cert in chain_certs {
+        let bytes =
+            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
+        chain.push(
+            rdp::parse_certificate(&bytes)
+                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
+        );
+    }
+    pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+        indirect,
+        digest_algorithm,
+        signer_cert,
+        chain,
+        &signed.signature,
+    )
 }
 
 fn read_json_input(path: Option<&Path>) -> Result<Vec<u8>> {
@@ -2051,6 +2303,7 @@ where
             azure_key_vault_client_id,
             azure_key_vault_client_secret,
             azure_authority,
+            artifact_signing,
             output,
         } => {
             let pe = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -2080,12 +2333,40 @@ where
                 || azure_authority
                     .as_deref()
                     .is_some_and(|s| !s.trim().is_empty());
-            if has_local && has_kv {
+            let has_artifact = artifact_signing_requested(&artifact_signing);
+            if [has_local, has_kv, has_artifact]
+                .into_iter()
+                .filter(|x| *x)
+                .count()
+                > 1
+            {
                 return Err(anyhow!(
-                    "portable sign-pe accepts either --cert/--key or --azure-key-vault-* options, not both"
+                    "portable sign-pe accepts only one signing source: --cert/--key, --azure-key-vault-*, or --artifact-signing-*"
                 ));
             }
-            let mut pkcs7 = if has_kv {
+            let mut pkcs7 = if has_artifact {
+                #[cfg(feature = "artifact-signing-rest")]
+                {
+                    create_pe_authenticode_pkcs7_der_artifact_signing(
+                        &pe,
+                        digest,
+                        chain_certs,
+                        &artifact_signing,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "create portable Azure Artifact Signing Authenticode signature for {}",
+                            path.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "artifact-signing-rest"))]
+                {
+                    return Err(anyhow!(
+                        "portable sign-pe Artifact Signing support requires the artifact-signing-rest feature"
+                    ));
+                }
+            } else if has_kv {
                 #[cfg(feature = "azure-kv-sign-portable")]
                 {
                     create_pe_authenticode_pkcs7_der_azure_kv(
@@ -2122,7 +2403,7 @@ where
                     (Some(cert), Some(key)) => (cert, key),
                     _ => {
                         return Err(anyhow!(
-                            "portable sign-pe requires either --cert and --key, or --azure-key-vault-url and --azure-key-vault-certificate"
+                            "portable sign-pe requires --cert and --key, --azure-key-vault-url and --azure-key-vault-certificate, or --artifact-signing-* options"
                         ));
                     }
                 };

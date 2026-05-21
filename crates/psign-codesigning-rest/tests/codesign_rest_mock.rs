@@ -218,6 +218,85 @@ fn submit_sign_sends_x_ms_correlation_id_when_set() {
 }
 
 #[test]
+fn submit_sign_sends_stable_x_correlation_id_when_set() {
+    let mut server = Server::new();
+    let base = server.url().trim_end_matches('/').to_string();
+    let poll_url = format!("{base}/operations/corr-stable");
+
+    let post_mock = server
+        .mock(
+            "POST",
+            Matcher::Regex(
+                r"/codesigningaccounts/c/certificateprofiles/p:sign(\?.*)?$".to_string(),
+            ),
+        )
+        .match_header("x-correlation-id", "trace-stable")
+        .with_status(202)
+        .with_header("Operation-Location", &poll_url)
+        .with_body("{}")
+        .create();
+
+    let poll_mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(r"/operations/corr-stable(\?.*)?$".to_string()),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"status":"Succeeded"}"#)
+        .create();
+
+    let params = CodesigningSubmitParams {
+        region: "unused".into(),
+        account_name: "c".into(),
+        profile_name: "p".into(),
+        digest: vec![1, 2, 3],
+        signature_algorithm: "RS256".into(),
+        api_version: psign_codesigning_rest::DEFAULT_API_VERSION.into(),
+        correlation_id: Some("trace-stable".into()),
+        authority: None,
+        auth: CodesigningAuth::Bearer("tok".into()),
+        endpoint_base_url: Some(base),
+    };
+
+    submit_codesign_hash_blocking(&params, |_| {}).expect("submit");
+    post_mock.assert();
+    poll_mock.assert();
+}
+
+#[test]
+fn typed_signature_result_accepts_stable_result_wrapper() {
+    let sig = vec![0xabu8; 256];
+    let cert = vec![0x30, 0x82, 0x01, 0x23];
+    let json = json!({
+        "status": "Succeeded",
+        "result": {
+            "signature": base64::engine::general_purpose::STANDARD.encode(&sig),
+            "signingCertificate": base64::engine::general_purpose::STANDARD.encode(&cert)
+        }
+    });
+
+    let parsed = psign_codesigning_rest::codesign_signature_result_from_json(json).expect("parse");
+    assert_eq!(parsed.signature, sig);
+    assert_eq!(parsed.signing_certificate, cert);
+}
+
+#[test]
+fn typed_signature_result_accepts_legacy_top_level_fields() {
+    let sig = vec![0xcdu8; 256];
+    let cert = vec![0x30, 0x82, 0x02, 0x34];
+    let json = json!({
+        "status": "Succeeded",
+        "signature": base64::engine::general_purpose::STANDARD.encode(&sig),
+        "signingCertificate": base64::engine::general_purpose::STANDARD.encode(&cert)
+    });
+
+    let parsed = psign_codesigning_rest::codesign_signature_result_from_json(json).expect("parse");
+    assert_eq!(parsed.signature, sig);
+    assert_eq!(parsed.signing_certificate, cert);
+}
+
+#[test]
 fn submit_poll_failed_status_returns_error() {
     let mut server = Server::new();
     let base = server.url().trim_end_matches('/').to_string();

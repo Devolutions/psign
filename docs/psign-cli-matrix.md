@@ -38,6 +38,7 @@ Full native ↔ Rust mappings, tiers, and per-flag notes are **only** maintained
 - **Detached PKCS#7**: Implemented with chain policy; bare CMS `SignedData` from `signtool /p7` is normalized to PKCS#7 `ContentInfo` before `CryptVerifyDetachedMessageSignature` (`src/win/verify_detached.rs`).
 - **Verify `/bp`, `/enclave`**: CLI accepted; explicit not-implemented errors pending published WinTrust action/policy GUIDs (JSON marks partial).
 - **RDP signing**: `psign-tool rdp --sha256 <thumbprint> file.rdp` ports `rdpsign.exe` by writing native `SignScope` / `Signature` records using detached PKCS#7 over the RDP secure-settings blob. `psign-tool portable rdp --cert cert.der --key key.pk8 file.rdp` uses the same RDP blob/record logic with portable RSA/SHA-256 CMS creation; fixtures cover UTF-8, UTF-16 with/without BOM, stale/partial signatures, malformed records, and a repo-test-cert signed sample.
+- **Artifact Signing REST for PE/WinMD**: `psign-tool portable sign-pe --artifact-signing-* --timestamp-url ...` and `psign-tool --mode portable sign --dmdf metadata.json --artifact-signing-* --timestamp-url ...` build, timestamp, and embed PE Authenticode signatures without Microsoft client DLLs. Windows dlib mode remains available for MSIX/AppX and other SIP formats.
 
 ## Gaps intentionally partial
 
