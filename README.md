@@ -9,7 +9,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 ## CLI surface
 
 - `verify`, `remove`, `catdb`: Windows-compatible `signtool.exe` flows backed by WinTrust and CryptSIP where native APIs are required.
-- `sign`: Rust mssign32 core (`SignerSignEx3`) with PFX/system-store cert selection, RFC3161 sign-time timestamping, and decoupled-digest bridge flow (`--dlib` or `--trusted-signing-dlib-root` + `--dmdf`) for MSIX parity and [Azure Artifact Signing / Trusted Signing](docs/migration-artifact-signing.md).
+- `sign`: Rust mssign32 core (`SignerSignEx3`) with PFX/system-store cert selection, RFC3161 sign-time timestamping, first-class custom ZIP Authenticode support ([docs/zip-authenticode-signing.md](docs/zip-authenticode-signing.md)), and decoupled-digest bridge flow (`--dlib` or `--trusted-signing-dlib-root` + `--dmdf`) for MSIX parity and [Azure Artifact Signing / Trusted Signing](docs/migration-artifact-signing.md).
 - `inspect-signature`: JSON dump of PKCS#7 signers, timestamp OIDs, and nested signatures (`1.3.6.1.4.1.311.2.4.1`) — same parser as **`psign-tool portable inspect-authenticode`** ([docs/psa-interoperability.md](docs/psa-interoperability.md)).
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
@@ -86,6 +86,8 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool portable sign-pe --cert cert.der --key key.pk8 --output signed.exe unsigned.exe
 # Portable trust verification with explicit anchors:
 # psign-tool portable trust-verify-pe signed.exe --anchor-dir anchors
+# Portable custom ZIP Authenticode verification:
+# psign-tool portable trust-verify-zip archive.zip --anchor-dir anchors
 # Portable unsigned CAB signing with a local RSA key:
 # psign-tool portable sign-cab --cert cert.der --key key.pk8 --output signed.cab unsigned.cab
 # Portable MSI/MSP signing with a local RSA key:

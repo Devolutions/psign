@@ -379,6 +379,11 @@ fn try_sign_one(
     if args.skip_signed && file_has_embedded_authenticode(target) {
         return Ok(format!("Skipped (already signed): {}\n", target.display()));
     }
+    if crate::win::zip_authenticode::is_zip_path(target) {
+        return crate::win::zip_authenticode::sign_zip_with(args, target, |script| {
+            sign_one_target(args, global, script)
+        });
+    }
     let block = sign_one_target(args, global, target)?;
     post_sign_rust_sip(backend, target, global)?;
     Ok(block)
@@ -435,37 +440,51 @@ pub fn sign_file(args: &SignArgs, global: &GlobalOpts) -> Result<CommandOutput> 
     let backend = rust_sip_backend(args);
     if matches!(backend, Some(RustSipBackend::Pe)) {
         for p in &targets {
-            ensure_rust_sip_pe_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_pe_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Script)) {
         for p in &targets {
-            ensure_rust_sip_script_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_script_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Msi)) {
         for p in &targets {
-            ensure_rust_sip_msi_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_msi_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Esd)) {
         for p in &targets {
-            ensure_rust_sip_esd_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_esd_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Msix)) {
         for p in &targets {
-            ensure_rust_sip_msix_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_msix_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Cab)) {
         for p in &targets {
-            ensure_rust_sip_cab_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_cab_allowed_for_format(p)?;
+            }
         }
     }
     if matches!(backend, Some(RustSipBackend::Catalog)) {
         for p in &targets {
-            ensure_rust_sip_catalog_allowed_for_format(p)?;
+            if !crate::win::zip_authenticode::is_zip_path(p) {
+                ensure_rust_sip_catalog_allowed_for_format(p)?;
+            }
         }
     }
 

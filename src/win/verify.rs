@@ -394,7 +394,7 @@ fn verify_all_signatures(
     Ok((out, accum_warnings, first_summary))
 }
 
-fn output_with_verify_warnings(
+pub(crate) fn output_with_verify_warnings(
     args: &VerifyArgs,
     out: String,
     summary: Option<&VerifyChainSummary>,
@@ -449,7 +449,7 @@ fn embedded_verbose_suffix(args: &VerifyArgs, global: &GlobalOpts) -> String {
 }
 
 /// Embedded WinTrust verify for one path; returns stdout block, post-filter warnings, summary, and whether timestamp is absent.
-fn run_embedded_for_target(
+pub(crate) fn run_embedded_for_target(
     target: &Path,
     args: &VerifyArgs,
     global: &GlobalOpts,
@@ -781,6 +781,45 @@ pub fn verify_file(args: &VerifyArgs, global: &GlobalOpts) -> Result<CommandOutp
             None,
             &detached_warnings,
             false,
+        ));
+    }
+
+    if args.catalog.is_none()
+        && args.catalog_search.is_none()
+        && args.catalog_database_guid.is_none()
+        && args
+            .files
+            .iter()
+            .any(|p| crate::win::zip_authenticode::is_zip_path(p))
+    {
+        if args.files.len() == 1 {
+            return crate::win::zip_authenticode::verify_zip(&args.files[0], args, global);
+        }
+        let mut blocks = Vec::new();
+        let mut merged_post = Vec::new();
+        let mut any_ts_none = false;
+        for target in &args.files {
+            if crate::win::zip_authenticode::is_zip_path(target) {
+                let out = crate::win::zip_authenticode::verify_zip(target, args, global)?;
+                if out.exit_code == 2 {
+                    any_ts_none = true;
+                }
+                blocks.push(out.stdout);
+            } else {
+                let (out, post, _summary, ts_none) = run_embedded_for_target(target, args, global)?;
+                if args.warn_if_not_timestamped && ts_none {
+                    any_ts_none = true;
+                }
+                merged_post.extend(post);
+                blocks.push(out);
+            }
+        }
+        return Ok(output_with_verify_warnings(
+            args,
+            blocks.join("\n"),
+            None,
+            &merged_post,
+            any_ts_none,
         ));
     }
 

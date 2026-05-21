@@ -19,6 +19,7 @@ pub mod rdp;
 pub mod timestamp;
 pub mod verify_pe;
 pub mod wsh_script;
+pub mod zip_authenticode;
 
 use anyhow::Result;
 
