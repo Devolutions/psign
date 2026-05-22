@@ -1221,11 +1221,15 @@ fn parse_appinstaller_descriptor(text: &str) -> Result<AppInstallerDescriptorInf
         .ok_or_else(|| anyhow!("App Installer root tag is not closed"))?;
     let root_tag = &text[root_start..=root_end];
     let namespace = xml_attr(root_tag, "xmlns");
-    let has_main_package = text.contains("<MainPackage");
-    let has_main_bundle = text.contains("<MainBundle");
-    let publisher = first_tag(text, "MainPackage")
+    let main_package =
+        first_start_tag_by_local_name(text, "MainPackage").context("parse MainPackage tag")?;
+    let main_bundle =
+        first_start_tag_by_local_name(text, "MainBundle").context("parse MainBundle tag")?;
+    let has_main_package = main_package.is_some();
+    let has_main_bundle = main_bundle.is_some();
+    let publisher = main_package
         .and_then(|tag| xml_attr(tag, "Publisher"))
-        .or_else(|| first_tag(text, "MainBundle").and_then(|tag| xml_attr(tag, "Publisher")));
+        .or_else(|| main_bundle.and_then(|tag| xml_attr(tag, "Publisher")));
     Ok(AppInstallerDescriptorInfo {
         root: "AppInstaller",
         namespace,
@@ -1249,7 +1253,7 @@ fn update_appinstaller_publisher(text: &str, publisher: &str) -> Result<String> 
     let escaped = xml_escape_attr(publisher);
     let mut updated = text.to_owned();
     for tag in ["MainPackage", "MainBundle"] {
-        updated = update_attr_for_tags(&updated, tag, "Publisher", &escaped)?;
+        updated = update_attr_for_local_tags(&updated, tag, "Publisher", &escaped)?;
     }
     Ok(updated)
 }
@@ -1362,6 +1366,27 @@ fn update_attr_for_tags(text: &str, tag: &str, attr: &str, escaped_value: &str) 
     Ok(out)
 }
 
+fn update_attr_for_local_tags(
+    text: &str,
+    local_name: &str,
+    attr: &str,
+    escaped_value: &str,
+) -> Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(tag) = find_xml_start_tag_by_local_name(text, local_name, cursor)? {
+        out.push_str(&text[cursor..tag.start]);
+        out.push_str(&replace_or_insert_xml_attr(
+            &text[tag.start..=tag.end],
+            attr,
+            escaped_value,
+        )?);
+        cursor = tag.end + 1;
+    }
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
 fn replace_or_insert_xml_attr(tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
     let needle = format!("{attr}=\"");
     if let Some(value_start) = tag.find(&needle).map(|idx| idx + needle.len()) {
@@ -1403,6 +1428,11 @@ fn first_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let start = text.find(&format!("<{tag}"))?;
     let end = text[start..].find('>').map(|offset| start + offset)?;
     Some(&text[start..=end])
+}
+
+fn first_start_tag_by_local_name<'a>(text: &'a str, local_name: &str) -> Result<Option<&'a str>> {
+    Ok(find_xml_start_tag_by_local_name(text, local_name, 0)?
+        .map(|tag| &text[tag.start..=tag.end]))
 }
 
 fn xml_attr(tag: &str, name: &str) -> Option<String> {

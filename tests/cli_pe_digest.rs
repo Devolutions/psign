@@ -1310,6 +1310,38 @@ fn appinstaller_set_publisher_updates_descriptor_metadata() {
 }
 
 #[test]
+fn appinstaller_set_publisher_updates_prefixed_main_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let descriptor = dir.path().join("prefixed.appinstaller");
+    let output = dir.path().join("updated-prefixed.appinstaller");
+    std::fs::write(
+        &descriptor,
+        r#"<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2021" xmlns:pkg="urn:example" Version="1.0.0.0" Uri="https://example.invalid/app.appinstaller"><pkg:MainPackage Name="Example.App" Publisher="CN=Old" Version="1.0.0.0" ProcessorArchitecture="x64" Uri="https://example.invalid/app.msix"/></AppInstaller>"#,
+    )
+    .unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("appinstaller-set-publisher")
+        .arg(&descriptor)
+        .arg("--publisher")
+        .arg("CN=Updated Publisher")
+        .arg("--output")
+        .arg(&output);
+    cmd.assert().success();
+
+    let xml = std::fs::read_to_string(&output).unwrap();
+    assert!(xml.contains(r#"<pkg:MainPackage"#));
+    assert!(xml.contains(r#"Publisher="CN=Updated Publisher""#));
+
+    let mut info = portable_cmd();
+    info.arg("appinstaller-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("main_package=yes"))
+        .stdout(predicate::str::contains("publisher=CN=Updated Publisher"));
+}
+
+#[test]
 fn business_central_app_info_detects_navx_header() {
     let dir = tempfile::tempdir().unwrap();
     let valid = dir.path().join("valid.app");

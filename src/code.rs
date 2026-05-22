@@ -1165,7 +1165,7 @@ fn update_appinstaller_publisher_bytes(bytes: &[u8], publisher: &str) -> Result<
     let escaped = xml_escape_attr(publisher);
     let mut updated = text.to_owned();
     for tag in ["MainPackage", "MainBundle"] {
-        updated = update_attr_for_tags(&updated, tag, "Publisher", &escaped)?;
+        updated = update_attr_for_local_tags(&updated, tag, "Publisher", &escaped)?;
     }
     Ok(updated.into_bytes())
 }
@@ -1254,6 +1254,27 @@ fn update_attr_for_tags(text: &str, tag: &str, attr: &str, escaped_value: &str) 
             escaped_value,
         )?);
         cursor = end + 1;
+    }
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
+fn update_attr_for_local_tags(
+    text: &str,
+    local_name: &str,
+    attr: &str,
+    escaped_value: &str,
+) -> Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    while let Some(tag) = find_xml_start_tag_by_local_name(text, local_name, cursor)? {
+        out.push_str(&text[cursor..tag.start]);
+        out.push_str(&replace_or_insert_xml_attr(
+            &text[tag.start..=tag.end],
+            attr,
+            escaped_value,
+        )?);
+        cursor = tag.end + 1;
     }
     out.push_str(&text[cursor..]);
     Ok(out)
@@ -1763,7 +1784,9 @@ fn validate_appinstaller_descriptor(bytes: &[u8]) -> Result<()> {
             "App Installer descriptor root <AppInstaller> not found"
         ));
     }
-    if !text.contains("<MainPackage") && !text.contains("<MainBundle") {
+    if find_xml_start_tag_by_local_name(text, "MainPackage", 0)?.is_none()
+        && find_xml_start_tag_by_local_name(text, "MainBundle", 0)?.is_none()
+    {
         return Err(anyhow!(
             "App Installer descriptor does not contain MainPackage or MainBundle"
         ));

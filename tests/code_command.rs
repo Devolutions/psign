@@ -447,6 +447,58 @@ fn code_updates_appinstaller_publisher_before_signing_companion() {
 }
 
 #[test]
+fn code_updates_prefixed_appinstaller_main_bundle_before_signing() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("prefixed.appinstaller");
+    let descriptor = base.join("prefixed.signed.appinstaller");
+    let signature = base.join("prefixed.signed.appinstaller.p7");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::write(
+        &input,
+        r#"<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2021" xmlns:pkg="urn:example" Version="1.0.0.0" Uri="https://example.invalid/app.appinstaller"><pkg:MainBundle Name="Example.Bundle" Publisher="CN=Old" Version="1.0.0.0" Uri="https://example.invalid/app.msixbundle"/></AppInstaller>"#,
+    )
+    .unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--publisher-name",
+            "CN=Updated Bundle Publisher",
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&signature)
+        .arg("prefixed.appinstaller");
+    cmd.assert().success();
+
+    let xml = std::fs::read_to_string(&descriptor).unwrap();
+    assert!(xml.contains(r#"<pkg:MainBundle"#));
+    assert!(xml.contains(r#"Publisher="CN=Updated Bundle Publisher""#));
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "appinstaller-verify-companion"])
+        .arg(&descriptor)
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--trusted-ca"])
+        .arg(&cert)
+        .args(["--allow-loose-signing-cert"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "appinstaller-verify-companion: ok",
+        ));
+}
+
+#[test]
 fn code_signs_clickonce_deploy_pe_payload_with_local_cert_key() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
