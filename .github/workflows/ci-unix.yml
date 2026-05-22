@@ -10,17 +10,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable (rustfmt, clippy)
+      - name: Install Rust stable (rustfmt)
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup component add rustfmt clippy --toolchain stable
+          rustup component add rustfmt --toolchain stable
 
       - name: rustfmt
         run: cargo fmt --all --check
 
       - name: Cargo.lock consistency
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+  portable-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable (clippy)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy --toolchain stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.1
 
       - name: clippy (portable digest + trust + core + Azure REST crates)
         run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-portable-core -p psign-portable-ffi -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
