@@ -660,6 +660,11 @@ fn sign_vsix_bytes(
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
+    if timestamp_url.is_some() || timestamp_digest.is_some() {
+        return Err(anyhow!(
+            "VSIX XMLDSig timestamping is not implemented in `psign-tool code` yet"
+        ));
+    }
     if skip_signed && package_has_signature(input_bytes, &CodeFormat::Vsix)? {
         return Ok(input_bytes.to_vec());
     }

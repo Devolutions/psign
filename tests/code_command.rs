@@ -658,6 +658,42 @@ fn code_rejects_clickonce_manifest_timestamping_explicitly() {
 }
 
 #[test]
+fn code_rejects_vsix_timestamping_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("sample.vsix");
+    let output = base.join("timestamped.vsix");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/sample.vsix"),
+        &input,
+    )
+    .unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--timestamp-url",
+            "http://127.0.0.1:9/tsa",
+            "--timestamp-digest",
+            "sha256",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("sample.vsix");
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "VSIX XMLDSig timestamping is not implemented",
+    ));
+}
+
+#[test]
 fn code_prepares_msix_with_nested_pe_and_publisher_update() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
