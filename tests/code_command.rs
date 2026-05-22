@@ -135,9 +135,7 @@ fn code_without_dry_run_fails_safely() {
     ])
     .assert()
     .failure()
-    .stderr(predicate::str::contains(
-        "requires exactly one signer",
-    ));
+    .stderr(predicate::str::contains("requires exactly one signer"));
 }
 
 #[test]
