@@ -61,6 +61,12 @@ internal sealed class PortableSignRequest
     [JsonPropertyName("private_key_der_base64")]
     public string? PrivateKeyDerBase64 { get; init; }
 
+    [JsonPropertyName("pfx_path")]
+    public string? PfxPath { get; init; }
+
+    [JsonPropertyName("pfx_password")]
+    public string? PfxPassword { get; init; }
+
     [JsonPropertyName("chain_certificate_paths")]
     public string[] ChainCertificatePaths { get; init; } = [];
 

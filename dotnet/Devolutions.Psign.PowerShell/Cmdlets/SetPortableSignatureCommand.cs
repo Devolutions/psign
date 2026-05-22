@@ -162,6 +162,10 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                     : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
                 CertificateDerBase64 = GetCertificateDerBase64(),
                 PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
+                PfxPath = PfxPath is null
+                    ? null
+                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
+                PfxPassword = Password is null ? null : SecureStringToString(Password),
                 ChainCertificatePaths = GetChainCertificatePaths(),
                 ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
                 TimestampServer = TimestampServer,
@@ -219,6 +223,10 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                         : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
                     CertificateDerBase64 = GetCertificateDerBase64(),
                     PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
+                    PfxPath = PfxPath is null
+                        ? null
+                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
+                    PfxPassword = Password is null ? null : SecureStringToString(Password),
                     ChainCertificatePaths = GetChainCertificatePaths(),
                     ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
                     TimestampServer = TimestampServer,
@@ -333,7 +341,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
 
     private string? GetCertificateDerBase64()
     {
-        X509Certificate2? cert = Certificate ?? LoadPfxCertificate() ?? LoadStoreCertificate();
+        X509Certificate2? cert = Certificate ?? LoadStoreCertificate();
         if (cert is null)
         {
             return null;
@@ -349,7 +357,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             return storePrivateKeyDerBase64;
         }
 
-        X509Certificate2? cert = Certificate ?? LoadPfxCertificate();
+        X509Certificate2? cert = Certificate;
         if (cert is null)
         {
             return null;
