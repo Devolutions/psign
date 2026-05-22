@@ -273,6 +273,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                         &nested_excludes,
                         args.skip_signed,
                         args.overwrite,
+                        None,
                         args.timestamp_url.as_deref(),
                         args.timestamp_digest,
                     )
@@ -377,6 +378,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                         &nested_excludes,
                         args.skip_signed,
                         args.overwrite,
+                        None,
                         args.timestamp_url.as_deref(),
                         args.timestamp_digest,
                     )
@@ -409,6 +411,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     &nested_excludes,
                     args.skip_signed,
                     args.overwrite,
+                    args.publisher_name.as_deref(),
                     args.timestamp_url.as_deref(),
                     args.timestamp_digest,
                 )
@@ -443,6 +446,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     &nested_excludes,
                     args.skip_signed,
                     args.overwrite,
+                    node.format.clone(),
                     args.publisher_name.as_deref(),
                     args.timestamp_url.as_deref(),
                     args.timestamp_digest,
@@ -595,6 +599,7 @@ fn sign_nuget_bytes(
     nested_excludes: &[String],
     skip_signed: bool,
     overwrite: bool,
+    publisher: Option<&str>,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
@@ -613,6 +618,7 @@ fn sign_nuget_bytes(
         nested_excludes,
         skip_signed,
         overwrite,
+        publisher,
         timestamp_url,
         timestamp_digest,
     )?;
@@ -650,6 +656,7 @@ fn sign_vsix_bytes(
     nested_excludes: &[String],
     skip_signed: bool,
     overwrite: bool,
+    publisher: Option<&str>,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
@@ -668,6 +675,7 @@ fn sign_vsix_bytes(
         nested_excludes,
         skip_signed,
         overwrite,
+        publisher,
         timestamp_url,
         timestamp_digest,
     )?;
@@ -810,6 +818,7 @@ fn sign_zip_container_bytes(
     nested_excludes: &[String],
     skip_signed: bool,
     overwrite: bool,
+    publisher: Option<&str>,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
@@ -825,6 +834,7 @@ fn sign_zip_container_bytes(
         nested_excludes,
         skip_signed,
         overwrite,
+        publisher,
         timestamp_url,
         timestamp_digest,
     )
@@ -843,6 +853,7 @@ fn sign_nested_package_entries(
     nested_excludes: &[String],
     skip_signed: bool,
     overwrite: bool,
+    publisher: Option<&str>,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
@@ -867,7 +878,7 @@ fn sign_nested_package_entries(
         }) {
             continue;
         }
-        let signed = match format {
+        let signed = match &format {
             CodeFormat::Nuget | CodeFormat::Snupkg => Some(sign_nuget_bytes(
                 &bytes,
                 &nested_label,
@@ -879,6 +890,7 @@ fn sign_nested_package_entries(
                 nested_excludes,
                 skip_signed,
                 overwrite,
+                None,
                 timestamp_url,
                 timestamp_digest,
             )?),
@@ -894,6 +906,7 @@ fn sign_nested_package_entries(
                 nested_excludes,
                 skip_signed,
                 overwrite,
+                None,
                 timestamp_url,
                 timestamp_digest,
             )?),
@@ -944,7 +957,8 @@ fn sign_nested_package_entries(
                 nested_excludes,
                 skip_signed,
                 overwrite,
-                None,
+                format.clone(),
+                publisher,
                 timestamp_url,
                 timestamp_digest,
             )?),
@@ -1073,6 +1087,7 @@ fn prepare_msix_family_bytes(
     nested_excludes: &[String],
     skip_signed: bool,
     overwrite: bool,
+    format: CodeFormat,
     publisher: Option<&str>,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
@@ -1090,11 +1105,16 @@ fn prepare_msix_family_bytes(
         nested_excludes,
         skip_signed,
         overwrite,
+        publisher,
         timestamp_url,
         timestamp_digest,
     )?;
     if let Some(publisher) = publisher {
-        updated = update_msix_manifest_publisher_bytes(&updated, label, publisher)?;
+        if zip_contains_entry(&updated, "AppxManifest.xml")? {
+            updated = update_msix_manifest_publisher_bytes(&updated, label, publisher)?;
+        } else if matches!(format, CodeFormat::Msix | CodeFormat::Appx) {
+            return Err(anyhow!("{label} is missing AppxManifest.xml"));
+        }
     }
     if zip_contains_entry(&updated, "AppxBlockMap.xml")? {
         updated = regenerate_msix_block_map_bytes(&updated, label)?;

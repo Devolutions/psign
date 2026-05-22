@@ -749,6 +749,87 @@ fn code_prepares_msix_with_nested_pe_and_publisher_update() {
 }
 
 #[test]
+fn code_prepares_msixupload_nested_package_with_publisher_update() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let inner = base.join("inner.msix");
+    let input = base.join("sample.msixupload");
+    let output = base.join("prepared.msixupload");
+    let extracted = base.join("prepared-inner.msix");
+    let nested_pe = base.join("app.signed.exe");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    write_zip(
+        &inner,
+        &[
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="exe" ContentType="application/octet-stream"/><Override PartName="/AppxManifest.xml" ContentType="application/vnd.ms-appx.manifest+xml"/><Override PartName="/AppxBlockMap.xml" ContentType="application/vnd.ms-appx.blockmap+xml"/></Types>"#
+                    .as_slice(),
+            ),
+            (
+                "AppxManifest.xml",
+                br#"<Package><Identity Name="Psign.Test" Publisher="CN=Old" Version="1.0.0.0" ProcessorArchitecture="x86"/></Package>"#
+                    .as_slice(),
+            ),
+            (
+                "AppxBlockMap.xml",
+                br#"<BlockMap HashMethod="http://www.w3.org/2001/04/xmlenc#sha256"/>"#
+                    .as_slice(),
+            ),
+            (
+                "app.exe",
+                &std::fs::read(
+                    repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi"),
+                )
+                .unwrap(),
+            ),
+        ],
+    );
+    write_zip(
+        &input,
+        &[
+            ("metadata/readme.txt", b"upload container".as_slice()),
+            ("packages/inner.msix", &std::fs::read(&inner).unwrap()),
+        ],
+    );
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--publisher-name",
+            "CN=Updated Upload Publisher",
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("sample.msixupload");
+    cmd.assert().success();
+
+    extract_zip_entry(&output, "packages/inner.msix", &extracted);
+    let mut info = psign();
+    info.args(["portable", "msix-manifest-info"])
+        .arg(&extracted)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "publisher=CN=Updated Upload Publisher",
+        ));
+    extract_zip_entry(&extracted, "app.exe", &nested_pe);
+    let mut verify = psign();
+    verify
+        .args(["portable", "verify-pe"])
+        .arg(&nested_pe)
+        .assert()
+        .success();
+}
+
+#[test]
 fn code_classifies_encrypted_msix_as_os_only_and_fails_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
