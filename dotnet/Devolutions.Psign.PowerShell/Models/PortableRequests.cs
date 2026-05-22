@@ -78,4 +78,51 @@ internal sealed class PortableSignRequest
 
     [JsonPropertyName("timestamp_hash_algorithm")]
     public string? TimestampHashAlgorithm { get; init; }
+
+    // Azure Key Vault cloud signing
+    [JsonPropertyName("azure_key_vault_url")]
+    public string? AzureKeyVaultUrl { get; init; }
+
+    [JsonPropertyName("azure_key_vault_certificate")]
+    public string? AzureKeyVaultCertificate { get; init; }
+
+    [JsonPropertyName("azure_key_vault_access_token")]
+    public string? AzureKeyVaultAccessToken { get; init; }
+
+    [JsonPropertyName("azure_key_vault_client_id")]
+    public string? AzureKeyVaultClientId { get; init; }
+
+    [JsonPropertyName("azure_key_vault_client_secret")]
+    public string? AzureKeyVaultClientSecret { get; init; }
+
+    [JsonPropertyName("azure_key_vault_tenant_id")]
+    public string? AzureKeyVaultTenantId { get; init; }
+
+    [JsonPropertyName("azure_key_vault_managed_identity")]
+    public bool? AzureKeyVaultManagedIdentity { get; init; }
+
+    // Azure Artifact Signing / Trusted Signing
+    [JsonPropertyName("artifact_signing_endpoint")]
+    public string? ArtifactSigningEndpoint { get; init; }
+
+    [JsonPropertyName("artifact_signing_account_name")]
+    public string? ArtifactSigningAccountName { get; init; }
+
+    [JsonPropertyName("artifact_signing_profile_name")]
+    public string? ArtifactSigningProfileName { get; init; }
+
+    [JsonPropertyName("artifact_signing_access_token")]
+    public string? ArtifactSigningAccessToken { get; init; }
+
+    [JsonPropertyName("artifact_signing_managed_identity")]
+    public bool? ArtifactSigningManagedIdentity { get; init; }
+
+    [JsonPropertyName("artifact_signing_tenant_id")]
+    public string? ArtifactSigningTenantId { get; init; }
+
+    [JsonPropertyName("artifact_signing_client_id")]
+    public string? ArtifactSigningClientId { get; init; }
+
+    [JsonPropertyName("artifact_signing_client_secret")]
+    public string? ArtifactSigningClientSecret { get; init; }
 }

@@ -2128,8 +2128,12 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
+ "der 0.7.10",
  "picky",
  "psign-authenticode-trust",
+ "psign-azure-kv-rest",
+ "psign-codesigning-rest",
+ "psign-opc-sign",
  "psign-sip-digest",
  "reqwest",
  "rsa 0.9.10",

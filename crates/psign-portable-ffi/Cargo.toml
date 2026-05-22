@@ -10,6 +10,11 @@ repository.workspace = true
 name = "psign_core"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+azure-kv-sign = ["psign-portable-core/azure-kv-sign"]
+artifact-signing-rest = ["psign-portable-core/artifact-signing-rest"]
+
 [dependencies]
 anyhow = "1"
 psign-portable-core = { path = "../psign-portable-core" }

@@ -6,10 +6,19 @@ description = "Reusable portable Authenticode signing and inspection APIs for ps
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+azure-kv-sign = ["dep:psign-azure-kv-rest"]
+artifact-signing-rest = ["dep:psign-codesigning-rest"]
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+der = "0.7"
 psign-authenticode-trust = { path = "../psign-authenticode-trust" }
+psign-azure-kv-rest = { path = "../psign-azure-kv-rest", optional = true }
+psign-codesigning-rest = { path = "../psign-codesigning-rest", optional = true }
+psign-opc-sign = { path = "../psign-opc-sign" }
 psign-sip-digest = { path = "../psign-sip-digest" }
 picky = { version = "7.0.0-rc.23", default-features = false, features = ["pkcs12"] }
 rsa = "0.9.10"

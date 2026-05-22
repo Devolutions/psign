@@ -102,3 +102,60 @@ psign-tool portable appinstaller-sign-companion-from-signature app.appinstaller 
 ```
 
 Keep production recursive/nested package signing on dotnet/sign until the remaining execution gaps above are closed.
+
+## PowerShell module (`Devolutions.Psign`)
+
+The `Set-PortableSignature` and `Get-PortableSignature` cmdlets provide a PowerShell-native experience for portable signing. The module now supports package-native signing for NuGet, VSIX, ClickOnce, and App Installer formats in addition to PE/DLL and PowerShell scripts.
+
+### Supported formats
+
+| Extension | Signing method |
+|-----------|---------------|
+| `.dll`, `.exe`, `.sys`, `.efi`, `.winmd` | PE Authenticode (portable digest + CMS) |
+| `.ps1`, `.psm1`, `.psd1`, `.ps1xml`, `.psc1`, `.cdxml`, `.mof` | PowerShell script signature block |
+| `.nupkg`, `.snupkg` | NuGet package-native CMS (`.signature.p7s`) |
+| `.vsix` | VSIX OPC XMLDSig |
+| `.manifest`, `.application`, `.vsto` | ClickOnce enveloped XMLDSig |
+| `.appinstaller` | Detached PKCS#7 companion (`.appinstaller.p7`) |
+| `.msi`, `.msp` | MSI Authenticode (portable digest + CMS) |
+
+### Examples
+
+```powershell
+# Sign a NuGet package with local cert/key
+Set-PortableSignature -FilePath package.nupkg -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+
+# Sign a VSIX with a PFX
+Set-PortableSignature -FilePath extension.vsix -PfxPath signer.pfx -Password $securePassword
+
+# Sign a ClickOnce manifest
+Set-PortableSignature -FilePath app.exe.manifest -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+
+# Sign all signable files in a module directory
+Set-PortableSignature -FilePath ./MyModule -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+
+# Inspect signature status
+Get-PortableSignature -FilePath signed.nupkg
+Get-PortableSignature -FilePath signed.vsix
+```
+
+### Cloud provider parameters (reserved)
+
+The following parameters are accepted for future Azure Key Vault and Artifact Signing support:
+
+```powershell
+# Azure Key Vault (reserved — currently returns a clear error)
+Set-PortableSignature -FilePath package.nupkg `
+    -AzureKeyVaultUrl "https://myvault.vault.azure.net" `
+    -AzureKeyVaultCertificate "my-cert" `
+    -AzureKeyVaultAccessToken $token
+
+# Artifact Signing / Trusted Signing (reserved — currently returns a clear error)
+Set-PortableSignature -FilePath package.nupkg `
+    -ArtifactSigningEndpoint "https://wus2.codesigning.azure.net" `
+    -ArtifactSigningAccountName "my-account" `
+    -ArtifactSigningProfileName "my-profile" `
+    -ArtifactSigningAccessToken $token
+```
+
+These parameters validate mutual exclusion and surface clear diagnostics until the cloud provider backend is wired in. Use `psign-tool code azure-key-vault` or `psign-tool code artifact-signing` for immediate cloud signing workflows.
