@@ -2,7 +2,13 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
 
-    [string] $OutputDirectory = (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts') 'powershell')
+    [string] $OutputDirectory = (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts') 'powershell'),
+
+    [string] $NativeArtifactsRoot,
+
+    [switch] $SkipNativeBuild,
+
+    [string] $ModuleArchivePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,9 +19,24 @@ $localRepo = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid
 $installRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString('N'))
 $repoName = "DevolutionsPsignLocal$([System.Guid]::NewGuid().ToString('N'))"
 
-& (Join-Path $PSScriptRoot 'build.ps1') -Configuration $Configuration
+$buildArgs = @{
+    Configuration = $Configuration
+}
+if ($NativeArtifactsRoot) {
+    $buildArgs.NativeArtifactsRoot = $NativeArtifactsRoot
+}
+if ($SkipNativeBuild) {
+    $buildArgs.SkipNativeBuild = $true
+}
+& (Join-Path $PSScriptRoot 'build.ps1') @buildArgs
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+if ($ModuleArchivePath) {
+    $moduleArchiveParent = Split-Path -Parent $ModuleArchivePath
+    if (-not [string]::IsNullOrWhiteSpace($moduleArchiveParent)) {
+        New-Item -ItemType Directory -Force -Path $moduleArchiveParent | Out-Null
+    }
+}
 New-Item -ItemType Directory -Force -Path $localRepo | Out-Null
 New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 
@@ -54,6 +75,12 @@ try {
     }
     finally {
         Remove-Item -LiteralPath $nativeProbe.FullName -Force -ErrorAction SilentlyContinue
+    }
+    if ($ModuleArchivePath) {
+        if (Test-Path -LiteralPath $ModuleArchivePath) {
+            Remove-Item -LiteralPath $ModuleArchivePath -Force
+        }
+        Compress-Archive -Path $moduleRoot -DestinationPath $ModuleArchivePath -Force
     }
     Get-Item -LiteralPath (Join-Path $OutputDirectory $package.Name)
 }

@@ -1,6 +1,10 @@
 param(
     [ValidateSet('Debug', 'Release')]
-    [string] $Configuration = 'Release'
+    [string] $Configuration = 'Release',
+
+    [string] $NativeArtifactsRoot,
+
+    [switch] $SkipNativeBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,8 +17,18 @@ $projectPath = Join-Path $projectPath 'Devolutions.Psign.PowerShell.csproj'
 
 Push-Location $repo
 try {
-    cargo build -p psign-portable-ffi --profile ($Configuration -eq 'Release' ? 'release' : 'dev')
     dotnet publish $projectPath -c $Configuration -o $libOut
+
+    if ($NativeArtifactsRoot) {
+        & (Join-Path $PSScriptRoot 'import-native.ps1') -ArtifactsRoot $NativeArtifactsRoot -ModuleRoot $moduleRoot
+        return
+    }
+
+    if ($SkipNativeBuild) {
+        return
+    }
+
+    cargo build -p psign-portable-ffi --profile ($Configuration -eq 'Release' ? 'release' : 'dev')
 
     $rid = if ($IsWindows) {
         'win'

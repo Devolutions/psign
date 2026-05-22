@@ -71,3 +71,11 @@ pwsh -File .\PowerShell\package.ps1 -Configuration Release
 ```
 
 The build stages the native library under the module RID layout, for example `runtimes\win-x64\native\psign-core.dll`, so .NET can load it via the module resolver. The package script validates the module manifest, publishes to a temporary local repository, saves the generated module package, imports it, and confirms both cmdlets are exported.
+
+Release packaging can import prebuilt `psign-core-<rid>` native artifacts instead of rebuilding the current RID locally:
+
+```powershell
+pwsh -File .\PowerShell\package.ps1 -Configuration Release -NativeArtifactsRoot .\dist\native -SkipNativeBuild
+```
+
+The native artifact root should contain directories such as `psign-core-win-x64`, `psign-core-linux-x64`, and `psign-core-osx-arm64`, each containing the packaged native library name for that RID.
