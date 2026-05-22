@@ -136,7 +136,7 @@ fn code_without_dry_run_fails_safely() {
     .assert()
     .failure()
     .stderr(predicate::str::contains(
-        "currently requires --cert and --key",
+        "requires exactly one signer",
     ));
 }
 
@@ -255,6 +255,86 @@ fn code_signs_nupkg_with_pfx_identity() {
         .arg(&output)
         .arg("sample.nupkg");
     cmd.assert().success();
+
+    let mut info = psign();
+    info.args(["portable", "nupkg-signature-info"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn code_signs_nupkg_with_azure_key_vault_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("sample.nupkg");
+    let output = base.join("signed-kv.nupkg");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/sample.nupkg"),
+        &input,
+    )
+    .unwrap();
+
+    let (mut guard, url, certificate) = spawn_azure_key_vault_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .args(["--azure-key-vault-accesstoken", "test-token", "--output"])
+        .arg(&output)
+        .arg("sample.nupkg");
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut info = psign();
+    info.args(["portable", "nupkg-signature-info"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn code_signs_nupkg_with_artifact_signing_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("sample.nupkg");
+    let output = base.join("signed-artifact.nupkg");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/sample.nupkg"),
+        &input,
+    )
+    .unwrap();
+
+    let (mut guard, endpoint) = spawn_artifact_signing_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--artifact-signing-endpoint")
+        .arg(&endpoint)
+        .args([
+            "--artifact-signing-account-name",
+            "acct",
+            "--artifact-signing-profile-name",
+            "profile",
+            "--artifact-signing-access-token",
+            "test-token",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("sample.nupkg");
+    cmd.assert().success();
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
 
     let mut info = psign();
     info.args(["portable", "nupkg-signature-info"])
@@ -1938,10 +2018,10 @@ fn sample_clickonce_manifest() -> &'static str {
 </assembly>"#
 }
 
-#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[cfg(feature = "timestamp-server")]
 struct PsignServerGuard(std::process::Child);
 
-#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[cfg(feature = "timestamp-server")]
 impl Drop for PsignServerGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -1971,6 +2051,69 @@ fn spawn_timestamp_server() -> (PsignServerGuard, String) {
     let url = line
         .trim()
         .strip_prefix("psign-server timestamp-server listening on ")
+        .expect("listening URL")
+        .to_string();
+    (guard, url)
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+fn spawn_azure_key_vault_server(max_requests: u64) -> (PsignServerGuard, String, String) {
+    let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
+    let max_requests = max_requests.to_string();
+    server_cmd.args([
+        "azure-key-vault-server",
+        "--listen",
+        "127.0.0.1:0",
+        "--max-requests",
+        max_requests.as_str(),
+    ]);
+    server_cmd.stdout(std::process::Stdio::piped());
+    server_cmd.stderr(std::process::Stdio::piped());
+    let mut guard = PsignServerGuard(server_cmd.spawn().expect("spawn psign-server"));
+    let stdout = guard.0.stdout.take().expect("server stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut listen_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut listen_line).expect("read listening line");
+    let mut cert_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut cert_line).expect("read certificate line");
+    let mut ignored = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut ignored).expect("read leaf line");
+    let url = listen_line
+        .trim()
+        .strip_prefix("psign-server azure-key-vault-server listening on ")
+        .expect("listening URL")
+        .to_string();
+    let certificate = cert_line
+        .trim()
+        .strip_prefix("psign-server azure-key-vault-server certificate ")
+        .expect("certificate name")
+        .to_string();
+    (guard, url, certificate)
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+fn spawn_artifact_signing_server(max_requests: u64) -> (PsignServerGuard, String) {
+    let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
+    let max_requests = max_requests.to_string();
+    server_cmd.args([
+        "artifact-signing-server",
+        "--listen",
+        "127.0.0.1:0",
+        "--max-requests",
+        max_requests.as_str(),
+    ]);
+    server_cmd.stdout(std::process::Stdio::piped());
+    server_cmd.stderr(std::process::Stdio::piped());
+    let mut guard = PsignServerGuard(server_cmd.spawn().expect("spawn psign-server"));
+    let stdout = guard.0.stdout.take().expect("server stdout");
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut listen_line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut listen_line).expect("read listening line");
+    let mut ignored = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut ignored).expect("read endpoint line");
+    let url = listen_line
+        .trim()
+        .strip_prefix("psign-server artifact-signing-server listening on ")
         .expect("listening URL")
         .to_string();
     (guard, url)

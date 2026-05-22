@@ -166,6 +166,69 @@ pub struct CodeArgs {
     /// Portable certificate store name for `--sha1`.
     #[arg(long = "store", visible_alias = "s", default_value = "MY")]
     pub store_name: String,
+    /// Azure Key Vault URL for remote package/orchestrator signing.
+    #[arg(long = "azure-key-vault-url", visible_alias = "kvu")]
+    pub azure_key_vault_url: Option<String>,
+    /// Azure Key Vault signing certificate name.
+    #[arg(long = "azure-key-vault-certificate", visible_alias = "kvc")]
+    pub azure_key_vault_certificate: Option<String>,
+    /// Optional Azure Key Vault certificate version.
+    #[arg(long = "azure-key-vault-certificate-version", visible_alias = "kvcv")]
+    pub azure_key_vault_certificate_version: Option<String>,
+    #[arg(long = "azure-key-vault-client-id", visible_alias = "kvi")]
+    pub azure_key_vault_client_id: Option<String>,
+    #[arg(long = "azure-key-vault-client-secret", visible_alias = "kvs")]
+    pub azure_key_vault_client_secret: Option<String>,
+    #[arg(long = "azure-key-vault-tenant-id", visible_alias = "kvt")]
+    pub azure_key_vault_tenant_id: Option<String>,
+    #[arg(long = "azure-key-vault-accesstoken", visible_alias = "kva")]
+    pub azure_key_vault_access_token: Option<String>,
+    /// Managed identity / DefaultAzureCredential-style acquisition via IMDS.
+    #[arg(long = "azure-key-vault-managed-identity", visible_alias = "kvm")]
+    pub azure_key_vault_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Key Vault signing.
+    #[arg(long = "azure-key-vault-credential-type", value_enum)]
+    pub azure_key_vault_credential_type: Option<AzureCredentialType>,
+    /// OAuth authority host prefix, e.g. `https://login.microsoftonline.com`.
+    #[arg(long = "azure-authority", visible_alias = "au")]
+    pub azure_authority: Option<String>,
+    /// Artifact Signing metadata JSON (same shape as Microsoft's dlib `/dmdf` file).
+    #[arg(long = "artifact-signing-metadata")]
+    pub artifact_signing_metadata: Option<PathBuf>,
+    /// Artifact Signing regional hostname segment, e.g. `westus`, when not using metadata Endpoint.
+    #[arg(long = "artifact-signing-region")]
+    pub artifact_signing_region: Option<String>,
+    /// Artifact Signing data-plane endpoint, e.g. `https://wus2.codesigning.azure.net`.
+    #[arg(long = "artifact-signing-endpoint")]
+    pub artifact_signing_endpoint: Option<String>,
+    #[arg(long = "artifact-signing-account-name")]
+    pub artifact_signing_account_name: Option<String>,
+    #[arg(long = "artifact-signing-profile-name")]
+    pub artifact_signing_profile_name: Option<String>,
+    #[arg(long = "artifact-signing-signature-algorithm")]
+    pub artifact_signing_signature_algorithm: Option<String>,
+    #[arg(long = "artifact-signing-api-version")]
+    pub artifact_signing_api_version: Option<String>,
+    #[arg(long = "artifact-signing-correlation-id")]
+    pub artifact_signing_correlation_id: Option<String>,
+    #[arg(long = "artifact-signing-access-token")]
+    pub artifact_signing_access_token: Option<String>,
+    #[arg(long = "artifact-signing-managed-identity")]
+    pub artifact_signing_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Artifact Signing.
+    #[arg(long = "artifact-signing-credential-type", value_enum)]
+    pub artifact_signing_credential_type: Option<AzureCredentialType>,
+    #[arg(long = "artifact-signing-tenant-id")]
+    pub artifact_signing_tenant_id: Option<String>,
+    #[arg(long = "artifact-signing-client-id")]
+    pub artifact_signing_client_id: Option<String>,
+    #[arg(long = "artifact-signing-client-secret")]
+    pub artifact_signing_client_secret: Option<String>,
+    #[arg(long = "artifact-signing-authority")]
+    pub artifact_signing_authority: Option<String>,
+    /// Override Artifact Signing data-plane origin for deterministic local tests.
+    #[arg(long = "artifact-signing-endpoint-base-url", hide = true)]
+    pub artifact_signing_endpoint_base_url: Option<String>,
     /// Additional certificate to include in generated package PKCS#7 signatures.
     #[arg(long = "chain-cert", value_name = "PATH")]
     pub chain_certs: Vec<PathBuf>,

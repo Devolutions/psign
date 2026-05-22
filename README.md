@@ -14,7 +14,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
 - `cert-store`: Portable file-backed certificate store under `~/.psign/cert-store` by default, with Windows-style store/thumbprint selection.
-- `code`: dotnet/sign-style orchestration entry point. It supports `--dry-run` / `--plan-json` planning over inputs, file lists, globs, and nested ZIP/OPC containers, plus guarded local cert/key, PFX, or portable cert-store SHA-1 execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, MSIX/AppX unsigned-package prepare including nested packages inside upload/bundle containers, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer publisher updates + top-level or nested companion signatures, `--continue-on-error`, `--skip-signed`, `--overwrite`, and inside-out VSIX/ZIP -> NuGet/VSIX -> PE/ClickOnce-manifest signing.
+- `code`: dotnet/sign-style orchestration entry point. It supports `--dry-run` / `--plan-json` planning over inputs, file lists, globs, and nested ZIP/OPC containers, plus guarded local cert/key, PFX, portable cert-store SHA-1, Azure Key Vault, or Artifact Signing execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, MSIX/AppX unsigned-package prepare including nested packages inside upload/bundle containers, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer publisher updates + top-level or nested companion signatures, `--continue-on-error`, `--skip-signed`, `--overwrite`, and inside-out VSIX/ZIP -> NuGet/VSIX -> PE/ClickOnce-manifest signing.
 - `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs, including PE/WinMD signing through Azure Artifact Signing REST without Microsoft client DLLs.
 
 ## MSIX parity notes
@@ -141,6 +141,8 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.exe app.exe
 # psign-tool code --base-directory . --pfx signer.pfx --password "pfx-password" --output signed.nupkg package.nupkg
 # psign-tool code --base-directory . --cert-store-dir ~/.psign/cert-store --sha1 <thumbprint> --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --azure-key-vault-url https://vault.vault.azure.net --azure-key-vault-certificate cert --azure-key-vault-accesstoken "$TOKEN" --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --artifact-signing-endpoint https://wus2.codesigning.azure.net --artifact-signing-account-name acct --artifact-signing-profile-name profile --artifact-signing-access-token "$TOKEN" --output signed.nupkg package.nupkg
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg package.nupkg
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix
 # psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg

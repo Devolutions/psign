@@ -1,12 +1,23 @@
 use crate::CommandOutput;
-use crate::cli::{CodeArgs, DigestAlgorithm};
+use crate::cli::{AzureCredentialType, CodeArgs, DigestAlgorithm};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+#[cfg(feature = "azure-kv-sign")]
+use psign_azure_kv_rest::{
+    KeyVaultCertificate, KvAuthParams, KvHashAlg, KvPublicKeyKind, acquire_kv_access_token,
+    fetch_kv_certificate, kv_decode_cer_b64, kv_public_key_kind_from_cer_der,
+    kv_sign_digest_from_certificate,
+};
+#[cfg(feature = "artifact-signing-rest")]
+use psign_codesigning_rest::{
+    CodesigningAuth, CodesigningSubmitParams, DEFAULT_API_VERSION,
+    submit_codesign_hash_signature_blocking,
+};
 use psign_opc_sign::{nuget, opc, vsix};
 use psign_sip_digest::timestamp::{build_timestamp_request_bytes, parse_time_stamp_resp_der};
-use psign_sip_digest::{pkcs7, rdp};
+use psign_sip_digest::{pe_digest, pe_embed, pkcs7, rdp};
 use rsa::signature::{SignatureEncoding as _, Signer as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -193,9 +204,7 @@ pub fn build_code_plan(args: &CodeArgs) -> Result<CodePlan> {
 }
 
 fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> {
-    let signer = resolve_code_signer_paths(args)?;
-    let cert = signer.cert.as_path();
-    let key = signer.key.as_path();
+    let signer = resolve_code_signer(args)?;
     if args.output.is_none() {
         return Err(anyhow!(
             "`psign-tool code` signing execution currently requires --output to avoid in-place package mutation"
@@ -227,10 +236,10 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     ))
                 } else {
                     let signed =
-                        sign_pe_bytes(&input_bytes, &node.path, cert, key, signing_digest, false)
+                        sign_pe_bytes(&input_bytes, &node.path, &signer, signing_digest, false)
                             .with_context(|| {
-                            format!("sign Authenticode payload {}", input.display())
-                        })?;
+                                format!("sign Authenticode payload {}", input.display())
+                            })?;
                     std::fs::write(&output, signed).with_context(|| {
                         format!("write signed Authenticode payload {}", output.display())
                     })?;
@@ -261,8 +270,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                         &node.path,
                         digest,
                         signing_digest,
-                        cert,
-                        key,
+                        &signer,
                         args.chain_certs.clone(),
                         &nested_excludes,
                         args.skip_signed,
@@ -311,8 +319,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 };
                 let pkcs7 = sign_pkcs7_id_data(
                     &bytes,
-                    cert,
-                    key,
+                    &signer,
                     args.chain_certs.clone(),
                     signing_digest,
                     args.timestamp_url.as_deref(),
@@ -344,10 +351,6 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
             CodeFormat::Vsix => {
                 let output = output_path_for_node(node)?;
                 ensure_parent_dir(&output)?;
-                let cert_bytes =
-                    std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-                rdp::parse_certificate(&cert_bytes)
-                    .with_context(|| format!("parse signer certificate {}", cert.display()))?;
                 let input_bytes =
                     std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
                 if args.skip_signed && package_has_signature(&input_bytes, &node.format)? {
@@ -366,8 +369,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                         digest,
                         signing_digest,
                         vsix_digest,
-                        cert,
-                        key,
+                        &signer,
                         args.chain_certs.clone(),
                         &nested_excludes,
                         args.skip_signed,
@@ -399,8 +401,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     digest,
                     signing_digest,
                     vsix_digest,
-                    cert,
-                    key,
+                    &signer,
                     args.chain_certs.clone(),
                     &nested_excludes,
                     args.skip_signed,
@@ -434,8 +435,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     digest,
                     signing_digest,
                     vsix_digest,
-                    cert,
-                    key,
+                    &signer,
                     args.chain_certs.clone(),
                     &nested_excludes,
                     args.skip_signed,
@@ -477,8 +477,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     let signed = sign_clickonce_manifest_bytes(
                         &input_bytes,
                         &node.path,
-                        cert,
-                        key,
+                        &signer,
                         vsix_digest,
                         args.timestamp_url.as_deref(),
                         args.timestamp_digest,
@@ -499,14 +498,11 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 ensure_parent_dir(&output)?;
                 let input_bytes =
                     std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
-                let signed = sign_clickonce_deploy_bytes(
-                    &input_bytes,
-                    &node.path,
-                    cert,
-                    key,
-                    signing_digest,
-                )
-                .with_context(|| format!("sign ClickOnce deploy payload {}", input.display()))?;
+                let signed =
+                    sign_clickonce_deploy_bytes(&input_bytes, &node.path, &signer, signing_digest)
+                        .with_context(|| {
+                            format!("sign ClickOnce deploy payload {}", input.display())
+                        })?;
                 std::fs::write(&output, signed).with_context(|| {
                     format!("write signed ClickOnce deploy payload {}", output.display())
                 })?;
@@ -587,8 +583,7 @@ fn sign_nuget_bytes(
     label: &str,
     digest: nuget::NuGetHashAlgorithm,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     nested_excludes: &[String],
     skip_signed: bool,
@@ -606,8 +601,7 @@ fn sign_nuget_bytes(
         digest,
         signing_digest,
         vsix::VsixHashAlgorithm::Sha256,
-        cert,
-        key,
+        signer,
         chain_certs.clone(),
         nested_excludes,
         skip_signed,
@@ -624,8 +618,7 @@ fn sign_nuget_bytes(
     let content = nuget::signature_content_bytes(digest, &digest.hash(&unsigned));
     let pkcs7 = sign_pkcs7_id_data(
         &content,
-        cert,
-        key,
+        signer,
         chain_certs,
         signing_digest,
         timestamp_url,
@@ -644,8 +637,7 @@ fn sign_vsix_bytes(
     digest: nuget::NuGetHashAlgorithm,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     vsix_digest: vsix::VsixHashAlgorithm,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     nested_excludes: &[String],
     skip_signed: bool,
@@ -668,8 +660,7 @@ fn sign_vsix_bytes(
         digest,
         signing_digest,
         vsix_digest,
-        cert,
-        key,
+        signer,
         chain_certs,
         nested_excludes,
         skip_signed,
@@ -678,13 +669,9 @@ fn sign_vsix_bytes(
         timestamp_url,
         timestamp_digest,
     )?;
-    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-    let private_key = rdp::parse_rsa_private_key(&key_bytes)
-        .with_context(|| format!("parse RSA private key {}", key.display()))?;
     let signed_info = vsix::signed_info_xml(Cursor::new(updated.clone()), vsix_digest)
         .with_context(|| format!("create VSIX SignedInfo for {label}"))?;
-    let signature = sign_xml_signed_info(vsix_digest, private_key, &signed_info);
+    let (signature, cert_bytes) = signer.sign_xml_signed_info(vsix_digest, &signed_info)?;
     let xml = vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
         .into_bytes();
     let mut out = Cursor::new(Vec::new());
@@ -696,8 +683,7 @@ fn sign_vsix_bytes(
 fn sign_clickonce_manifest_bytes(
     input_bytes: &[u8],
     label: &str,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     digest: vsix::VsixHashAlgorithm,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
@@ -710,12 +696,8 @@ fn sign_clickonce_manifest_bytes(
     let text = std::str::from_utf8(input_bytes)
         .with_context(|| format!("read ClickOnce manifest {label} as UTF-8 XML"))?;
     let unsigned = unsigned_clickonce_manifest_text(text)?;
-    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-    let private_key = rdp::parse_rsa_private_key(&key_bytes)
-        .with_context(|| format!("parse RSA private key {}", key.display()))?;
     let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
-    let signature = sign_xml_signed_info(digest, private_key, &signed_info);
+    let (signature, cert_bytes) = signer.sign_xml_signed_info(digest, &signed_info)?;
     let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
     Ok(insert_clickonce_signature_xml(&unsigned, &signature_xml)?.into_bytes())
 }
@@ -811,8 +793,7 @@ fn sign_zip_container_bytes(
     digest: nuget::NuGetHashAlgorithm,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     vsix_digest: vsix::VsixHashAlgorithm,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     nested_excludes: &[String],
     skip_signed: bool,
@@ -827,8 +808,7 @@ fn sign_zip_container_bytes(
         digest,
         signing_digest,
         vsix_digest,
-        cert,
-        key,
+        signer,
         chain_certs,
         nested_excludes,
         skip_signed,
@@ -846,8 +826,7 @@ fn sign_nested_package_entries(
     digest: nuget::NuGetHashAlgorithm,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     vsix_digest: vsix::VsixHashAlgorithm,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     nested_excludes: &[String],
     skip_signed: bool,
@@ -886,8 +865,7 @@ fn sign_nested_package_entries(
                     &nested_label,
                     digest,
                     signing_digest,
-                    cert,
-                    key,
+                    signer,
                     chain_certs.clone(),
                     nested_excludes,
                     skip_signed,
@@ -906,8 +884,7 @@ fn sign_nested_package_entries(
                     digest,
                     signing_digest,
                     vsix_digest,
-                    cert,
-                    key,
+                    signer,
                     chain_certs.clone(),
                     nested_excludes,
                     skip_signed,
@@ -941,8 +918,7 @@ fn sign_nested_package_entries(
                 }
                 let pkcs7 = sign_pkcs7_id_data(
                     &descriptor,
-                    cert,
-                    key,
+                    signer,
                     chain_certs.clone(),
                     signing_digest,
                     timestamp_url,
@@ -964,8 +940,7 @@ fn sign_nested_package_entries(
                         bytes: sign_clickonce_manifest_bytes(
                             &bytes,
                             &nested_label,
-                            cert,
-                            key,
+                            signer,
                             vsix_digest,
                             timestamp_url,
                             timestamp_digest,
@@ -976,25 +951,12 @@ fn sign_nested_package_entries(
             }
             CodeFormat::Deploy => entry_updates.push(ZipEntryUpdate {
                 name,
-                bytes: sign_clickonce_deploy_bytes(
-                    &bytes,
-                    &nested_label,
-                    cert,
-                    key,
-                    signing_digest,
-                )?,
+                bytes: sign_clickonce_deploy_bytes(&bytes, &nested_label, signer, signing_digest)?,
                 compression,
             }),
             CodeFormat::Pe | CodeFormat::Winmd => entry_updates.push(ZipEntryUpdate {
                 name,
-                bytes: sign_pe_bytes(
-                    &bytes,
-                    &nested_label,
-                    cert,
-                    key,
-                    signing_digest,
-                    skip_signed,
-                )?,
+                bytes: sign_pe_bytes(&bytes, &nested_label, signer, signing_digest, skip_signed)?,
                 compression,
             }),
             CodeFormat::Msix
@@ -1010,8 +972,7 @@ fn sign_nested_package_entries(
                     digest,
                     signing_digest,
                     vsix_digest,
-                    cert,
-                    key,
+                    signer,
                     chain_certs.clone(),
                     nested_excludes,
                     skip_signed,
@@ -1058,8 +1019,7 @@ fn ensure_nuget_unsigned(bytes: &[u8], label: &str) -> Result<()> {
 fn sign_clickonce_deploy_bytes(
     input_bytes: &[u8],
     label: &str,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
 ) -> Result<Vec<u8>> {
     if signing_digest != pkcs7::AuthenticodeSigningDigest::Sha256 {
@@ -1079,9 +1039,7 @@ fn sign_clickonce_deploy_bytes(
             "ClickOnce .deploy payload {label} maps to unsupported content name {content_name}"
         ));
     }
-    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-    sign_pe_bytes_with_key(input_bytes, &cert_bytes, &key_bytes)
+    sign_pe_bytes(input_bytes, label, signer, signing_digest, false)
         .with_context(|| format!("sign ClickOnce .deploy PE payload {label}"))
 }
 
@@ -1104,8 +1062,7 @@ fn is_pe_like_extension(ext: &str) -> bool {
 fn sign_pe_bytes(
     input_bytes: &[u8],
     label: &str,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     skip_signed: bool,
 ) -> Result<Vec<u8>> {
@@ -1115,18 +1072,9 @@ fn sign_pe_bytes(
     if signing_digest != pkcs7::AuthenticodeSigningDigest::Sha256 {
         return Err(anyhow!("PE/WinMD signing currently supports only SHA-256"));
     }
-    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-    sign_pe_bytes_with_key(input_bytes, &cert_bytes, &key_bytes)
+    signer
+        .sign_pe_bytes(input_bytes, signing_digest)
         .with_context(|| format!("sign PE/WinMD payload {label}"))
-}
-
-fn sign_pe_bytes_with_key(
-    input_bytes: &[u8],
-    cert_bytes: &[u8],
-    key_bytes: &[u8],
-) -> Result<Vec<u8>> {
-    psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(input_bytes, cert_bytes, key_bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1136,8 +1084,7 @@ fn prepare_msix_family_bytes(
     digest: nuget::NuGetHashAlgorithm,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     vsix_digest: vsix::VsixHashAlgorithm,
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     nested_excludes: &[String],
     skip_signed: bool,
@@ -1154,8 +1101,7 @@ fn prepare_msix_family_bytes(
         digest,
         signing_digest,
         vsix_digest,
-        cert,
-        key,
+        signer,
         chain_certs,
         nested_excludes,
         skip_signed,
@@ -1553,42 +1499,20 @@ fn is_unsupported_nested_signable(format: &CodeFormat) -> bool {
 
 fn sign_pkcs7_id_data(
     content: &[u8],
-    cert: &Path,
-    key: &Path,
+    signer: &CodeSigner,
     chain_certs: Vec<PathBuf>,
     digest: pkcs7::AuthenticodeSigningDigest,
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
-    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    let signer_cert = rdp::parse_certificate(&cert_bytes)
-        .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-    let private_key = rdp::parse_rsa_private_key(&key_bytes)
-        .with_context(|| format!("parse RSA private key {}", key.display()))?;
-    let mut chain = Vec::with_capacity(chain_certs.len());
-    for chain_cert in chain_certs {
-        let bytes =
-            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
-        chain.push(
-            rdp::parse_certificate(&bytes)
-                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
-        );
-    }
+    let chain = load_chain_certs(chain_certs)?;
     let econtent_der = OctetString::new(content.to_vec())
         .map_err(|e| anyhow!("encode CMS id-data OCTET STRING: {e}"))?
         .to_der()
         .map_err(|e| anyhow!("encode CMS id-data DER: {e}"))?;
     let id_data = ObjectIdentifier::new(pkcs7::PKCS7_ID_DATA_OID)
         .map_err(|e| anyhow!("parse CMS id-data OID: {e}"))?;
-    let pkcs7 = pkcs7::create_pkcs7_signed_data_der_rsa(
-        id_data,
-        &econtent_der,
-        digest,
-        signer_cert,
-        chain,
-        private_key,
-    )?;
+    let pkcs7 = signer.sign_pkcs7(id_data, &econtent_der, digest, chain, true)?;
     let mut detached = pkcs7::parse_pkcs7_signed_data_der(&pkcs7)
         .context("parse generated CMS before detaching eContent")?;
     detached.encap_content_info.econtent = None;
@@ -1723,10 +1647,63 @@ fn timestamp_digest_bytes(digest: DigestAlgorithm, bytes: &[u8]) -> Result<Vec<u
     }
 }
 
+struct CodeSigner {
+    backend: CodeSignerBackend,
+}
+
+enum CodeSignerBackend {
+    Local(CodeSignerPaths),
+    #[cfg(feature = "azure-kv-sign")]
+    AzureKeyVault(CodeAzureKeyVaultSigner),
+    #[cfg(feature = "artifact-signing-rest")]
+    ArtifactSigning(CodeArtifactSigningSigner),
+}
+
 struct CodeSignerPaths {
     cert: PathBuf,
     key: PathBuf,
     temp_dir: Option<PathBuf>,
+}
+
+#[cfg(feature = "azure-kv-sign")]
+struct CodeAzureKeyVaultSigner {
+    http: reqwest::blocking::Client,
+    token: String,
+    certificate: KeyVaultCertificate,
+    cert_der: Vec<u8>,
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+struct CodeArtifactSigningSigner {
+    metadata: Option<PathBuf>,
+    region: Option<String>,
+    endpoint: Option<String>,
+    account_name: Option<String>,
+    profile_name: Option<String>,
+    signature_algorithm: Option<String>,
+    api_version: Option<String>,
+    correlation_id: Option<String>,
+    access_token: Option<String>,
+    managed_identity: bool,
+    tenant_id: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    authority: Option<String>,
+    endpoint_base_url: Option<String>,
+}
+
+struct RemoteCodeSignature {
+    signature: Vec<u8>,
+    signer_cert_der: Vec<u8>,
+    signer_cert: x509_cert::Certificate,
+    chain: Vec<x509_cert::Certificate>,
+}
+
+#[derive(Clone, Copy)]
+enum CodeRemoteDigestAlgorithm {
+    Sha256,
+    Sha384,
+    Sha512,
 }
 
 impl Drop for CodeSignerPaths {
@@ -1737,18 +1714,314 @@ impl Drop for CodeSignerPaths {
     }
 }
 
-fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
-    if args.cert.is_some() || args.key.is_some() {
+impl CodeSigner {
+    fn local_paths(&self) -> Option<(&Path, &Path)> {
+        match &self.backend {
+            CodeSignerBackend::Local(paths) => Some((&paths.cert, &paths.key)),
+            #[cfg(feature = "azure-kv-sign")]
+            CodeSignerBackend::AzureKeyVault(_) => None,
+            #[cfg(feature = "artifact-signing-rest")]
+            CodeSignerBackend::ArtifactSigning(_) => None,
+        }
+    }
+
+    fn sign_pkcs7(
+        &self,
+        econtent_type: ObjectIdentifier,
+        econtent_der: &[u8],
+        digest: pkcs7::AuthenticodeSigningDigest,
+        chain: Vec<x509_cert::Certificate>,
+        detached: bool,
+    ) -> Result<Vec<u8>> {
+        if let Some((cert, key)) = self.local_paths() {
+            let cert_bytes =
+                std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let key_bytes =
+                std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+            let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                .with_context(|| format!("parse RSA private key {}", key.display()))?;
+            let pkcs7 = pkcs7::create_pkcs7_signed_data_der_rsa(
+                econtent_type,
+                econtent_der,
+                digest,
+                signer_cert,
+                chain,
+                private_key,
+            )?;
+            if !detached {
+                return Ok(pkcs7);
+            }
+            let mut detached_pkcs7 = pkcs7::parse_pkcs7_signed_data_der(&pkcs7)
+                .context("parse generated CMS before detaching eContent")?;
+            detached_pkcs7.encap_content_info.econtent = None;
+            return pkcs7::encode_pkcs7_content_info_signed_data_der(&detached_pkcs7);
+        }
+
+        let prehash =
+            pkcs7::pkcs7_remote_rsa_signed_attrs_digest(econtent_type, econtent_der, digest)?;
+        let mut remote =
+            self.sign_remote_digest(code_remote_digest_from_pkcs7(digest), &prehash)?;
+        remote.chain.extend(chain);
+        pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+            econtent_type,
+            econtent_der,
+            digest,
+            remote.signer_cert,
+            remote.chain,
+            &remote.signature,
+            detached,
+        )
+    }
+
+    fn sign_xml_signed_info(
+        &self,
+        algorithm: vsix::VsixHashAlgorithm,
+        signed_info: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        if let Some((cert, key)) = self.local_paths() {
+            let cert_bytes =
+                std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let key_bytes =
+                std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+            let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                .with_context(|| format!("parse RSA private key {}", key.display()))?;
+            return Ok((
+                sign_xml_signed_info(algorithm, private_key, signed_info),
+                cert_bytes,
+            ));
+        }
+
+        let prehash = clickonce_signature_digest_bytes(algorithm, signed_info);
+        let remote = self.sign_remote_digest(code_remote_digest_from_vsix(algorithm), &prehash)?;
+        Ok((remote.signature, remote.signer_cert_der))
+    }
+
+    fn sign_pe_bytes(
+        &self,
+        input_bytes: &[u8],
+        signing_digest: pkcs7::AuthenticodeSigningDigest,
+    ) -> Result<Vec<u8>> {
+        if let Some((cert, key)) = self.local_paths() {
+            let cert_bytes =
+                std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let key_bytes =
+                std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+            return psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(
+                input_bytes,
+                &cert_bytes,
+                &key_bytes,
+            );
+        }
+
+        let pe_digest =
+            pe_digest::pe_authenticode_digest(input_bytes, signing_digest.pe_hash_kind())
+                .context("compute PE/WinMD Authenticode digest")?;
+        let indirect = pkcs7::pe_spc_indirect_data(signing_digest, &pe_digest)?;
+        let prehash =
+            pkcs7::authenticode_remote_rsa_signed_attrs_digest(&indirect, signing_digest)?;
+        let remote =
+            self.sign_remote_digest(code_remote_digest_from_pkcs7(signing_digest), &prehash)?;
+        let pkcs7 = pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+            indirect,
+            signing_digest,
+            remote.signer_cert,
+            remote.chain,
+            &remote.signature,
+        )?;
+        pe_embed::pe_append_authenticode_pkcs7_certificate(input_bytes.to_vec(), &pkcs7)
+            .context("embed Authenticode PKCS#7")
+    }
+
+    fn sign_remote_digest(
+        &self,
+        algorithm: CodeRemoteDigestAlgorithm,
+        digest: &[u8],
+    ) -> Result<RemoteCodeSignature> {
+        match &self.backend {
+            CodeSignerBackend::Local(_) => Err(anyhow!("local signer cannot remote-sign a digest")),
+            #[cfg(feature = "azure-kv-sign")]
+            CodeSignerBackend::AzureKeyVault(signer) => signer.sign_digest(algorithm, digest),
+            #[cfg(feature = "artifact-signing-rest")]
+            CodeSignerBackend::ArtifactSigning(signer) => signer.sign_digest(algorithm, digest),
+        }
+    }
+}
+
+#[cfg(feature = "azure-kv-sign")]
+impl CodeAzureKeyVaultSigner {
+    fn sign_digest(
+        &self,
+        algorithm: CodeRemoteDigestAlgorithm,
+        digest: &[u8],
+    ) -> Result<RemoteCodeSignature> {
+        let signature = kv_sign_digest_from_certificate(
+            &self.http,
+            &self.token,
+            &self.certificate,
+            kv_hash_algorithm(algorithm),
+            digest,
+        )?;
+        let signer_cert = rdp::parse_certificate(&self.cert_der)
+            .context("parse Azure Key Vault signer certificate")?;
+        Ok(RemoteCodeSignature {
+            signature,
+            signer_cert_der: self.cert_der.clone(),
+            signer_cert,
+            chain: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+impl CodeArtifactSigningSigner {
+    fn sign_digest(
+        &self,
+        algorithm: CodeRemoteDigestAlgorithm,
+        digest: &[u8],
+    ) -> Result<RemoteCodeSignature> {
+        let params =
+            self.params_for_digest(digest.to_vec(), artifact_signature_algorithm(algorithm))?;
+        let signed = submit_codesign_hash_signature_blocking(&params, |_| {})?;
+        let (signer_cert, chain) =
+            parse_artifact_signing_certificates(&signed.signing_certificate)?;
+        let signer_cert_der = signer_cert
+            .to_der()
+            .map_err(|e| anyhow!("encode Artifact Signing signer certificate: {e}"))?;
+        Ok(RemoteCodeSignature {
+            signature: signed.signature,
+            signer_cert_der,
+            signer_cert,
+            chain,
+        })
+    }
+
+    fn params_for_digest(
+        &self,
+        digest: Vec<u8>,
+        default_signature_algorithm: &str,
+    ) -> Result<CodesigningSubmitParams> {
+        let metadata = if let Some(path) = self.metadata.as_deref() {
+            let raw = std::fs::read(path)
+                .with_context(|| format!("read Artifact Signing metadata {}", path.display()))?;
+            Some(
+                serde_json::from_slice::<ArtifactSigningMetadataDoc>(&raw)
+                    .context("parse Artifact Signing metadata JSON")?,
+            )
+        } else {
+            None
+        };
+        let endpoint = text_opt(self.endpoint_base_url.as_deref())
+            .or_else(|| text_opt(self.endpoint.as_deref()))
+            .or_else(|| metadata.as_ref().and_then(|m| text_opt(Some(&m.Endpoint))));
+        let account_name = text_opt(self.account_name.as_deref())
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|m| text_opt(Some(&m.CodeSigningAccountName)))
+            })
+            .ok_or_else(|| anyhow!("Artifact Signing requires --artifact-signing-account-name or metadata CodeSigningAccountName"))?;
+        let profile_name = text_opt(self.profile_name.as_deref())
+            .or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|m| text_opt(Some(&m.CertificateProfileName)))
+            })
+            .ok_or_else(|| anyhow!("Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName"))?;
+        Ok(CodesigningSubmitParams {
+            region: text_opt(self.region.as_deref()).unwrap_or_else(|| "unused".to_string()),
+            account_name,
+            profile_name,
+            digest,
+            signature_algorithm: text_opt(self.signature_algorithm.as_deref())
+                .unwrap_or_else(|| default_signature_algorithm.to_string()),
+            api_version: text_opt(self.api_version.as_deref())
+                .unwrap_or_else(|| DEFAULT_API_VERSION.to_string()),
+            correlation_id: text_opt(self.correlation_id.as_deref()).or_else(|| {
+                metadata
+                    .as_ref()
+                    .and_then(|m| text_opt(m.CorrelationId.as_deref()))
+            }),
+            authority: text_opt(self.authority.as_deref()),
+            auth: self.auth()?,
+            endpoint_base_url: endpoint,
+        })
+    }
+
+    fn auth(&self) -> Result<CodesigningAuth> {
+        let has_token = text_opt(self.access_token.as_deref()).is_some();
+        let tenant = text_opt(self.tenant_id.as_deref());
+        let client = text_opt(self.client_id.as_deref());
+        let secret = text_opt(self.client_secret.as_deref());
+        let client_parts = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
+        if self.managed_identity {
+            if has_token || client_parts != 0 {
+                return Err(anyhow!(
+                    "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
+                ));
+            }
+            return Ok(CodesigningAuth::ManagedIdentity);
+        }
+        if let Some(token) = text_opt(self.access_token.as_deref()) {
+            if client_parts != 0 {
+                return Err(anyhow!(
+                    "use either Artifact Signing access token or client credentials, not both"
+                ));
+            }
+            return Ok(CodesigningAuth::Bearer(token));
+        }
+        if client_parts != 0 && client_parts != 3 {
+            return Err(anyhow!(
+                "Artifact Signing client credentials require all of tenant-id, client-id, and client-secret"
+            ));
+        }
+        if client_parts == 0 {
+            return Err(anyhow!(
+                "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
+            ));
+        }
+        Ok(CodesigningAuth::ClientCredentials {
+            tenant_id: tenant.unwrap(),
+            client_id: client.unwrap(),
+            client_secret: secret.unwrap(),
+        })
+    }
+}
+
+fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
+    let local_files = args.cert.is_some() || args.key.is_some();
+    let pfx = args.pfx.is_some();
+    let portable_store = args
+        .cert_sha1
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    let azure_key_vault = azure_key_vault_requested(args);
+    let artifact_signing = artifact_signing_requested(args);
+    let provider_count = local_files as u8
+        + pfx as u8
+        + portable_store as u8
+        + azure_key_vault as u8
+        + artifact_signing as u8;
+    if provider_count != 1 {
+        return Err(anyhow!(
+            "`psign-tool code` signing execution requires exactly one signer: --cert/--key, --pfx, --sha1, Azure Key Vault, or Artifact Signing"
+        ));
+    }
+
+    if local_files {
         let cert = args.cert.clone().ok_or_else(|| {
             anyhow!("`psign-tool code` signing execution requires --cert with --key")
         })?;
         let key = args.key.clone().ok_or_else(|| {
             anyhow!("`psign-tool code` signing execution requires --key with --cert")
         })?;
-        return Ok(CodeSignerPaths {
-            cert,
-            key,
-            temp_dir: None,
+        return Ok(CodeSigner {
+            backend: CodeSignerBackend::Local(CodeSignerPaths {
+                cert,
+                key,
+                temp_dir: None,
+            }),
         });
     }
 
@@ -1757,7 +2030,12 @@ fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
         let password = args.password.as_deref().unwrap_or("");
         let (cert_der, key_pem) = crate::cert_store::load_pfx_cert_and_key(&bytes, password)
             .with_context(|| format!("extract signer identity from PFX '{}'", pfx.display()))?;
-        return write_temp_signer_material(cert_der, key_pem.into_bytes());
+        return Ok(CodeSigner {
+            backend: CodeSignerBackend::Local(write_temp_signer_material(
+                cert_der,
+                key_pem.into_bytes(),
+            )?),
+        });
     }
 
     if let Some(sha1) = args.cert_sha1.as_deref() {
@@ -1767,12 +2045,23 @@ fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
             &args.store_name,
             sha1,
         )?;
-        return write_temp_signer_material(identity.cert_der, identity.key_pem);
+        return Ok(CodeSigner {
+            backend: CodeSignerBackend::Local(write_temp_signer_material(
+                identity.cert_der,
+                identity.key_pem,
+            )?),
+        });
     }
 
-    Err(anyhow!(
-        "`psign-tool code` signing execution currently requires --cert and --key, --pfx, or a portable cert-store --sha1 identity"
-    ))
+    if azure_key_vault {
+        return resolve_code_signer_azure_key_vault(args);
+    }
+
+    if artifact_signing {
+        return resolve_code_signer_artifact_signing(args);
+    }
+
+    unreachable!("provider_count checked above");
 }
 
 fn write_temp_signer_material(cert_der: Vec<u8>, key_pem: Vec<u8>) -> Result<CodeSignerPaths> {
@@ -1798,6 +2087,251 @@ fn unique_code_signer_temp_dir() -> Result<PathBuf> {
         .map_err(|e| anyhow!("system clock before Unix epoch: {e}"))?
         .as_nanos();
     Ok(std::env::temp_dir().join(format!("psign-code-signer-{}-{nanos}", std::process::id())))
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn resolve_code_signer_azure_key_vault(args: &CodeArgs) -> Result<CodeSigner> {
+    if matches!(
+        args.azure_key_vault_credential_type,
+        Some(AzureCredentialType::WorkloadIdentity)
+    ) {
+        return Err(anyhow!(
+            "`psign-tool code` Azure Key Vault execution does not support workload identity yet"
+        ));
+    }
+    let vault_url = required_text("--azure-key-vault-url", args.azure_key_vault_url.as_deref())?;
+    let certificate_name = required_text(
+        "--azure-key-vault-certificate",
+        args.azure_key_vault_certificate.as_deref(),
+    )?;
+    let managed_identity = args.azure_key_vault_managed_identity
+        || matches!(
+            args.azure_key_vault_credential_type,
+            Some(AzureCredentialType::ManagedIdentity)
+        );
+    let auth = KvAuthParams {
+        access_token: args.azure_key_vault_access_token.as_deref(),
+        managed_identity,
+        tenant_id: args.azure_key_vault_tenant_id.as_deref(),
+        client_id: args.azure_key_vault_client_id.as_deref(),
+        client_secret: args.azure_key_vault_client_secret.as_deref(),
+        authority: args.azure_authority.as_deref(),
+    };
+    let token = acquire_kv_access_token(&auth)?;
+    let http = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let certificate = fetch_kv_certificate(
+        &http,
+        &vault_url,
+        &certificate_name,
+        args.azure_key_vault_certificate_version.as_deref(),
+        &token,
+    )?;
+    let cert_der = kv_decode_cer_b64(&certificate.cer)?;
+    if kv_public_key_kind_from_cer_der(&cert_der)? != KvPublicKeyKind::Rsa {
+        return Err(anyhow!(
+            "`psign-tool code` Azure Key Vault package orchestration requires an RSA signing certificate"
+        ));
+    }
+    Ok(CodeSigner {
+        backend: CodeSignerBackend::AzureKeyVault(CodeAzureKeyVaultSigner {
+            http,
+            token,
+            certificate,
+            cert_der,
+        }),
+    })
+}
+
+#[cfg(not(feature = "azure-kv-sign"))]
+fn resolve_code_signer_azure_key_vault(_args: &CodeArgs) -> Result<CodeSigner> {
+    Err(anyhow!(
+        "`psign-tool code` Azure Key Vault execution requires the azure-kv-sign feature"
+    ))
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn resolve_code_signer_artifact_signing(args: &CodeArgs) -> Result<CodeSigner> {
+    if matches!(
+        args.artifact_signing_credential_type,
+        Some(AzureCredentialType::WorkloadIdentity)
+    ) {
+        return Err(anyhow!(
+            "`psign-tool code` Artifact Signing execution does not support workload identity yet"
+        ));
+    }
+    Ok(CodeSigner {
+        backend: CodeSignerBackend::ArtifactSigning(CodeArtifactSigningSigner {
+            metadata: args.artifact_signing_metadata.clone(),
+            region: args.artifact_signing_region.clone(),
+            endpoint: args.artifact_signing_endpoint.clone(),
+            account_name: args.artifact_signing_account_name.clone(),
+            profile_name: args.artifact_signing_profile_name.clone(),
+            signature_algorithm: args.artifact_signing_signature_algorithm.clone(),
+            api_version: args.artifact_signing_api_version.clone(),
+            correlation_id: args.artifact_signing_correlation_id.clone(),
+            access_token: args.artifact_signing_access_token.clone(),
+            managed_identity: args.artifact_signing_managed_identity
+                || matches!(
+                    args.artifact_signing_credential_type,
+                    Some(AzureCredentialType::ManagedIdentity)
+                ),
+            tenant_id: args.artifact_signing_tenant_id.clone(),
+            client_id: args.artifact_signing_client_id.clone(),
+            client_secret: args.artifact_signing_client_secret.clone(),
+            authority: args.artifact_signing_authority.clone(),
+            endpoint_base_url: args.artifact_signing_endpoint_base_url.clone(),
+        }),
+    })
+}
+
+#[cfg(not(feature = "artifact-signing-rest"))]
+fn resolve_code_signer_artifact_signing(_args: &CodeArgs) -> Result<CodeSigner> {
+    Err(anyhow!(
+        "`psign-tool code` Artifact Signing execution requires the artifact-signing-rest feature"
+    ))
+}
+
+fn azure_key_vault_requested(args: &CodeArgs) -> bool {
+    text_opt(args.azure_key_vault_url.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_certificate.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_certificate_version.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_client_id.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_client_secret.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_tenant_id.as_deref()).is_some()
+        || text_opt(args.azure_key_vault_access_token.as_deref()).is_some()
+        || args.azure_key_vault_managed_identity
+        || args.azure_key_vault_credential_type.is_some()
+        || text_opt(args.azure_authority.as_deref()).is_some()
+}
+
+fn artifact_signing_requested(args: &CodeArgs) -> bool {
+    args.artifact_signing_metadata.is_some()
+        || text_opt(args.artifact_signing_region.as_deref()).is_some()
+        || text_opt(args.artifact_signing_endpoint.as_deref()).is_some()
+        || text_opt(args.artifact_signing_account_name.as_deref()).is_some()
+        || text_opt(args.artifact_signing_profile_name.as_deref()).is_some()
+        || text_opt(args.artifact_signing_signature_algorithm.as_deref()).is_some()
+        || text_opt(args.artifact_signing_api_version.as_deref()).is_some()
+        || text_opt(args.artifact_signing_correlation_id.as_deref()).is_some()
+        || text_opt(args.artifact_signing_access_token.as_deref()).is_some()
+        || args.artifact_signing_managed_identity
+        || args.artifact_signing_credential_type.is_some()
+        || text_opt(args.artifact_signing_tenant_id.as_deref()).is_some()
+        || text_opt(args.artifact_signing_client_id.as_deref()).is_some()
+        || text_opt(args.artifact_signing_client_secret.as_deref()).is_some()
+        || text_opt(args.artifact_signing_authority.as_deref()).is_some()
+        || text_opt(args.artifact_signing_endpoint_base_url.as_deref()).is_some()
+}
+
+fn required_text(name: &str, value: Option<&str>) -> Result<String> {
+    text_opt(value).ok_or_else(|| anyhow!("{name} is required for the selected signing provider"))
+}
+
+fn text_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn code_remote_digest_from_pkcs7(
+    digest: pkcs7::AuthenticodeSigningDigest,
+) -> CodeRemoteDigestAlgorithm {
+    match digest {
+        pkcs7::AuthenticodeSigningDigest::Sha256 => CodeRemoteDigestAlgorithm::Sha256,
+        pkcs7::AuthenticodeSigningDigest::Sha384 => CodeRemoteDigestAlgorithm::Sha384,
+        pkcs7::AuthenticodeSigningDigest::Sha512 => CodeRemoteDigestAlgorithm::Sha512,
+    }
+}
+
+fn code_remote_digest_from_vsix(digest: vsix::VsixHashAlgorithm) -> CodeRemoteDigestAlgorithm {
+    match digest {
+        vsix::VsixHashAlgorithm::Sha256 => CodeRemoteDigestAlgorithm::Sha256,
+        vsix::VsixHashAlgorithm::Sha384 => CodeRemoteDigestAlgorithm::Sha384,
+        vsix::VsixHashAlgorithm::Sha512 => CodeRemoteDigestAlgorithm::Sha512,
+    }
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn kv_hash_algorithm(algorithm: CodeRemoteDigestAlgorithm) -> KvHashAlg {
+    match algorithm {
+        CodeRemoteDigestAlgorithm::Sha256 => KvHashAlg::Sha256,
+        CodeRemoteDigestAlgorithm::Sha384 => KvHashAlg::Sha384,
+        CodeRemoteDigestAlgorithm::Sha512 => KvHashAlg::Sha512,
+    }
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn artifact_signature_algorithm(algorithm: CodeRemoteDigestAlgorithm) -> &'static str {
+    match algorithm {
+        CodeRemoteDigestAlgorithm::Sha256 => "RS256",
+        CodeRemoteDigestAlgorithm::Sha384 => "RS384",
+        CodeRemoteDigestAlgorithm::Sha512 => "RS512",
+    }
+}
+
+fn load_chain_certs(paths: Vec<PathBuf>) -> Result<Vec<x509_cert::Certificate>> {
+    let mut chain = Vec::with_capacity(paths.len());
+    for chain_cert in paths {
+        let bytes =
+            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
+        chain.push(
+            rdp::parse_certificate(&bytes)
+                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
+        );
+    }
+    Ok(chain)
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+#[derive(Debug, Deserialize)]
+#[allow(non_snake_case, dead_code)]
+struct ArtifactSigningMetadataDoc {
+    Endpoint: String,
+    CodeSigningAccountName: String,
+    CertificateProfileName: String,
+    #[serde(default)]
+    CorrelationId: Option<String>,
+    #[serde(default)]
+    ExcludeCredentials: Option<Vec<String>>,
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn parse_artifact_signing_certificates(
+    bytes: &[u8],
+) -> Result<(x509_cert::Certificate, Vec<x509_cert::Certificate>)> {
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && text.contains("-----BEGIN CERTIFICATE-----")
+    {
+        let mut certs = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
+            rest = &rest[start..];
+            let Some(end) = rest.find("-----END CERTIFICATE-----") else {
+                return Err(anyhow!(
+                    "unterminated PEM certificate in Artifact Signing signingCertificate"
+                ));
+            };
+            let end = end + "-----END CERTIFICATE-----".len();
+            certs.push(
+                rdp::parse_certificate(&rest.as_bytes()[..end])
+                    .context("parse Artifact Signing PEM certificate")?,
+            );
+            rest = &rest[end..];
+        }
+        let mut iter = certs.into_iter();
+        let signer = iter.next().ok_or_else(|| {
+            anyhow!("Artifact Signing signingCertificate did not contain a certificate")
+        })?;
+        return Ok((signer, iter.collect()));
+    }
+    Ok((
+        rdp::parse_certificate(bytes).context("parse Artifact Signing DER signing certificate")?,
+        Vec::new(),
+    ))
 }
 
 fn nuget_hash_algorithm(digest: DigestAlgorithm) -> Result<nuget::NuGetHashAlgorithm> {
