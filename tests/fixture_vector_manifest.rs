@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::fs::File;
 use std::path::Path;
 
 #[test]
@@ -286,8 +287,25 @@ fn package_signing_fixture_manifest_matches_files() {
     let entries = manifest["entries"]
         .as_array()
         .expect("package signing entries must be an array");
-    assert_eq!(entries.len(), 6, "package signing fixture count");
+    assert_eq!(entries.len(), 12, "package signing fixture count");
     assert_hash_entries(entries);
+    assert_package_fixture_ids(entries);
+    assert_zip_contains(
+        "tests\\fixtures\\package-signing\\unsigned\\with-pe.nupkg",
+        "lib/net8.0/tiny32.dll",
+    );
+    assert_zip_contains(
+        "tests\\fixtures\\package-signing\\unsigned\\nested.vsix",
+        "payload/tiny32.dll",
+    );
+    assert_zip_contains(
+        "tests\\fixtures\\package-signing\\unsigned\\nested.vsix",
+        "packages/sample.nupkg",
+    );
+    assert_zip_contains(
+        "tests\\fixtures\\package-signing\\unsigned\\deep-nested.vsix",
+        "packages/with-pe.nupkg",
+    );
 
     let families: HashSet<_> = entries
         .iter()
@@ -350,6 +368,31 @@ fn zip_authenticode_fixture_manifest_matches_files() {
     );
 }
 
+fn assert_package_fixture_ids(entries: &[serde_json::Value]) {
+    let actual: HashSet<_> = entries
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("entry id").to_owned())
+        .collect();
+    assert_eq!(
+        actual,
+        HashSet::from([
+            "package-nupkg-unsigned".to_owned(),
+            "package-nupkg-signed".to_owned(),
+            "package-snupkg-unsigned".to_owned(),
+            "package-snupkg-signed".to_owned(),
+            "package-vsix-unsigned".to_owned(),
+            "package-vsix-signed".to_owned(),
+            "package-nupkg-with-pe-unsigned".to_owned(),
+            "package-nupkg-with-pe-signed".to_owned(),
+            "package-vsix-nested-unsigned".to_owned(),
+            "package-vsix-nested-signed".to_owned(),
+            "package-vsix-deep-nested-unsigned".to_owned(),
+            "package-vsix-deep-nested-signed".to_owned(),
+        ]),
+        "package signing fixture IDs changed"
+    );
+}
+
 fn manifest() -> serde_json::Value {
     serde_json::from_str(include_str!("fixtures/code-signing-vectors.json"))
         .expect("code-signing vector manifest JSON")
@@ -381,6 +424,20 @@ fn assert_hash_entries(entries: &[serde_json::Value]) {
 fn repo_path(repo_root: &Path, rel: &str) -> std::path::PathBuf {
     let separator = std::path::MAIN_SEPARATOR.to_string();
     repo_root.join(rel.replace('\\', &separator))
+}
+
+fn assert_zip_contains(rel: &str, expected_entry: &str) {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = repo_path(repo_root, rel);
+    let file = File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let archive =
+        zip::ZipArchive::new(file).unwrap_or_else(|e| panic!("open ZIP {}: {e}", path.display()));
+    let found = archive.file_names().any(|name| name == expected_entry);
+    assert!(
+        found,
+        "{} should contain ZIP entry {expected_entry}",
+        path.display()
+    );
 }
 
 fn matrix_group<'a>(manifest: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {

@@ -1,9 +1,14 @@
-use crate::opc::{PackageSummary, inspect_package_path};
+use crate::opc::{PackageSummary, inspect_package_path, normalize_zip_part_name};
 use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use std::fs::File;
+use std::io::{Read, Seek, Write};
 use std::path::Path;
+use zip::write::FileOptions;
 
 pub const PACKAGE_SIGNATURE_FILE_NAME: &str = ".signature.p7s";
+pub const SIGNATURE_CONTENT_VERSION: &str = "1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NuGetHashAlgorithm {
@@ -28,6 +33,15 @@ impl NuGetHashAlgorithm {
             Self::Sha512 => Sha512::digest(bytes).to_vec(),
         }
     }
+
+    pub fn from_oid(oid: &str) -> Option<Self> {
+        match oid {
+            "2.16.840.1.101.3.4.2.1" => Some(Self::Sha256),
+            "2.16.840.1.101.3.4.2.2" => Some(Self::Sha384),
+            "2.16.840.1.101.3.4.2.3" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,6 +50,12 @@ pub struct NuGetPackageInfo {
     pub signed: bool,
     pub signature_len: Option<u64>,
     pub signature_is_stored: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NuGetSignatureContent {
+    pub hash_algorithm: NuGetHashAlgorithm,
+    pub package_hash: Vec<u8>,
 }
 
 pub fn inspect_nupkg_path(path: &Path) -> Result<NuGetPackageInfo> {
@@ -67,8 +87,284 @@ pub fn unsigned_package_digest_path(path: &Path, algorithm: NuGetHashAlgorithm) 
     Ok(algorithm.hash(&bytes))
 }
 
+pub fn canonical_unsigned_package_bytes_path(path: &Path) -> Result<Vec<u8>> {
+    let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    canonical_unsigned_package_bytes(reader)
+        .with_context(|| format!("canonicalize unsigned NuGet package {}", path.display()))
+}
+
+pub fn canonical_unsigned_package_bytes<R>(reader: R) -> Result<Vec<u8>>
+where
+    R: Read + Seek,
+{
+    let mut out = std::io::Cursor::new(Vec::new());
+    write_package_without_signature_impl(reader, &mut out, false)?;
+    Ok(out.into_inner())
+}
+
+pub fn signed_package_unsigned_bytes_path(path: &Path) -> Result<Vec<u8>> {
+    let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    write_package_without_signature_impl(reader, &mut out, true)
+        .with_context(|| format!("remove NuGet signature from {}", path.display()))?;
+    Ok(out.into_inner())
+}
+
+pub fn signed_package_signature_content_path(
+    path: &Path,
+    algorithm: NuGetHashAlgorithm,
+) -> Result<Vec<u8>> {
+    let unsigned = signed_package_unsigned_bytes_path(path)?;
+    Ok(signature_content_bytes(
+        algorithm,
+        &algorithm.hash(&unsigned),
+    ))
+}
+
 pub fn package_hash_property_name(algorithm: NuGetHashAlgorithm) -> String {
     format!("{}-Hash", algorithm.oid())
+}
+
+pub fn unsigned_package_signature_content_path(
+    path: &Path,
+    algorithm: NuGetHashAlgorithm,
+) -> Result<Vec<u8>> {
+    let unsigned = canonical_unsigned_package_bytes_path(path)?;
+    let digest = algorithm.hash(&unsigned);
+    Ok(signature_content_bytes(algorithm, &digest))
+}
+
+pub fn signature_content_bytes(algorithm: NuGetHashAlgorithm, package_hash: &[u8]) -> Vec<u8> {
+    format!(
+        "Version:{}\n\n{}:{}\n\n",
+        SIGNATURE_CONTENT_VERSION,
+        package_hash_property_name(algorithm),
+        BASE64_STANDARD.encode(package_hash)
+    )
+    .into_bytes()
+}
+
+pub fn parse_signature_content(bytes: &[u8]) -> Result<NuGetSignatureContent> {
+    let text = std::str::from_utf8(bytes).context("NuGet signature content is not UTF-8")?;
+    let mut sections = text.split("\n\n");
+    let header = sections
+        .next()
+        .ok_or_else(|| anyhow!("NuGet signature content is missing header section"))?;
+    let hash_section = sections
+        .next()
+        .ok_or_else(|| anyhow!("NuGet signature content is missing package hash section"))?;
+
+    let mut version = None;
+    for line in header.lines().filter(|line| !line.is_empty()) {
+        let (key, value) = split_signature_content_pair(line)?;
+        if key == "Version" {
+            version = Some(value);
+        }
+    }
+    match version {
+        Some(SIGNATURE_CONTENT_VERSION) => {}
+        Some(value) => {
+            return Err(anyhow!(
+                "unsupported NuGet signature content version {value}; expected {SIGNATURE_CONTENT_VERSION}"
+            ));
+        }
+        None => return Err(anyhow!("NuGet signature content is missing Version")),
+    }
+
+    for line in hash_section.lines().filter(|line| !line.is_empty()) {
+        let (key, value) = split_signature_content_pair(line)?;
+        if let Some(oid) = key.strip_suffix("-Hash")
+            && let Some(hash_algorithm) = NuGetHashAlgorithm::from_oid(oid)
+        {
+            let package_hash = BASE64_STANDARD
+                .decode(value)
+                .context("NuGet signature content package hash is not valid base64")?;
+            if package_hash.is_empty() {
+                return Err(anyhow!("NuGet signature content package hash is empty"));
+            }
+            return Ok(NuGetSignatureContent {
+                hash_algorithm,
+                package_hash,
+            });
+        }
+    }
+
+    Err(anyhow!(
+        "NuGet signature content does not contain a supported package hash property"
+    ))
+}
+
+pub fn verify_unsigned_package_signature_content_path(
+    path: &Path,
+    content: &[u8],
+) -> Result<NuGetSignatureContent> {
+    let parsed = parse_signature_content(content)?;
+    let unsigned = canonical_unsigned_package_bytes_path(path)?;
+    let actual = parsed.hash_algorithm.hash(&unsigned);
+    if actual != parsed.package_hash {
+        return Err(anyhow!(
+            "NuGet package hash mismatch for {}; signature content records a different unsigned package digest",
+            path.display()
+        ));
+    }
+    Ok(parsed)
+}
+
+pub fn extract_signature_path(path: &Path) -> Result<Vec<u8>> {
+    let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    extract_signature(reader)
+        .with_context(|| format!("extract NuGet signature from {}", path.display()))
+}
+
+pub fn extract_signature<R>(reader: R) -> Result<Vec<u8>>
+where
+    R: Read + Seek,
+{
+    let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
+    let mut file = input
+        .by_name(PACKAGE_SIGNATURE_FILE_NAME)
+        .with_context(|| format!("package does not contain {PACKAGE_SIGNATURE_FILE_NAME}"))?;
+    let mut signature = Vec::new();
+    file.read_to_end(&mut signature)
+        .context("read NuGet package signature")?;
+    if signature.is_empty() {
+        return Err(anyhow!("NuGet package signature payload is empty"));
+    }
+    Ok(signature)
+}
+
+pub fn write_package_without_signature<R, W>(reader: R, writer: W) -> Result<()>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+{
+    write_package_without_signature_impl(reader, writer, true)
+}
+
+fn write_package_without_signature_impl<R, W>(
+    reader: R,
+    writer: W,
+    require_signature: bool,
+) -> Result<()>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+{
+    let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
+    let mut output = zip::ZipWriter::new(writer);
+    let mut had_signature = false;
+
+    for i in 0..input.len() {
+        let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
+        let name = normalize_zip_part_name(file.name())?;
+        if name == PACKAGE_SIGNATURE_FILE_NAME {
+            had_signature = true;
+            continue;
+        }
+
+        let options = FileOptions::default().compression_method(file.compression());
+        if file.is_dir() {
+            output.add_directory(name, options)?;
+        } else {
+            output.start_file(name, options)?;
+            std::io::copy(&mut file, &mut output)?;
+        }
+    }
+
+    if require_signature && !had_signature {
+        return Err(anyhow!(
+            "package does not contain {PACKAGE_SIGNATURE_FILE_NAME}"
+        ));
+    }
+
+    output.finish()?;
+    Ok(())
+}
+
+fn split_signature_content_pair(line: &str) -> Result<(&str, &str)> {
+    line.split_once(':')
+        .ok_or_else(|| anyhow!("invalid NuGet signature content line {line:?}"))
+        .and_then(|(key, value)| {
+            if key.is_empty() || value.is_empty() {
+                Err(anyhow!("invalid NuGet signature content line {line:?}"))
+            } else {
+                Ok((key, value))
+            }
+        })
+}
+
+pub fn embed_signature_path(
+    input: &Path,
+    output: &Path,
+    signature_der: &[u8],
+    overwrite: bool,
+) -> Result<()> {
+    if signature_der.is_empty() {
+        return Err(anyhow!("NuGet package signature payload is empty"));
+    }
+    let info = inspect_nupkg_path(input)?;
+    if info.signed && !overwrite {
+        return Err(anyhow!(
+            "{} already contains {}; pass overwrite to replace it",
+            input.display(),
+            PACKAGE_SIGNATURE_FILE_NAME
+        ));
+    }
+    let reader = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let writer = File::create(output).with_context(|| format!("create {}", output.display()))?;
+    embed_signature(reader, writer, signature_der, overwrite)
+        .with_context(|| format!("embed NuGet signature into {}", output.display()))
+}
+
+pub fn embed_signature<R, W>(
+    reader: R,
+    writer: W,
+    signature_der: &[u8],
+    overwrite: bool,
+) -> Result<()>
+where
+    R: Read + Seek,
+    W: Write + Seek,
+{
+    if signature_der.is_empty() {
+        return Err(anyhow!("NuGet package signature payload is empty"));
+    }
+    let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
+    let mut output = zip::ZipWriter::new(writer);
+    let mut had_signature = false;
+
+    for i in 0..input.len() {
+        let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
+        let name = normalize_zip_part_name(file.name())?;
+        if name == PACKAGE_SIGNATURE_FILE_NAME {
+            had_signature = true;
+            if overwrite {
+                continue;
+            }
+            return Err(anyhow!(
+                "package already contains {}; pass overwrite to replace it",
+                PACKAGE_SIGNATURE_FILE_NAME
+            ));
+        }
+
+        let options = FileOptions::default().compression_method(file.compression());
+        if file.is_dir() {
+            output.add_directory(name, options)?;
+        } else {
+            output.start_file(name, options)?;
+            std::io::copy(&mut file, &mut output)?;
+        }
+    }
+
+    if !had_signature || overwrite {
+        output.start_file(
+            PACKAGE_SIGNATURE_FILE_NAME,
+            FileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )?;
+        output.write_all(signature_der)?;
+    }
+    output.finish()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -115,6 +411,141 @@ mod tests {
             package_hash_property_name(NuGetHashAlgorithm::Sha256),
             "2.16.840.1.101.3.4.2.1-Hash"
         );
+    }
+
+    #[test]
+    fn signature_content_round_trips_package_hash_property() {
+        let bytes = signature_content_bytes(NuGetHashAlgorithm::Sha384, b"package-digest");
+
+        let parsed = parse_signature_content(&bytes).unwrap();
+
+        assert_eq!(parsed.hash_algorithm, NuGetHashAlgorithm::Sha384);
+        assert_eq!(parsed.package_hash, b"package-digest");
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "Version:1\n\n2.16.840.1.101.3.4.2.2-Hash:cGFja2FnZS1kaWdlc3Q=\n\n"
+        );
+    }
+
+    #[test]
+    fn signature_content_rejects_unsupported_version() {
+        let err = parse_signature_content(
+            b"Version:2\n\n2.16.840.1.101.3.4.2.1-Hash:cGFja2FnZS1kaWdlc3Q=\n\n",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn unsigned_package_signature_content_verifies_matching_digest() {
+        let zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        let tmp = tempfile_path("unsigned-for-content.nupkg");
+        std::fs::write(&tmp, &zip).unwrap();
+
+        let content =
+            unsigned_package_signature_content_path(&tmp, NuGetHashAlgorithm::Sha256).unwrap();
+        let parsed = verify_unsigned_package_signature_content_path(&tmp, &content).unwrap();
+        let canonical = canonical_unsigned_package_bytes_path(&tmp).unwrap();
+
+        assert_eq!(parsed.hash_algorithm, NuGetHashAlgorithm::Sha256);
+        assert_eq!(
+            parsed.package_hash,
+            NuGetHashAlgorithm::Sha256.hash(&canonical)
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn unsigned_package_signature_content_rejects_tampered_package() {
+        let tmp = tempfile_path("tampered-for-content.nupkg");
+        std::fs::write(&tmp, zip_with(&[("lib/net8.0/a.dll", b"pe")])).unwrap();
+        let content =
+            unsigned_package_signature_content_path(&tmp, NuGetHashAlgorithm::Sha256).unwrap();
+        std::fs::write(&tmp, zip_with(&[("lib/net8.0/a.dll", b"changed")])).unwrap();
+
+        let err = verify_unsigned_package_signature_content_path(&tmp, &content).unwrap_err();
+
+        assert!(err.to_string().contains("hash mismatch"));
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn embed_signature_adds_stored_root_signature() {
+        let zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        let mut out = Cursor::new(Vec::new());
+
+        embed_signature(Cursor::new(zip), &mut out, b"cms", false).unwrap();
+        let info = inspect_package_reader_for_test(out.into_inner());
+
+        assert_eq!(
+            info.entry(PACKAGE_SIGNATURE_FILE_NAME)
+                .map(|e| e.uncompressed_size),
+            Some(3)
+        );
+        assert_eq!(
+            info.entry(PACKAGE_SIGNATURE_FILE_NAME)
+                .map(|e| e.compression.as_str()),
+            Some("Stored")
+        );
+    }
+
+    #[test]
+    fn embed_signature_rejects_existing_signature_without_overwrite() {
+        let zip = zip_with(&[(PACKAGE_SIGNATURE_FILE_NAME, b"old")]);
+        let err =
+            embed_signature(Cursor::new(zip), Cursor::new(Vec::new()), b"new", false).unwrap_err();
+
+        assert!(err.to_string().contains("already contains"));
+    }
+
+    #[test]
+    fn embed_signature_replaces_existing_signature_with_overwrite() {
+        let zip = zip_with(&[(PACKAGE_SIGNATURE_FILE_NAME, b"old")]);
+        let mut out = Cursor::new(Vec::new());
+
+        embed_signature(Cursor::new(zip), &mut out, b"new-signature", true).unwrap();
+        let info = inspect_package_reader_for_test(out.into_inner());
+
+        assert_eq!(
+            info.entry(PACKAGE_SIGNATURE_FILE_NAME)
+                .map(|e| e.uncompressed_size),
+            Some(13)
+        );
+    }
+
+    #[test]
+    fn extract_signature_returns_embedded_signature_bytes() {
+        let zip = zip_with(&[
+            ("lib/net8.0/a.dll", b"pe"),
+            (PACKAGE_SIGNATURE_FILE_NAME, b"cms"),
+        ]);
+
+        let signature = extract_signature(Cursor::new(zip)).unwrap();
+
+        assert_eq!(signature, b"cms");
+    }
+
+    #[test]
+    fn write_package_without_signature_removes_root_signature() {
+        let zip = zip_with(&[
+            ("lib/net8.0/a.dll", b"pe"),
+            (PACKAGE_SIGNATURE_FILE_NAME, b"cms"),
+        ]);
+        let mut out = Cursor::new(Vec::new());
+
+        write_package_without_signature(Cursor::new(zip), &mut out).unwrap();
+        let info = inspect_package_reader_for_test(out.into_inner());
+
+        assert!(info.entry(PACKAGE_SIGNATURE_FILE_NAME).is_none());
+        assert_eq!(
+            info.entry("lib/net8.0/a.dll").map(|e| e.uncompressed_size),
+            Some(2)
+        );
+    }
+
+    fn inspect_package_reader_for_test(bytes: Vec<u8>) -> PackageSummary {
+        crate::opc::inspect_package_reader(Cursor::new(bytes)).unwrap()
     }
 
     fn tempfile_path(name: &str) -> std::path::PathBuf {

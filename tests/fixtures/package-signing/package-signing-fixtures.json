@@ -8,16 +8,16 @@
       "family": "nuget",
       "state": "unsigned",
       "path": "tests\\fixtures\\package-signing\\unsigned\\sample.nupkg",
-      "size_bytes": 823,
-      "sha256": "70e2869457b252c9d27048cf37387880d44edf7d021446357c4cefd9f3567c9c"
+      "size_bytes": 833,
+      "sha256": "68752c16d37b134decd721c2bc12d857b451db851877d0055893d9f152293204"
     },
     {
       "id": "package-nupkg-signed",
       "family": "nuget",
       "state": "signed",
       "path": "tests\\fixtures\\package-signing\\signed\\sample.signed.nupkg",
-      "size_bytes": 3354,
-      "sha256": "a6cc20cbb95314aadc396b14ebfa0acac869c94964a6367918e97ccab0e8e7a3",
+      "size_bytes": 3364,
+      "sha256": "d6c47dcba78f63c6e22b7230d0477979e24e65490b97a02dba0fd2d6e3794e71",
       "source_path": "tests\\fixtures\\package-signing\\unsigned\\sample.nupkg",
       "tool": "dotnet nuget sign"
     },
@@ -26,16 +26,16 @@
       "family": "nuget-symbols",
       "state": "unsigned",
       "path": "tests\\fixtures\\package-signing\\unsigned\\sample.snupkg",
-      "size_bytes": 823,
-      "sha256": "70e2869457b252c9d27048cf37387880d44edf7d021446357c4cefd9f3567c9c"
+      "size_bytes": 833,
+      "sha256": "68752c16d37b134decd721c2bc12d857b451db851877d0055893d9f152293204"
     },
     {
       "id": "package-snupkg-signed",
       "family": "nuget-symbols",
       "state": "signed",
       "path": "tests\\fixtures\\package-signing\\signed\\sample.signed.snupkg",
-      "size_bytes": 3354,
-      "sha256": "a6cc20cbb95314aadc396b14ebfa0acac869c94964a6367918e97ccab0e8e7a3",
+      "size_bytes": 3364,
+      "sha256": "d6c47dcba78f63c6e22b7230d0477979e24e65490b97a02dba0fd2d6e3794e71",
       "source_path": "tests\\fixtures\\package-signing\\unsigned\\sample.snupkg",
       "tool": "dotnet nuget sign"
     },
@@ -44,17 +44,71 @@
       "family": "vsix",
       "state": "unsigned",
       "path": "tests\\fixtures\\package-signing\\unsigned\\sample.vsix",
-      "size_bytes": 1185,
-      "sha256": "19c5872702ed93f751b060280541452d2666e8d56654c68c2bde6a0fc2517f89"
+      "size_bytes": 1208,
+      "sha256": "a77fe652d2b5a82c74c7a3b962872a0b553607181f84f3fd88a89b3099f9b6ed"
     },
     {
       "id": "package-vsix-signed",
       "family": "vsix",
       "state": "signed",
       "path": "tests\\fixtures\\package-signing\\signed\\sample.signed.vsix",
-      "size_bytes": 7080,
-      "sha256": "92ca6a002a6f37f60087fcb9b2de2cfa8979d229a97d968423802b72aa4cee65",
+      "size_bytes": 7107,
+      "sha256": "2ce5518fd9e9cd7e8785b67d20884be276e4e556e3f8327e40bf3db9109c1a01",
       "source_path": "tests\\fixtures\\package-signing\\unsigned\\sample.vsix",
+      "tool": "System.IO.Packaging.PackageDigitalSignatureManager"
+    },
+    {
+      "id": "package-nupkg-with-pe-unsigned",
+      "family": "nuget",
+      "state": "unsigned",
+      "path": "tests\\fixtures\\package-signing\\unsigned\\with-pe.nupkg",
+      "size_bytes": 1272,
+      "sha256": "7cec10be4cd8d10321c1937a2f7cafb3a991bae3f7b4b89c86984482b3ce7691"
+    },
+    {
+      "id": "package-nupkg-with-pe-signed",
+      "family": "nuget",
+      "state": "signed",
+      "path": "tests\\fixtures\\package-signing\\signed\\with-pe.signed.nupkg",
+      "size_bytes": 3803,
+      "sha256": "0bae954abf8c0c915fab6971a69238690702a966ab188711998854312d452be0",
+      "source_path": "tests\\fixtures\\package-signing\\unsigned\\with-pe.nupkg",
+      "tool": "dotnet nuget sign"
+    },
+    {
+      "id": "package-vsix-nested-unsigned",
+      "family": "vsix",
+      "state": "unsigned",
+      "path": "tests\\fixtures\\package-signing\\unsigned\\nested.vsix",
+      "size_bytes": 2487,
+      "sha256": "9ba06447e30a4ea1eb9e51a5f5c3c1e14d6b8ca6f706d7170ae477e1c67d2708"
+    },
+    {
+      "id": "package-vsix-nested-signed",
+      "family": "vsix",
+      "state": "signed",
+      "path": "tests\\fixtures\\package-signing\\signed\\nested.signed.vsix",
+      "size_bytes": 8828,
+      "sha256": "0e8f1ea4925d97c8145823e0c088a859f2095e054baa5a3438f5788b8a6f20e7",
+      "source_path": "tests\\fixtures\\package-signing\\unsigned\\nested.vsix",
+      "tool": "System.IO.Packaging.PackageDigitalSignatureManager"
+    },
+    {
+      "id": "package-vsix-deep-nested-unsigned",
+      "family": "vsix",
+      "state": "unsigned",
+      "path": "tests\\fixtures\\package-signing\\unsigned\\deep-nested.vsix",
+      "size_bytes": 2403,
+      "sha256": "94eca6546bb3fec63b3c6fd581cc3599d73164e8908e404830ef925ecb560602"
+    },
+    {
+      "id": "package-vsix-deep-nested-signed",
+      "family": "vsix",
+      "state": "signed",
+      "path": "tests\\fixtures\\package-signing\\signed\\deep-nested.signed.vsix",
+      "size_bytes": 8520,
+      "sha256": "708fd26aef70b76b1d09301cd0730e850aa896087c3f47dc62fe38443e9fca7d",
+      "source_path": "tests\\fixtures\\package-signing\\unsigned\\deep-nested.vsix",
       "tool": "System.IO.Packaging.PackageDigitalSignatureManager"
     }
   ]

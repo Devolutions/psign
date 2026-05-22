@@ -87,6 +87,62 @@ psign-tool --mode portable sign \
 
 This path builds Authenticode CMS locally, sends the CMS authenticated-attributes digest to Artifact Signing `:sign`, embeds the returned RSA signature and signing certificate, then attaches the RFC3161 timestamp before PE embedding. For production, keep timestamping enabled because Artifact Signing profile certificates are short-lived.
 
+## 1.4 Package-native helper workflows
+
+`dotnet/sign`-style package orchestration is being added through `psign-tool code` and package-native helpers. The command can plan nested graphs and has guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, unsigned MSIX/AppX prepare, encrypted MSIX/AppX OS-only diagnostics, PE-like ClickOnce `.deploy` payloads, App Installer inputs, `--continue-on-error`, `--skip-signed`, `--overwrite`, and package-native VSIX/ZIP/MSIX -> NuGet -> PE nesting:
+
+```bash
+psign-tool code --dry-run --plan-json --base-directory . --file-list files.txt
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.exe app.exe
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.nupkg package.nupkg
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix
+psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.zip bundle.zip
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output prepared.msix app.msix
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.signed.exe.deploy app.exe.deploy
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.appinstaller.p7 app.appinstaller
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output updated.appinstaller.p7 app.appinstaller
+```
+
+Portable package helpers are useful for split-signing experiments and CI assertions:
+
+```bash
+psign-tool portable nupkg-signature-content package.nupkg --output signature-content.txt
+psign-tool portable nupkg-signature-pkcs7 package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signature.p7s
+psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --encoding raw --output prehash.bin
+psign-tool portable nupkg-signature-pkcs7-from-signature package.nupkg --cert signer.der --signature remote.sig --output signature.p7s
+psign-tool portable nupkg-verify-signature-content package.nupkg --content signature-content.txt
+psign-tool portable nupkg-embed-signature package.nupkg --signature signature.p7s --output signed.nupkg
+psign-tool portable nupkg-sign package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg
+psign-tool portable nupkg-verify-signature signed.nupkg --trusted-ca signer.der --allow-loose-signing-cert
+psign-tool portable vsix-signature-reference-xml extension.vsix --output signature-reference.xml
+psign-tool portable vsix-verify-signature-reference-xml extension.vsix --signature-xml signature-reference.xml
+psign-tool portable vsix-signature-xml extension.vsix --cert signer.der --key signer.pkcs8 --output signature.xml
+psign-tool portable vsix-signature-xml-prehash extension.vsix --encoding raw --output prehash.bin
+psign-tool portable vsix-signature-xml-from-signature extension.vsix --cert signer.der --signature remote.sig --output signature.xml
+psign-tool portable vsix-verify-signature-xml extension.vsix --signature-xml signature.xml --cert signer.der --trusted-ca root.der
+psign-tool portable vsix-sign extension.vsix --cert signer.der --key signer.pkcs8 --output signed.vsix
+psign-tool portable vsix-verify-signature signed.vsix --trusted-ca root.der
+psign-tool portable appinstaller-set-publisher app.appinstaller --publisher "CN=Example" --output updated.appinstaller
+psign-tool portable appinstaller-sign-companion updated.appinstaller --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output updated.appinstaller.p7
+psign-tool portable appinstaller-sign-companion-prehash updated.appinstaller --encoding raw --output prehash.bin
+psign-tool portable appinstaller-sign-companion-from-signature updated.appinstaller --cert signer.der --signature remote.sig --output updated.appinstaller.p7
+psign-tool portable appinstaller-verify-companion app.appinstaller --signature app.appinstaller.p7 --anchor-dir anchors
+psign-tool portable business-central-app-info package.app
+psign-tool portable msix-manifest-info package.msix
+psign-tool portable msix-set-publisher package.msix --publisher "CN=Example" --output updated.msix
+psign-tool portable clickonce-deploy-info app.exe.deploy
+psign-tool portable clickonce-copy-deploy-payload app.exe.deploy --output app.exe
+psign-tool portable clickonce-update-manifest-hashes app.exe.manifest --base-directory . --output updated.manifest
+psign-tool portable clickonce-manifest-hashes updated.manifest --base-directory .
+psign-tool portable clickonce-sign-manifest updated.manifest --cert signer.der --key signer.pkcs8 --output signed.manifest
+psign-tool portable clickonce-sign-manifest-prehash updated.manifest --encoding raw --output prehash.bin
+psign-tool portable clickonce-sign-manifest-from-signature updated.manifest --cert signer.der --signature remote.sig --output signed.manifest
+psign-tool portable clickonce-verify-manifest-signature signed.manifest --trusted-ca signer.der
+```
+
+These commands do not yet replace `dotnet/sign` for production recursive package signing. They cover deterministic package hashing/reference generation, local PE/WinMD Authenticode signing, local and external-signer NuGet/App Installer CMS signing, NuGet external-signer CMS assembly via `nupkg-signature-pkcs7-prehash` + `nupkg-signature-pkcs7-from-signature`, local and external-signer VSIX XMLDSig signing with optional explicit-anchor signer chain verification, unsigned MSIX/AppX publisher/block-map prepare, encrypted MSIX/AppX OS-only diagnostics, App Installer publisher update before companion signing, marker embedding, package-native nested VSIX/ZIP/MSIX -> NuGet -> PE signing, PE-like ClickOnce `.deploy` payload signing, ClickOnce manifest file hash update/verification plus local/external deterministic portable structural XMLDSig signing, nested exclude filters, and metadata inspection/update while final MSIX signing and full manifest/policy checks are being completed.
+
 ## 1.5 RFC 3161 TSA query/reply (DER only; no embed)
 
 **`psign-tool portable rfc3161-timestamp-req`** builds **`TimeStampReq`** DER from **`--digest-hex`** / **`--digest-file`** (message-imprint preimage; optional **`--nonce`**, **`--cert-req`**). **`rfc3161-timestamp-resp-inspect`** prints **`pki_status`** / **`pki_status_int`** (raw **`PKIStatus`** INTEGER) / **`granted`** / token length, **`time_stamp_token_prefix_hex`** (first **16** octets of the **`timeStampToken`** TLV), **`status_strings_json`**, **`fail_info_tlv_hex`**, and **`fail_info_flags_json`** from **`TimeStampResp`** DER. When the token is a parseable CMS **`id-ct-TSTInfo`** timestamp token, it also prints structural **`tst_info_*`** fields for policy OID, message-imprint digest OID/hash, serial, **`genTime`**, and nonce; **`--expect-digest-hex`** and **`--expect-nonce`** add request-binding diagnostics (`tst_info_message_imprint_match`, `tst_info_nonce_match`). These fields are diagnostic only and do not imply TSA trust or CMS signature validation. Build with **`--features timestamp-http`** for **`rfc3161-timestamp-http-post --url …`** (Rustls POST **`application/timestamp-query`**, response DER to stdout / **`--output`**); otherwise use **`curl`** or OpenSSL **`ts`**. **`timestamp-pe-rfc3161`** can attach the granted token to an existing PE Authenticode `SignerInfo`; non-PE timestamp mutation still goes through **`psign-tool`** / **`SignerTimeStampEx3`** today.
@@ -142,13 +198,14 @@ For full portable PE signing, prefer **`portable sign-pe --azure-key-vault-*`** 
 | Subject | Prehash for KV **`RS256`** (`--encoding raw`, 32 bytes) | Same bytes via extract + generic PKCS#7 |
 |---------|------------------------------------------------------------|-------------------------------------------|
 | PE | **`pe-signer-rs256-prehash`** (`--index` = cert-table row, **`--signer-index`** = **`SignerInfo`**) | **`extract-pe-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
+| NuGet package CMS | **`nupkg-signature-pkcs7-prehash`** | **`nupkg-signature-pkcs7-from-signature`** assembles `.signature.p7s` from the remote RSA signature |
 | CAB | **`cab-signer-rs256-prehash`** | **`extract-cab-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
 | MSI | **`msi-signer-rs256-prehash`** | **`extract-msi-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
 | Raw PKCS#7 (e.g. **`.cat`**) | **`catalog-signer-rs256-prehash`** | **`pkcs7-signer-rs256-prehash`** on the same file |
 
 Then **`azure-key-vault-sign-digest`** with **`--features azure-kv-sign-portable`** performs **`keys/sign`** (see [`migration-azuresigntool.md`](migration-azuresigntool.md)). **`verify-catalog`** checks CTL-style **`messageDigest` ↔ eContent`** and can disagree with Authenticode-only PKCS#7 bodies—use the right command for catalog *membership* vs *CMS signer* prehash.
 
-PE embedding is portable; CAB/MSI/catalog remote-sign embedding still requires Windows mode or future portable remote-signer support for those formats.
+PE embedding and NuGet CMS assembly are portable; CAB/MSI/catalog remote-sign embedding still requires Windows mode or future portable remote-signer support for those formats.
 
 Details: [`migration-azuresigntool.md`](migration-azuresigntool.md).
 

@@ -15,7 +15,7 @@ cargo metadata --locked --format-version 1 >/dev/null
 echo "== clippy portable crates =="
 cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust \
   -p psign-portable-core -p psign-portable-ffi \
-  -p psign-codesigning-rest -p psign-azure-kv-rest \
+  -p psign-codesigning-rest -p psign-azure-kv-rest -p psign-opc-sign \
   --all-targets --locked -- -D warnings
 
 echo "== clippy digest-cli (artifact-signing-rest) =="
@@ -48,8 +48,14 @@ cargo test -p psign-codesigning-rest --lib --locked
 echo "== unit tests: azure-kv-rest =="
 cargo test -p psign-azure-kv-rest --lib --locked
 
+echo "== unit tests: opc package signing =="
+cargo test -p psign-opc-sign --lib --locked
+
 echo "== integration: psign-tool portable (digest-cli) =="
 cargo test -p psign --test cli_pe_digest --locked
+
+echo "== integration: psign-tool code planner =="
+cargo test -p psign --test code_command --locked
 
 echo "== integration: psign-tool portable (artifact-signing-rest) =="
 cargo test -p psign --test cli_pe_digest --features artifact-signing-rest --locked

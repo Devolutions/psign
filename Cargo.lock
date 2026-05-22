@@ -2017,6 +2017,7 @@ dependencies = [
  "psign-azure-kv-rest",
  "psign-codesigning-rest",
  "psign-digest-cli",
+ "psign-opc-sign",
  "psign-sip-digest",
  "rand 0.8.6",
  "rayon",
@@ -2116,6 +2117,7 @@ name = "psign-opc-sign"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "sha2 0.10.9",
  "zip",
 ]

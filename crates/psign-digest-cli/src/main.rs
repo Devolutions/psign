@@ -14,6 +14,7 @@ use psign_authenticode_trust::{
     trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_detached_bytes,
     trust_verify_msi_bytes, trust_verify_pe_bytes, trust_verify_wim_esd_path,
     trust_verify_zip_bytes,
+    trust_verify_pe::load_trust_material,
 };
 #[cfg(feature = "azure-kv-sign-portable")]
 use psign_azure_kv_rest::{
@@ -50,11 +51,19 @@ use psign_sip_digest::timestamp::{
 use psign_sip_digest::verify_pe;
 use psign_sip_digest::verify_script_digest_consistency;
 use psign_sip_digest::zip_authenticode;
+use rsa::pkcs8::DecodePublicKey as _;
+use rsa::signature::{SignatureEncoding as _, Signer as _, Verifier as _};
 use serde::Deserialize;
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use x509_cert::der::{
+    Encode as _,
+    asn1::{ObjectIdentifier, OctetString},
+};
 
 #[derive(Parser)]
 #[command(name = "psign-tool")]
@@ -165,6 +174,84 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
             require_valid_timestamp: a.require_valid_timestamp,
         },
     })
+}
+
+fn trust_verify_args_present(a: &TrustVerifySharedArgs) -> bool {
+    a.anchor_dir.is_some()
+        || !a.trusted_ca.is_empty()
+        || a.authroot_cab.is_some()
+        || a.expect_authroot_cab_sha256.is_some()
+        || a.as_of.is_some()
+        || a.online_aia
+        || a.online_ocsp
+        || a.revocation_mode != CliRevocationMode::Off
+        || a.crl_url_override.is_some()
+        || a.aia_url_override.is_some()
+        || a.ocsp_url_override.is_some()
+}
+
+fn verify_xml_signer_certificate_trust(cert_der: &[u8], shared: &TrustVerifySharedArgs) -> Result<usize> {
+    let opts = trust_verify_options_from_shared(shared)?;
+    let (anchors, anchor_certs) = load_trust_material(&opts)?;
+    let leaf = psign_authenticode_trust::anchor::parse_cert_bytes(cert_der)
+        .context("parse XMLDSig signer certificate for trust verification")?;
+    let mut merged =
+        psign_authenticode_trust::chain::merge_unique_certs(vec![leaf.clone()], anchor_certs)?;
+    let chain_owned = psign_authenticode_trust::chain::issuer_chain_excluding_leaf_online(
+        &leaf,
+        &mut merged,
+        &opts.online,
+    )?;
+    let root = psign_authenticode_trust::chain::terminal_root_cert_owned(&leaf, &chain_owned);
+    let root_thumb = psign_authenticode_trust::anchor::cert_sha1_thumbprint(root)?;
+    if !anchors.contains_thumbprint(&root_thumb) {
+        return Err(anyhow!(
+            "XMLDSig terminal root certificate is not in the anchor store (SHA-1 thumbprint {:02x}{:02x}...)",
+            root_thumb[0],
+            root_thumb[1]
+        ));
+    }
+    psign_authenticode_trust::online::check_revocation_chain(&leaf, &chain_owned, &opts.online)?;
+
+    let verification_instant = match opts.verification_instant_override.as_ref() {
+        Some(instant) => instant.clone(),
+        None if opts.policy.prefer_timestamp_signing_time && opts.policy.require_valid_timestamp => {
+            return Err(anyhow!(
+                "VSIX XMLDSig timestamp trust verification is not implemented; use --as-of for deterministic certificate-chain validation"
+            ));
+        }
+        None => psign_authenticode_trust::verification_instant::resolve_verification_utc_date(
+            b"",
+            &opts.policy,
+        )?,
+    };
+
+    let chain_refs: Vec<_> = chain_owned.iter().collect();
+    let leaf_verifier = leaf.verifier();
+    let verifier = leaf_verifier
+        .chain(chain_refs.iter().copied())
+        .exact_date(&verification_instant);
+    verifier
+        .verify()
+        .map_err(|e| anyhow!("XMLDSig certificate chain verification: {e}"))?;
+
+    if opts.verbose_chain {
+        let thumb_hex: String = root_thumb.iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!("xml-trust: leaf subject: {}", leaf.subject_name());
+        for (i, cert) in chain_refs.iter().enumerate() {
+            eprintln!(
+                "xml-trust:   chain[{i}] subject: {} issuer: {}",
+                cert.subject_name(),
+                cert.issuer_name()
+            );
+        }
+        eprintln!(
+            "xml-trust:   root subject: {} (thumb SHA-1 {thumb_hex})",
+            root.subject_name()
+        );
+    }
+
+    Ok(anchors.thumbprint_count())
 }
 
 fn digest_byte_len_for_hash_alg(alg: HashAlg) -> usize {
@@ -281,6 +368,1048 @@ fn run_rfc3161_timestamp_req(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct AppInstallerDescriptorInfo {
+    root: &'static str,
+    namespace: Option<String>,
+    has_main_package: bool,
+    has_main_bundle: bool,
+    publisher: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct BusinessCentralAppInfo {
+    is_navx: bool,
+    len: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct MsixManifestInfo {
+    package_name: Option<String>,
+    publisher: Option<String>,
+    version: Option<String>,
+    processor_architecture: Option<String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ClickOnceDeployInfo {
+    deployed: bool,
+    content_name: Option<String>,
+    len: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ClickOnceManifestHashEntry {
+    path: String,
+    algorithm: HashAlg,
+    expected_size: Option<u64>,
+    actual_size: u64,
+    expected_digest_b64: String,
+    actual_digest_b64: String,
+}
+
+impl ClickOnceManifestHashEntry {
+    fn status(&self) -> &'static str {
+        if self.expected_size.is_some_and(|size| size != self.actual_size) {
+            "mismatch"
+        } else if self.expected_digest_b64 == self.actual_digest_b64 {
+            "valid"
+        } else {
+            "mismatch"
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ClickOnceManifestSignatureReport {
+    digest: PortableSignDigest,
+    manifest_digest_b64: String,
+    signature_len: usize,
+}
+
+fn inspect_clickonce_deploy_payload(path: &Path) -> Result<ClickOnceDeployInfo> {
+    let metadata = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let content_name = clickonce_deploy_content_name(path);
+    Ok(ClickOnceDeployInfo {
+        deployed: content_name.is_some(),
+        content_name,
+        len: metadata.len(),
+    })
+}
+
+fn clickonce_deploy_content_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy();
+    file_name
+        .strip_suffix(".deploy")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn copy_clickonce_deploy_payload(input: &Path, output: &Path) -> Result<u64> {
+    let Some(_) = clickonce_deploy_content_name(input) else {
+        return Err(anyhow!(
+            "ClickOnce deploy payload name must end with .deploy: {}",
+            input.display()
+        ));
+    };
+    std::fs::copy(input, output)
+        .with_context(|| format!("copy {} to {}", input.display(), output.display()))
+}
+
+fn clickonce_manifest_hashes(
+    manifest_path: &Path,
+    base_directory: Option<&Path>,
+) -> Result<Vec<ClickOnceManifestHashEntry>> {
+    let text = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("read ClickOnce manifest {}", manifest_path.display()))?;
+    let base = base_directory
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+    clickonce_manifest_hashes_from_text(&text, &base)
+}
+
+fn clickonce_manifest_hashes_from_text(
+    text: &str,
+    base_directory: &Path,
+) -> Result<Vec<ClickOnceManifestHashEntry>> {
+    let entries = clickonce_manifest_reference_spans(text)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let file_path = resolve_clickonce_manifest_path(base_directory, &entry.path)?;
+        let bytes =
+            std::fs::read(&file_path).with_context(|| format!("read {}", file_path.display()))?;
+        let digest = digest_bytes_for_hash_alg(entry.algorithm, &bytes);
+        out.push(ClickOnceManifestHashEntry {
+            path: entry.path,
+            algorithm: entry.algorithm,
+            expected_size: entry.size,
+            actual_size: bytes.len() as u64,
+            expected_digest_b64: entry.digest_value,
+            actual_digest_b64: base64_encode(&digest),
+        });
+    }
+    Ok(out)
+}
+
+fn update_clickonce_manifest_hashes(
+    manifest_path: &Path,
+    base_directory: Option<&Path>,
+    output: &Path,
+    algorithm: HashAlg,
+) -> Result<usize> {
+    let text = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("read ClickOnce manifest {}", manifest_path.display()))?;
+    let base = base_directory
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf());
+    let updated = update_clickonce_manifest_hashes_in_text(&text, &base, algorithm)?;
+    std::fs::write(output, updated.text)
+        .with_context(|| format!("write ClickOnce manifest {}", output.display()))?;
+    Ok(updated.updated)
+}
+
+#[derive(Debug)]
+struct ClickOnceManifestReference {
+    tag_start: usize,
+    tag_end: usize,
+    path: String,
+    size: Option<u64>,
+    algorithm: HashAlg,
+    digest_value: String,
+    digest_method_tag_start: usize,
+    digest_method_tag_end: usize,
+    digest_value_content_start: usize,
+    digest_value_content_end: usize,
+}
+
+#[derive(Debug)]
+struct UpdatedClickOnceManifest {
+    text: String,
+    updated: usize,
+}
+
+fn update_clickonce_manifest_hashes_in_text(
+    text: &str,
+    base_directory: &Path,
+    algorithm: HashAlg,
+) -> Result<UpdatedClickOnceManifest> {
+    let entries = clickonce_manifest_reference_spans(text)?;
+    let mut replacements = Vec::with_capacity(entries.len() * 3);
+    for entry in &entries {
+        let file_path = resolve_clickonce_manifest_path(base_directory, &entry.path)?;
+        let bytes =
+            std::fs::read(&file_path).with_context(|| format!("read {}", file_path.display()))?;
+        let digest = digest_bytes_for_hash_alg(algorithm, &bytes);
+        let size = bytes.len().to_string();
+        replacements.push((
+            entry.tag_start,
+            entry.tag_end + 1,
+            replace_or_insert_xml_attr(&text[entry.tag_start..=entry.tag_end], "size", &size)?,
+        ));
+        replacements.push((
+            entry.digest_method_tag_start,
+            entry.digest_method_tag_end + 1,
+            replace_or_insert_xml_attr(
+                &text[entry.digest_method_tag_start..=entry.digest_method_tag_end],
+                "Algorithm",
+                clickonce_digest_algorithm_uri(algorithm),
+            )?,
+        ));
+        replacements.push((
+            entry.digest_value_content_start,
+            entry.digest_value_content_end,
+            base64_encode(&digest),
+        ));
+    }
+
+    replacements.sort_by_key(|(start, _, _)| *start);
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for (start, end, replacement) in replacements {
+        if start < cursor {
+            return Err(anyhow!("internal ClickOnce manifest replacement overlap"));
+        }
+        out.push_str(&text[cursor..start]);
+        out.push_str(&replacement);
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    Ok(UpdatedClickOnceManifest {
+        text: out,
+        updated: entries.len(),
+    })
+}
+
+fn clickonce_manifest_reference_spans(text: &str) -> Result<Vec<ClickOnceManifestReference>> {
+    let mut refs = Vec::new();
+    collect_clickonce_manifest_references(text, "file", "name", &mut refs)?;
+    collect_clickonce_manifest_references(text, "dependentAssembly", "codebase", &mut refs)?;
+    refs.sort_by_key(|entry| entry.tag_start);
+    Ok(refs)
+}
+
+fn collect_clickonce_manifest_references(
+    text: &str,
+    tag: &str,
+    path_attr: &str,
+    refs: &mut Vec<ClickOnceManifestReference>,
+) -> Result<()> {
+    let mut cursor = 0usize;
+    while let Some(start) = find_xml_start_tag(text, tag, cursor) {
+        let tag_end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("ClickOnce manifest <{tag}> tag is not closed"))?;
+        let start_tag = &text[start..=tag_end];
+        cursor = tag_end + 1;
+        if start_tag.ends_with("/>") {
+            continue;
+        }
+        let Some(path) = xml_attr(start_tag, path_attr) else {
+            continue;
+        };
+        let close = format!("</{tag}>");
+        let Some(close_start) = text[cursor..].find(&close).map(|offset| cursor + offset) else {
+            continue;
+        };
+        let block_end = close_start + close.len();
+        let block = &text[tag_end + 1..close_start];
+        let Some(method) = find_xml_start_tag_by_local_name(block, "DigestMethod", 0)? else {
+            continue;
+        };
+        let Some(value) = find_xml_element_by_local_name(block, "DigestValue", 0)? else {
+            continue;
+        };
+        let method_tag = &block[method.start..=method.end];
+        let algorithm = xml_attr(method_tag, "Algorithm")
+            .as_deref()
+            .map(clickonce_hash_alg_from_uri)
+            .transpose()?
+            .unwrap_or(HashAlg::Sha256);
+        refs.push(ClickOnceManifestReference {
+            tag_start: start,
+            tag_end,
+            path,
+            size: xml_attr(start_tag, "size")
+                .map(|s| s.parse::<u64>())
+                .transpose()
+                .context("parse ClickOnce manifest size attribute")?,
+            algorithm,
+            digest_value: block[value.content_start..value.content_end]
+                .trim()
+                .to_owned(),
+            digest_method_tag_start: tag_end + 1 + method.start,
+            digest_method_tag_end: tag_end + 1 + method.end,
+            digest_value_content_start: tag_end + 1 + value.content_start,
+            digest_value_content_end: tag_end + 1 + value.content_end,
+        });
+        cursor = block_end;
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct XmlStartTagSpan {
+    start: usize,
+    end: usize,
+    name: String,
+}
+
+#[derive(Debug)]
+struct XmlElementSpan {
+    content_start: usize,
+    content_end: usize,
+}
+
+fn find_xml_start_tag(text: &str, tag: &str, from: usize) -> Option<usize> {
+    let needle = format!("<{tag}");
+    let mut cursor = from;
+    while let Some(rel) = text[cursor..].find(&needle) {
+        let start = cursor + rel;
+        let next = text[start + needle.len()..].chars().next();
+        if matches!(next, Some(' ' | '\t' | '\r' | '\n' | '>' | '/')) {
+            return Some(start);
+        }
+        cursor = start + needle.len();
+    }
+    None
+}
+
+fn find_xml_start_tag_by_local_name(
+    text: &str,
+    local_name: &str,
+    from: usize,
+) -> Result<Option<XmlStartTagSpan>> {
+    let mut cursor = from;
+    while let Some(rel) = text[cursor..].find('<') {
+        let start = cursor + rel;
+        let Some(first) = text[start + 1..].chars().next() else {
+            return Ok(None);
+        };
+        if matches!(first, '/' | '!' | '?') {
+            cursor = start + 1;
+            continue;
+        }
+        let end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("ClickOnce XML tag is not closed"))?;
+        let name_start = start + 1;
+        let name_end = text[name_start..=end]
+            .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .map(|offset| name_start + offset)
+            .unwrap_or(end);
+        let name = &text[name_start..name_end];
+        let name_local = name.rsplit_once(':').map(|(_, local)| local).unwrap_or(name);
+        if name_local == local_name {
+            return Ok(Some(XmlStartTagSpan {
+                start,
+                end,
+                name: name.to_owned(),
+            }));
+        }
+        cursor = end + 1;
+    }
+    Ok(None)
+}
+
+fn find_xml_element_by_local_name(
+    text: &str,
+    local_name: &str,
+    from: usize,
+) -> Result<Option<XmlElementSpan>> {
+    let Some(start_tag) = find_xml_start_tag_by_local_name(text, local_name, from)? else {
+        return Ok(None);
+    };
+    let close = format!("</{}>", start_tag.name);
+    let content_start = start_tag.end + 1;
+    let content_end = text[content_start..]
+        .find(&close)
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| anyhow!("ClickOnce XML </{}> tag is not closed", start_tag.name))?;
+    Ok(Some(XmlElementSpan {
+        content_start,
+        content_end,
+    }))
+}
+
+fn find_xml_element_span_by_local_name(
+    text: &str,
+    local_name: &str,
+    from: usize,
+) -> Result<Option<(usize, usize)>> {
+    let Some(start_tag) = find_xml_start_tag_by_local_name(text, local_name, from)? else {
+        return Ok(None);
+    };
+    let close = format!("</{}>", start_tag.name);
+    let content_start = start_tag.end + 1;
+    let close_start = text[content_start..]
+        .find(&close)
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| anyhow!("ClickOnce XML </{}> tag is not closed", start_tag.name))?;
+    Ok(Some((start_tag.start, close_start + close.len())))
+}
+
+fn find_xml_root_start_tag(text: &str) -> Result<XmlStartTagSpan> {
+    let mut cursor = 0usize;
+    while let Some(rel) = text[cursor..].find('<') {
+        let start = cursor + rel;
+        let Some(first) = text[start + 1..].chars().next() else {
+            break;
+        };
+        if matches!(first, '?' | '!') {
+            let end = text[start..]
+                .find('>')
+                .map(|offset| start + offset)
+                .ok_or_else(|| anyhow!("ClickOnce XML declaration/comment is not closed"))?;
+            cursor = end + 1;
+            continue;
+        }
+        if first == '/' {
+            return Err(anyhow!("ClickOnce XML starts with an unexpected closing tag"));
+        }
+        let end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("ClickOnce XML root tag is not closed"))?;
+        let name_start = start + 1;
+        let name_end = text[name_start..=end]
+            .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .map(|offset| name_start + offset)
+            .unwrap_or(end);
+        return Ok(XmlStartTagSpan {
+            start,
+            end,
+            name: text[name_start..name_end].to_owned(),
+        });
+    }
+    Err(anyhow!("ClickOnce manifest does not contain a root XML element"))
+}
+
+fn resolve_clickonce_manifest_path(base_directory: &Path, manifest_path: &str) -> Result<PathBuf> {
+    let relative = Path::new(manifest_path);
+    let mut safe = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => safe.push(part),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(anyhow!(
+                    "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
+                ));
+            }
+        }
+    }
+    if safe.as_os_str().is_empty() {
+        return Err(anyhow!("ClickOnce manifest path is empty"));
+    }
+    Ok(base_directory.join(safe))
+}
+
+fn clickonce_hash_alg_from_uri(uri: &str) -> Result<HashAlg> {
+    match uri {
+        "http://www.w3.org/2000/09/xmldsig#sha1" => Ok(HashAlg::Sha1),
+        "http://www.w3.org/2001/04/xmlenc#sha256" => Ok(HashAlg::Sha256),
+        "http://www.w3.org/2001/04/xmldsig-more#sha384" => Ok(HashAlg::Sha384),
+        "http://www.w3.org/2001/04/xmlenc#sha512" => Ok(HashAlg::Sha512),
+        other => Err(anyhow!(
+            "unsupported ClickOnce digest method Algorithm: {other}"
+        )),
+    }
+}
+
+fn clickonce_digest_algorithm_uri(algorithm: HashAlg) -> &'static str {
+    match algorithm {
+        HashAlg::Sha1 => "http://www.w3.org/2000/09/xmldsig#sha1",
+        HashAlg::Sha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
+        HashAlg::Sha384 => "http://www.w3.org/2001/04/xmldsig-more#sha384",
+        HashAlg::Sha512 => "http://www.w3.org/2001/04/xmlenc#sha512",
+    }
+}
+
+fn clickonce_signature_algorithm_uri(digest: PortableSignDigest) -> &'static str {
+    match digest {
+        PortableSignDigest::Sha256 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+        PortableSignDigest::Sha384 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384",
+        PortableSignDigest::Sha512 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512",
+    }
+}
+
+fn clickonce_signature_digest_uri(digest: PortableSignDigest) -> &'static str {
+    match digest {
+        PortableSignDigest::Sha256 => clickonce_digest_algorithm_uri(HashAlg::Sha256),
+        PortableSignDigest::Sha384 => clickonce_digest_algorithm_uri(HashAlg::Sha384),
+        PortableSignDigest::Sha512 => clickonce_digest_algorithm_uri(HashAlg::Sha512),
+    }
+}
+
+fn clickonce_signature_digest_bytes(digest: PortableSignDigest, bytes: &[u8]) -> Vec<u8> {
+    match digest {
+        PortableSignDigest::Sha256 => Sha256::digest(bytes).to_vec(),
+        PortableSignDigest::Sha384 => Sha384::digest(bytes).to_vec(),
+        PortableSignDigest::Sha512 => Sha512::digest(bytes).to_vec(),
+    }
+}
+
+fn unsigned_clickonce_manifest_text(text: &str) -> Result<String> {
+    let Some((start, end)) = find_xml_element_span_by_local_name(text, "Signature", 0)? else {
+        return Ok(text.to_owned());
+    };
+    let mut out = String::with_capacity(text.len() - (end - start));
+    out.push_str(&text[..start]);
+    out.push_str(&text[end..]);
+    Ok(out)
+}
+
+fn clickonce_manifest_signed_info_xml(
+    unsigned_manifest_text: &str,
+    digest: PortableSignDigest,
+) -> Vec<u8> {
+    let manifest_digest = clickonce_signature_digest_bytes(digest, unsigned_manifest_text.as_bytes());
+    let digest_b64 = base64_encode(&manifest_digest);
+    format!(
+        r#"<SignedInfo><CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><SignatureMethod Algorithm="{}"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="{}"/><DigestValue>{digest_b64}</DigestValue></Reference></SignedInfo>"#,
+        clickonce_signature_algorithm_uri(digest),
+        clickonce_signature_digest_uri(digest),
+    )
+    .into_bytes()
+}
+
+fn clickonce_manifest_signature_xml(
+    signed_info: &[u8],
+    signature: &[u8],
+    cert_der: &[u8],
+) -> String {
+    let signed_info = String::from_utf8_lossy(signed_info);
+    format!(
+        r#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">{signed_info}<SignatureValue>{}</SignatureValue><KeyInfo><X509Data><X509Certificate>{}</X509Certificate></X509Data></KeyInfo></Signature>"#,
+        base64_encode(signature),
+        base64_encode(cert_der)
+    )
+}
+
+fn insert_clickonce_signature_xml(unsigned_manifest_text: &str, signature_xml: &str) -> Result<String> {
+    let root = find_xml_root_start_tag(unsigned_manifest_text)?;
+    let close = format!("</{}>", root.name);
+    let close_start = unsigned_manifest_text
+        .rfind(&close)
+        .ok_or_else(|| anyhow!("ClickOnce manifest root </{}> tag is not closed", root.name))?;
+    let mut out = String::with_capacity(unsigned_manifest_text.len() + signature_xml.len());
+    out.push_str(&unsigned_manifest_text[..close_start]);
+    out.push_str(signature_xml);
+    out.push_str(&unsigned_manifest_text[close_start..]);
+    Ok(out)
+}
+
+fn clickonce_signed_info_from_signature_xml(signature_xml: &str) -> Result<Vec<u8>> {
+    let Some((start, end)) = find_xml_element_span_by_local_name(signature_xml, "SignedInfo", 0)? else {
+        return Err(anyhow!("ClickOnce manifest signature is missing SignedInfo"));
+    };
+    Ok(signature_xml.as_bytes()[start..end].to_vec())
+}
+
+fn clickonce_signature_value_from_signature_xml(signature_xml: &str) -> Result<Vec<u8>> {
+    let value = find_xml_element_by_local_name(signature_xml, "SignatureValue", 0)?
+        .ok_or_else(|| anyhow!("ClickOnce manifest signature is missing SignatureValue"))?;
+    let text = &signature_xml[value.content_start..value.content_end];
+    let signature = base64_decode(text.trim()).context("decode ClickOnce SignatureValue")?;
+    if signature.is_empty() {
+        return Err(anyhow!("ClickOnce manifest SignatureValue is empty"));
+    }
+    Ok(signature)
+}
+
+fn clickonce_signer_certificate_from_signature_xml(signature_xml: &str) -> Result<Vec<u8>> {
+    let value = find_xml_element_by_local_name(signature_xml, "X509Certificate", 0)?
+        .ok_or_else(|| anyhow!("ClickOnce manifest signature is missing X509Certificate"))?;
+    let text = &signature_xml[value.content_start..value.content_end];
+    let cert = base64_decode(text.trim()).context("decode ClickOnce X509Certificate")?;
+    if cert.is_empty() {
+        return Err(anyhow!("ClickOnce manifest X509Certificate is empty"));
+    }
+    Ok(cert)
+}
+
+fn sign_clickonce_manifest_path(
+    path: &Path,
+    cert: &Path,
+    key: &Path,
+    digest: PortableSignDigest,
+    output: &Path,
+) -> Result<ClickOnceManifestSignatureReport> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
+    let unsigned = unsigned_clickonce_manifest_text(&text)?;
+    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+    rdp::parse_certificate(&cert_bytes)
+        .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+    let private_key = rdp::parse_rsa_private_key(&key_bytes)
+        .with_context(|| format!("parse RSA private key {}", key.display()))?;
+    let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
+    let signature = sign_clickonce_signed_info(digest, private_key, &signed_info)?;
+    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
+    let signed_manifest = insert_clickonce_signature_xml(&unsigned, &signature_xml)?;
+    std::fs::write(output, signed_manifest)
+        .with_context(|| format!("write ClickOnce manifest {}", output.display()))?;
+    Ok(ClickOnceManifestSignatureReport {
+        digest,
+        manifest_digest_b64: base64_encode(&clickonce_signature_digest_bytes(
+            digest,
+            unsigned.as_bytes(),
+        )),
+        signature_len: signature.len(),
+    })
+}
+
+fn clickonce_signed_info_remote_prehash(
+    digest: PortableSignDigest,
+    signed_info: &[u8],
+) -> Vec<u8> {
+    clickonce_signature_digest_bytes(digest, signed_info)
+}
+
+fn sign_clickonce_manifest_from_external_signature_path(
+    path: &Path,
+    cert: &Path,
+    signature: &Path,
+    digest: PortableSignDigest,
+    output: &Path,
+) -> Result<ClickOnceManifestSignatureReport> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
+    let unsigned = unsigned_clickonce_manifest_text(&text)?;
+    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+    rdp::parse_certificate(&cert_bytes)
+        .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+    let signature = std::fs::read(signature).with_context(|| format!("read {}", signature.display()))?;
+    let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
+    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
+    let signed_manifest = insert_clickonce_signature_xml(&unsigned, &signature_xml)?;
+    std::fs::write(output, signed_manifest)
+        .with_context(|| format!("write ClickOnce manifest {}", output.display()))?;
+    Ok(ClickOnceManifestSignatureReport {
+        digest,
+        manifest_digest_b64: base64_encode(&clickonce_signature_digest_bytes(
+            digest,
+            unsigned.as_bytes(),
+        )),
+        signature_len: signature.len(),
+    })
+}
+
+fn verify_clickonce_manifest_signature_path(
+    path: &Path,
+    cert: Option<&Path>,
+    digest: PortableSignDigest,
+    shared: &TrustVerifySharedArgs,
+) -> Result<ClickOnceManifestSignatureReport> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
+    let unsigned = unsigned_clickonce_manifest_text(&text)?;
+    let (signature_start, signature_end) = find_xml_element_span_by_local_name(&text, "Signature", 0)?
+        .ok_or_else(|| anyhow!("ClickOnce manifest is missing XMLDSig Signature"))?;
+    let signature_xml = &text[signature_start..signature_end];
+    let signed_info = clickonce_signed_info_from_signature_xml(signature_xml)?;
+    let signature = clickonce_signature_value_from_signature_xml(signature_xml)?;
+    let embedded_cert = clickonce_signer_certificate_from_signature_xml(signature_xml)?;
+    let cert_bytes = match cert {
+        Some(path) => std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+        None => embedded_cert,
+    };
+    let signer_cert = rdp::parse_certificate(&cert_bytes).context("parse ClickOnce signer certificate")?;
+    let expected_signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
+    if signed_info != expected_signed_info {
+        return Err(anyhow!("ClickOnce manifest SignedInfo does not match manifest digest"));
+    }
+    verify_clickonce_signed_info(digest, &signer_cert, &signed_info, &signature)?;
+    if trust_verify_args_present(shared) {
+        verify_xml_signer_certificate_trust(&cert_bytes, shared)?;
+    }
+    Ok(ClickOnceManifestSignatureReport {
+        digest,
+        manifest_digest_b64: base64_encode(&clickonce_signature_digest_bytes(
+            digest,
+            unsigned.as_bytes(),
+        )),
+        signature_len: signature.len(),
+    })
+}
+
+fn hash_alg_label(algorithm: HashAlg) -> &'static str {
+    match algorithm {
+        HashAlg::Sha1 => "sha1",
+        HashAlg::Sha256 => "sha256",
+        HashAlg::Sha384 => "sha384",
+        HashAlg::Sha512 => "sha512",
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode(text: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut chunk = [0u8; 4];
+    let mut chunk_len = 0usize;
+    let mut padding = 0usize;
+    for ch in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        let value = match ch {
+            b'A'..=b'Z' => ch - b'A',
+            b'a'..=b'z' => ch - b'a' + 26,
+            b'0'..=b'9' => ch - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                padding += 1;
+                0
+            }
+            _ => return Err(anyhow!("invalid base64 character in XMLDSig value")),
+        };
+        chunk[chunk_len] = value;
+        chunk_len += 1;
+        if chunk_len == 4 {
+            out.push((chunk[0] << 2) | (chunk[1] >> 4));
+            if padding < 2 {
+                out.push((chunk[1] << 4) | (chunk[2] >> 2));
+            }
+            if padding == 0 {
+                out.push((chunk[2] << 6) | chunk[3]);
+            }
+            chunk_len = 0;
+            padding = 0;
+        }
+    }
+    if chunk_len != 0 {
+        return Err(anyhow!("truncated base64 XMLDSig value"));
+    }
+    Ok(out)
+}
+
+fn inspect_business_central_app(path: &Path) -> Result<BusinessCentralAppInfo> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(BusinessCentralAppInfo {
+        is_navx: bytes.starts_with(b"NAVX"),
+        len: bytes.len() as u64,
+    })
+}
+
+fn inspect_msix_manifest_path(path: &Path) -> Result<MsixManifestInfo> {
+    reject_encrypted_msix_path(path)?;
+    let manifest = read_msix_manifest(path)?;
+    let identity = first_tag(&manifest, "Identity")
+        .ok_or_else(|| anyhow!("MSIX/AppX AppxManifest.xml is missing Identity"))?;
+    Ok(MsixManifestInfo {
+        package_name: xml_attr(identity, "Name"),
+        publisher: xml_attr(identity, "Publisher"),
+        version: xml_attr(identity, "Version"),
+        processor_architecture: xml_attr(identity, "ProcessorArchitecture"),
+    })
+}
+
+fn set_msix_manifest_publisher_path(input: &Path, output: &Path, publisher: &str) -> Result<()> {
+    reject_encrypted_msix_path(input)?;
+    if publisher.is_empty() {
+        return Err(anyhow!("MSIX/AppX publisher cannot be empty"));
+    }
+    let reader = File::open(input).with_context(|| format!("open {}", input.display()))?;
+    let writer = File::create(output).with_context(|| format!("create {}", output.display()))?;
+    set_msix_manifest_publisher(reader, writer, publisher)
+        .with_context(|| format!("set MSIX/AppX manifest publisher in {}", input.display()))
+}
+
+fn reject_encrypted_msix_path(path: &Path) -> Result<()> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if psign_sip_digest::msix_digest::is_encrypted_msix_extension(&ext) {
+        return Err(anyhow!(
+            "encrypted MSIX/AppX packages (.eappx/.emsix) require Windows AppxSip OS delegation; portable cleartext package helpers cannot inspect or update {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn read_msix_manifest(path: &Path) -> Result<String> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).context("open MSIX/AppX ZIP")?;
+    let mut manifest = archive
+        .by_name("AppxManifest.xml")
+        .context("read AppxManifest.xml")?;
+    let mut text = String::new();
+    manifest
+        .read_to_string(&mut text)
+        .context("read AppxManifest.xml as UTF-8")?;
+    Ok(text)
+}
+
+fn set_msix_manifest_publisher<R, W>(reader: R, writer: W, publisher: &str) -> Result<()>
+where
+    R: std::io::Read + std::io::Seek,
+    W: std::io::Write + std::io::Seek,
+{
+    let escaped = xml_escape_attr(publisher);
+    let mut input = zip::ZipArchive::new(reader).context("open MSIX/AppX ZIP")?;
+    if input.by_name("AppxSignature.p7x").is_ok() {
+        return Err(anyhow!(
+            "MSIX/AppX package already contains AppxSignature.p7x; update the unsigned package before final signing"
+        ));
+    }
+    let mut output = zip::ZipWriter::new(writer);
+    let mut updated_manifest = false;
+
+    for i in 0..input.len() {
+        let mut file = input.by_index(i).context("read MSIX/AppX ZIP entry")?;
+        let name = psign_opc_sign::opc::normalize_zip_part_name(file.name())?;
+        let options = zip::write::FileOptions::default().compression_method(file.compression());
+        if file.is_dir() {
+            output.add_directory(name, options)?;
+            continue;
+        }
+        output.start_file(&name, options)?;
+        if name == "AppxManifest.xml" {
+            let mut text = String::new();
+            file.read_to_string(&mut text)
+                .context("read AppxManifest.xml as UTF-8")?;
+            let updated = update_attr_for_tags(&text, "Identity", "Publisher", &escaped)?;
+            output.write_all(updated.as_bytes())?;
+            updated_manifest = true;
+        } else {
+            std::io::copy(&mut file, &mut output)?;
+        }
+    }
+
+    if !updated_manifest {
+        return Err(anyhow!("MSIX/AppX package is missing AppxManifest.xml"));
+    }
+    output.finish()?;
+    Ok(())
+}
+
+fn parse_appinstaller_descriptor(text: &str) -> Result<AppInstallerDescriptorInfo> {
+    let root_start = text
+        .find("<AppInstaller")
+        .ok_or_else(|| anyhow!("App Installer descriptor root <AppInstaller> not found"))?;
+    let root_end = text[root_start..]
+        .find('>')
+        .map(|offset| root_start + offset)
+        .ok_or_else(|| anyhow!("App Installer root tag is not closed"))?;
+    let root_tag = &text[root_start..=root_end];
+    let namespace = xml_attr(root_tag, "xmlns");
+    let has_main_package = text.contains("<MainPackage");
+    let has_main_bundle = text.contains("<MainBundle");
+    let publisher = first_tag(text, "MainPackage")
+        .and_then(|tag| xml_attr(tag, "Publisher"))
+        .or_else(|| first_tag(text, "MainBundle").and_then(|tag| xml_attr(tag, "Publisher")));
+    Ok(AppInstallerDescriptorInfo {
+        root: "AppInstaller",
+        namespace,
+        has_main_package,
+        has_main_bundle,
+        publisher,
+    })
+}
+
+fn update_appinstaller_publisher(text: &str, publisher: &str) -> Result<String> {
+    if publisher.is_empty() {
+        return Err(anyhow!("App Installer publisher cannot be empty"));
+    }
+    let info = parse_appinstaller_descriptor(text)?;
+    if !info.has_main_package && !info.has_main_bundle {
+        return Err(anyhow!(
+            "App Installer descriptor does not contain MainPackage or MainBundle"
+        ));
+    }
+
+    let escaped = xml_escape_attr(publisher);
+    let mut updated = text.to_owned();
+    for tag in ["MainPackage", "MainBundle"] {
+        updated = update_attr_for_tags(&updated, tag, "Publisher", &escaped)?;
+    }
+    Ok(updated)
+}
+
+fn sign_pkcs7_id_data(
+    content: &[u8],
+    cert: &Path,
+    key: &Path,
+    chain_certs: Vec<PathBuf>,
+    digest: PortableSignDigest,
+) -> Result<Vec<u8>> {
+    let (signer_cert, chain) = load_cms_signer_material(cert, chain_certs)?;
+    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+    let private_key = rdp::parse_rsa_private_key(&key_bytes)
+        .with_context(|| format!("parse RSA private key {}", key.display()))?;
+    let econtent_der = id_data_econtent_der(content)?;
+    let pkcs7 = pkcs7::create_pkcs7_signed_data_der_rsa(
+        pkcs7_id_data_oid()?,
+        &econtent_der,
+        digest.into(),
+        signer_cert,
+        chain,
+        private_key,
+    )?;
+    detach_pkcs7_econtent(&pkcs7)
+}
+
+fn load_cms_signer_material(
+    cert: &Path,
+    chain_certs: Vec<PathBuf>,
+) -> Result<(x509_cert::Certificate, Vec<x509_cert::Certificate>)> {
+    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+    let signer_cert = rdp::parse_certificate(&cert_bytes)
+        .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+    let mut chain = Vec::with_capacity(chain_certs.len());
+    for chain_cert in chain_certs {
+        let bytes =
+            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
+        chain.push(
+            rdp::parse_certificate(&bytes)
+                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
+        );
+    }
+    Ok((signer_cert, chain))
+}
+
+fn id_data_econtent_der(content: &[u8]) -> Result<Vec<u8>> {
+    OctetString::new(content.to_vec())
+        .map_err(|e| anyhow!("encode CMS id-data OCTET STRING: {e}"))?
+        .to_der()
+        .map_err(|e| anyhow!("encode CMS id-data DER: {e}"))
+}
+
+fn pkcs7_id_data_oid() -> Result<ObjectIdentifier> {
+    ObjectIdentifier::new(pkcs7::PKCS7_ID_DATA_OID)
+        .map_err(|e| anyhow!("parse CMS id-data OID: {e}"))
+}
+
+fn pkcs7_id_data_remote_prehash(content: &[u8], digest: PortableSignDigest) -> Result<Vec<u8>> {
+    let econtent_der = id_data_econtent_der(content)?;
+    pkcs7::pkcs7_remote_rsa_signed_attrs_digest(pkcs7_id_data_oid()?, &econtent_der, digest.into())
+}
+
+fn sign_pkcs7_id_data_with_external_signature(
+    content: &[u8],
+    cert: &Path,
+    chain_certs: Vec<PathBuf>,
+    digest: PortableSignDigest,
+    signature: &[u8],
+) -> Result<Vec<u8>> {
+    let (signer_cert, chain) = load_cms_signer_material(cert, chain_certs)?;
+    let econtent_der = id_data_econtent_der(content)?;
+    pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+        pkcs7_id_data_oid()?,
+        &econtent_der,
+        digest.into(),
+        signer_cert,
+        chain,
+        signature,
+        true,
+    )
+}
+
+fn detach_pkcs7_econtent(pkcs7_der: &[u8]) -> Result<Vec<u8>> {
+    let mut detached = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der)
+        .context("parse generated CMS before detaching eContent")?;
+    detached.encap_content_info.econtent = None;
+    pkcs7::encode_pkcs7_content_info_signed_data_der(&detached)
+}
+
+fn update_attr_for_tags(text: &str, tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    let needle = format!("<{tag}");
+    while let Some(rel_start) = text[cursor..].find(&needle) {
+        let start = cursor + rel_start;
+        let end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("App Installer <{tag}> tag is not closed"))?;
+        out.push_str(&text[cursor..start]);
+        out.push_str(&replace_or_insert_xml_attr(
+            &text[start..=end],
+            attr,
+            escaped_value,
+        )?);
+        cursor = end + 1;
+    }
+    out.push_str(&text[cursor..]);
+    Ok(out)
+}
+
+fn replace_or_insert_xml_attr(tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
+    let needle = format!("{attr}=\"");
+    if let Some(value_start) = tag.find(&needle).map(|idx| idx + needle.len()) {
+        let value_end = tag[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .ok_or_else(|| anyhow!("App Installer {attr} attribute is not closed"))?;
+        let mut out = String::with_capacity(tag.len() + escaped_value.len());
+        out.push_str(&tag[..value_start]);
+        out.push_str(escaped_value);
+        out.push_str(&tag[value_end..]);
+        return Ok(out);
+    }
+
+    let insert_at = tag
+        .rfind("/>")
+        .or_else(|| tag.rfind('>'))
+        .ok_or_else(|| anyhow!("App Installer tag is not closed"))?;
+    let mut out = String::with_capacity(tag.len() + attr.len() + escaped_value.len() + 4);
+    out.push_str(&tag[..insert_at]);
+    out.push(' ');
+    out.push_str(attr);
+    out.push_str("=\"");
+    out.push_str(escaped_value);
+    out.push('"');
+    out.push_str(&tag[insert_at..]);
+    Ok(out)
+}
+
+fn xml_escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn first_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let start = text.find(&format!("<{tag}"))?;
+    let end = text[start..].find('>').map(|offset| start + offset)?;
+    Some(&text[start..=end])
+}
+
+fn xml_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = tag.find(&needle)? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_owned())
 }
 
 fn run_rfc3161_timestamp_resp_inspect(
@@ -508,6 +1637,33 @@ fn timestamp_pkcs7_der_rfc3161(
     let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
         .context("attach RFC3161 timestamp token")?;
     pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
+fn timestamp_pkcs7_if_requested(
+    pkcs7_der: &[u8],
+    timestamp_url: Option<String>,
+    timestamp_digest: Option<HashAlg>,
+    context: &str,
+) -> Result<Vec<u8>> {
+    match (timestamp_url, timestamp_digest) {
+        (Some(url), Some(timestamp_digest)) => {
+            #[cfg(feature = "timestamp-http")]
+            {
+                timestamp_pkcs7_der_rfc3161(pkcs7_der, &url, timestamp_digest)
+                    .with_context(|| format!("RFC3161 timestamp {context}"))
+            }
+            #[cfg(not(feature = "timestamp-http"))]
+            {
+                let _ = (url, timestamp_digest);
+                Err(anyhow!(
+                    "{context} RFC3161 timestamping requires the timestamp-http feature"
+                ))
+            }
+        }
+        (Some(_), None) => Err(anyhow!("{context} requires --timestamp-digest with --timestamp-url")),
+        (None, Some(_)) => Err(anyhow!("{context} requires --timestamp-url with --timestamp-digest")),
+        (None, None) => Ok(pkcs7_der.to_vec()),
+    }
 }
 
 fn parse_sha256_hex(s: &str) -> Result<[u8; 32]> {
@@ -920,6 +2076,92 @@ enum Command {
     VerifyEsd { path: PathBuf },
     /// Cleartext MSIX/APPX/bundle: compare PKCS#7 indirect digest to Rust ZIP rehash (encrypted extensions rejected).
     VerifyMsix { path: PathBuf },
+    /// Inspect cleartext MSIX/AppX `AppxManifest.xml` Identity metadata.
+    MsixManifestInfo { path: PathBuf },
+    /// Update cleartext MSIX/AppX `AppxManifest.xml` Identity Publisher before final signing.
+    MsixSetPublisher {
+        path: PathBuf,
+        #[arg(long, value_name = "SUBJECT")]
+        publisher: String,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Inspect a ClickOnce `.deploy` payload and report the undeployed content name.
+    ClickonceDeployInfo { path: PathBuf },
+    /// Copy a ClickOnce `.deploy` payload to an explicit undeployed output path.
+    ClickonceCopyDeployPayload {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Verify file hashes recorded in a ClickOnce application or deployment manifest.
+    ClickonceManifestHashes {
+        path: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        base_directory: Option<PathBuf>,
+    },
+    /// Update file size and digest values in a ClickOnce application or deployment manifest.
+    ClickonceUpdateManifestHashes {
+        path: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        base_directory: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = HashAlg::Sha256)]
+        algorithm: HashAlg,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Add a deterministic portable XMLDSig signature to a ClickOnce manifest.
+    ///
+    /// This is a portable structural helper for tests and non-Mage workflows; it does not claim
+    /// byte-for-byte Mage output or ClickOnce policy validation.
+    ClickonceSignManifest {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Compute the SignedInfo digest for externally signing ClickOnce manifest XMLDSig.
+    ClickonceSignManifestPrehash {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        #[arg(long, value_enum, default_value_t = DigestEncoding::Hex)]
+        encoding: DigestEncoding,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Add a deterministic ClickOnce manifest XMLDSig from externally produced RSA signature bytes.
+    ClickonceSignManifestFromSignature {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// Raw RSA PKCS#1 v1.5 signature bytes produced over `clickonce-sign-manifest-prehash`.
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Verify the deterministic portable XMLDSig signature in a ClickOnce manifest.
+    ClickonceVerifyManifestSignature {
+        path: PathBuf,
+        /// Signer certificate as DER or PEM. Defaults to the embedded KeyInfo certificate.
+        #[arg(long, value_name = "PATH")]
+        cert: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
     /// Same digest as **`pkcs7-signer-rs256-prehash`** when **`path`** is raw PKCS#7 **`SignedData`** (typical **`.cat`** body — CTL or other CMS **`ContentInfo`**).
     ///
     /// For **KV `RS256`** over **`SignerInfo.signedAttrs`**, use **`--encoding raw`**. Does **not** run **`verify-catalog`** (CTL **`messageDigest`** vs **`eContent`** rules differ from Authenticode PE PKCS#7).
@@ -1047,8 +2289,325 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Write NuGet signature content bytes (`Version` + package hash property) for an unsigned package.
+    ///
+    /// This is the CMS encapsulated content used by NuGet author signatures before `.signature.p7s` is embedded.
+    NupkgSignatureContent {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create local RSA/SHA-2 CMS for NuGet signature content bytes.
+    NupkgSignaturePkcs7 {
+        path: PathBuf,
+        /// Package hash and CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        /// Additional certificate to include in the PKCS#7 certificate set.
+        #[arg(long = "chain-cert", value_name = "PATH")]
+        chain_certs: Vec<PathBuf>,
+        /// RFC3161 timestamp URL to timestamp the NuGet CMS signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Compute the signed-attributes digest for externally signing NuGet CMS.
+    ///
+    /// Sign this digest with RSA PKCS#1 v1.5 using the selected SHA-2 algorithm, then pass the
+    /// signature bytes to `nupkg-signature-pkcs7-from-signature`.
+    NupkgSignaturePkcs7Prehash {
+        path: PathBuf,
+        /// Package hash and CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        #[arg(long, value_enum, default_value_t = DigestEncoding::Hex)]
+        encoding: DigestEncoding,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create NuGet CMS from externally produced RSA PKCS#1 v1.5 signature bytes.
+    NupkgSignaturePkcs7FromSignature {
+        path: PathBuf,
+        /// Package hash and CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// Additional certificate to include in the PKCS#7 certificate set.
+        #[arg(long = "chain-cert", value_name = "PATH")]
+        chain_certs: Vec<PathBuf>,
+        /// Raw RSA PKCS#1 v1.5 signature bytes produced over `nupkg-signature-pkcs7-prehash`.
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        /// RFC3161 timestamp URL to timestamp the NuGet CMS signature after assembly.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Create and embed a local RSA/SHA-2 NuGet `.signature.p7s` signature.
+    NupkgSign {
+        path: PathBuf,
+        /// Package hash and CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        /// Additional certificate to include in the PKCS#7 certificate set.
+        #[arg(long = "chain-cert", value_name = "PATH")]
+        chain_certs: Vec<PathBuf>,
+        /// RFC3161 timestamp URL to timestamp the NuGet CMS signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Verify NuGet signature content bytes against an unsigned package hash.
+    NupkgVerifySignatureContent {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        content: PathBuf,
+    },
+    /// Verify an embedded NuGet `.signature.p7s` against package content and explicit trust anchors.
+    NupkgVerifySignature {
+        path: PathBuf,
+        /// Package hash and CMS signer digest algorithm used to reconstruct NuGet signature content.
+        #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
+        algorithm: NugetHashAlg,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Embed a NuGet package author signature blob as root `.signature.p7s`.
+    ///
+    /// This is a package-native write primitive for split signing workflows; it does not create CMS.
+    NupkgEmbedSignature {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
     /// Inspect VSIX OPC signature marker state without validating XMLDSig.
     VsixSignatureInfo { path: PathBuf },
+    /// Embed a VSIX OPC signature XML part and signature-origin marker.
+    ///
+    /// This is a structural write primitive for split XMLDSig workflows; it does not create XMLDSig.
+    VsixEmbedSignatureXml {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature_xml: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Write deterministic VSIX XMLDSig Reference/DigestValue XML for package parts.
+    VsixSignatureReferenceXml {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create deterministic VSIX XMLDSig XML with local RSA/SHA-2 SignatureValue.
+    VsixSignatureXml {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Compute the SignedInfo digest for externally signing VSIX XMLDSig.
+    ///
+    /// Sign this digest with RSA PKCS#1 v1.5 using the selected SHA-2 algorithm, then pass the
+    /// signature bytes to `vsix-signature-xml-from-signature`.
+    VsixSignatureXmlPrehash {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        #[arg(long, value_enum, default_value_t = DigestEncoding::Hex)]
+        encoding: DigestEncoding,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create deterministic VSIX XMLDSig XML from externally produced RSA signature bytes.
+    VsixSignatureXmlFromSignature {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// Raw RSA PKCS#1 v1.5 signature bytes produced over `vsix-signature-xml-prehash`.
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create and embed deterministic VSIX XMLDSig XML with local RSA/SHA-2 SignatureValue.
+    VsixSign {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+    },
+    /// Verify VSIX XMLDSig Reference/DigestValue XML against package parts.
+    VsixVerifySignatureReferenceXml {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature_xml: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+    },
+    /// Verify deterministic VSIX XMLDSig references and local RSA/SHA-2 SignatureValue.
+    VsixVerifySignatureXml {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature_xml: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Verify an embedded VSIX OPC XMLDSig signature part.
+    VsixVerifySignature {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        cert: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
+        algorithm: VsixHashAlg,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Inspect an App Installer descriptor and optional detached PKCS#7 companion signature.
+    AppinstallerInfo {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature: Option<PathBuf>,
+    },
+    /// Verify an App Installer XML descriptor against its detached PKCS#7 companion signature.
+    AppinstallerVerifyCompanion {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Create a detached PKCS#7 companion signature for an App Installer XML descriptor.
+    AppinstallerSignCompanion {
+        path: PathBuf,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        #[arg(long, value_name = "PATH")]
+        key: PathBuf,
+        /// Additional certificate to include in the PKCS#7 certificate set.
+        #[arg(long = "chain-cert", value_name = "PATH")]
+        chain_certs: Vec<PathBuf>,
+        /// CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        /// RFC3161 timestamp URL to timestamp the companion CMS signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        /// Output detached PKCS#7 companion path.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Compute the CMS authenticated-attributes digest for externally signing an App Installer companion.
+    AppinstallerSignCompanionPrehash {
+        path: PathBuf,
+        /// CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        #[arg(long, value_enum, default_value_t = DigestEncoding::Hex)]
+        encoding: DigestEncoding,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Create an App Installer companion PKCS#7 from externally produced RSA signature bytes.
+    AppinstallerSignCompanionFromSignature {
+        path: PathBuf,
+        /// Signer certificate as DER or PEM.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
+        /// Additional certificate to include in the PKCS#7 certificate set.
+        #[arg(long = "chain-cert", value_name = "PATH")]
+        chain_certs: Vec<PathBuf>,
+        /// CMS signer digest algorithm.
+        #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
+        digest: PortableSignDigest,
+        /// Raw RSA PKCS#1 v1.5 signature bytes produced over `appinstaller-sign-companion-prehash`.
+        #[arg(long, value_name = "PATH")]
+        signature: PathBuf,
+        /// RFC3161 timestamp URL to timestamp the companion CMS signature after assembly.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        /// Output detached PKCS#7 companion path.
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Update MainPackage/MainBundle Publisher attributes in an App Installer descriptor.
+    AppinstallerSetPublisher {
+        path: PathBuf,
+        #[arg(long, value_name = "SUBJECT")]
+        publisher: String,
+        #[arg(long, value_name = "PATH")]
+        output: PathBuf,
+    },
+    /// Inspect a Dynamics 365 Business Central `.app` package header.
+    BusinessCentralAppInfo { path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1122,6 +2681,182 @@ impl From<NugetHashAlg> for nuget::NuGetHashAlgorithm {
             NugetHashAlg::Sha512 => Self::Sha512,
         }
     }
+}
+
+impl From<NugetHashAlg> for PortableSignDigest {
+    fn from(value: NugetHashAlg) -> Self {
+        match value {
+            NugetHashAlg::Sha256 => Self::Sha256,
+            NugetHashAlg::Sha384 => Self::Sha384,
+            NugetHashAlg::Sha512 => Self::Sha512,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum VsixHashAlg {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl From<VsixHashAlg> for vsix::VsixHashAlgorithm {
+    fn from(value: VsixHashAlg) -> Self {
+        match value {
+            VsixHashAlg::Sha256 => Self::Sha256,
+            VsixHashAlg::Sha384 => Self::Sha384,
+            VsixHashAlg::Sha512 => Self::Sha512,
+        }
+    }
+}
+
+fn nuget_hash_alg_label(value: nuget::NuGetHashAlgorithm) -> &'static str {
+    match value {
+        nuget::NuGetHashAlgorithm::Sha256 => "sha256",
+        nuget::NuGetHashAlgorithm::Sha384 => "sha384",
+        nuget::NuGetHashAlgorithm::Sha512 => "sha512",
+    }
+}
+
+fn vsix_hash_alg_label(value: vsix::VsixHashAlgorithm) -> &'static str {
+    match value {
+        vsix::VsixHashAlgorithm::Sha256 => "sha256",
+        vsix::VsixHashAlgorithm::Sha384 => "sha384",
+        vsix::VsixHashAlgorithm::Sha512 => "sha512",
+    }
+}
+
+fn sign_xml_signed_info(
+    algorithm: vsix::VsixHashAlgorithm,
+    private_key: rsa::RsaPrivateKey,
+    signed_info: &[u8],
+) -> Result<Vec<u8>> {
+    let signature = match algorithm {
+        vsix::VsixHashAlgorithm::Sha256 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha256>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+        vsix::VsixHashAlgorithm::Sha384 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha384>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+        vsix::VsixHashAlgorithm::Sha512 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha512>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+    };
+    Ok(signature)
+}
+
+fn sign_clickonce_signed_info(
+    digest: PortableSignDigest,
+    private_key: rsa::RsaPrivateKey,
+    signed_info: &[u8],
+) -> Result<Vec<u8>> {
+    let signature = match digest {
+        PortableSignDigest::Sha256 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha256>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+        PortableSignDigest::Sha384 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha384>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+        PortableSignDigest::Sha512 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha512>::new(private_key);
+            key.sign(signed_info).to_vec()
+        }
+    };
+    Ok(signature)
+}
+
+fn xml_signed_info_remote_prehash(
+    algorithm: vsix::VsixHashAlgorithm,
+    signed_info: &[u8],
+) -> Vec<u8> {
+    match algorithm {
+        vsix::VsixHashAlgorithm::Sha256 => Sha256::digest(signed_info).to_vec(),
+        vsix::VsixHashAlgorithm::Sha384 => Sha384::digest(signed_info).to_vec(),
+        vsix::VsixHashAlgorithm::Sha512 => Sha512::digest(signed_info).to_vec(),
+    }
+}
+
+fn verify_xml_signed_info(
+    algorithm: vsix::VsixHashAlgorithm,
+    signer_cert: &x509_cert::Certificate,
+    signed_info: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let spki_der = signer_cert
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .map_err(|e| anyhow!("encode signer certificate SubjectPublicKeyInfo: {e}"))?;
+    let public_key = rsa::RsaPublicKey::from_public_key_der(&spki_der)
+        .map_err(|e| anyhow!("RSA public key from signer certificate: {e}"))?;
+    match algorithm {
+        vsix::VsixHashAlgorithm::Sha256 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("VSIX SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha256>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify VSIX SignatureValue: {e}"))?;
+        }
+        vsix::VsixHashAlgorithm::Sha384 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("VSIX SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha384>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify VSIX SignatureValue: {e}"))?;
+        }
+        vsix::VsixHashAlgorithm::Sha512 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("VSIX SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha512>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify VSIX SignatureValue: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_clickonce_signed_info(
+    digest: PortableSignDigest,
+    signer_cert: &x509_cert::Certificate,
+    signed_info: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let spki_der = signer_cert
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .map_err(|e| anyhow!("encode signer certificate SubjectPublicKeyInfo: {e}"))?;
+    let public_key = rsa::RsaPublicKey::from_public_key_der(&spki_der)
+        .map_err(|e| anyhow!("RSA public key from signer certificate: {e}"))?;
+    match digest {
+        PortableSignDigest::Sha256 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("ClickOnce SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha256>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify ClickOnce SignatureValue: {e}"))?;
+        }
+        PortableSignDigest::Sha384 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("ClickOnce SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha384>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify ClickOnce SignatureValue: {e}"))?;
+        }
+        PortableSignDigest::Sha512 => {
+            let signature = rsa::pkcs1v15::Signature::try_from(signature)
+                .map_err(|e| anyhow!("ClickOnce SignatureValue PKCS#1 v1.5 octets: {e}"))?;
+            rsa::pkcs1v15::VerifyingKey::<Sha512>::new(public_key)
+                .verify(signed_info, &signature)
+                .map_err(|e| anyhow!("verify ClickOnce SignatureValue: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 impl From<HashAlg> for PeAuthenticodeHashKind {
@@ -2821,6 +4556,168 @@ where
             msix_digest::verify_msix_digest_consistency(&path)
                 .with_context(|| format!("verify-msix {}", path.display()))?;
         }
+        Command::MsixManifestInfo { path } => {
+            let info = inspect_msix_manifest_path(&path)
+                .with_context(|| format!("msix-manifest-info {}", path.display()))?;
+            println!("package_name={}", info.package_name.unwrap_or("-".to_string()));
+            println!("publisher={}", info.publisher.unwrap_or("-".to_string()));
+            println!("version={}", info.version.unwrap_or("-".to_string()));
+            println!(
+                "processor_architecture={}",
+                info.processor_architecture.unwrap_or("-".to_string())
+            );
+        }
+        Command::MsixSetPublisher {
+            path,
+            publisher,
+            output,
+        } => {
+            set_msix_manifest_publisher_path(&path, &output, &publisher)
+                .with_context(|| format!("msix-set-publisher {}", path.display()))?;
+            println!("output={}", output.display());
+            println!("publisher={publisher}");
+        }
+        Command::ClickonceDeployInfo { path } => {
+            let info = inspect_clickonce_deploy_payload(&path)
+                .with_context(|| format!("clickonce-deploy-info {}", path.display()))?;
+            println!("deployed={}", if info.deployed { "yes" } else { "no" });
+            println!(
+                "content_name={}",
+                info.content_name.unwrap_or("-".to_string())
+            );
+            println!("len={}", info.len);
+        }
+        Command::ClickonceCopyDeployPayload { path, output } => {
+            let content_name = clickonce_deploy_content_name(&path).ok_or_else(|| {
+                anyhow!(
+                    "ClickOnce deploy payload name must end with .deploy: {}",
+                    path.display()
+                )
+            })?;
+            let bytes = copy_clickonce_deploy_payload(&path, &output)
+                .with_context(|| format!("clickonce-copy-deploy-payload {}", path.display()))?;
+            println!("content_name={content_name}");
+            println!("output={}", output.display());
+            println!("bytes={bytes}");
+        }
+        Command::ClickonceManifestHashes {
+            path,
+            base_directory,
+        } => {
+            let entries = clickonce_manifest_hashes(&path, base_directory.as_deref())
+                .with_context(|| format!("clickonce-manifest-hashes {}", path.display()))?;
+            println!("references={}", entries.len());
+            let mut mismatches = 0usize;
+            for entry in entries {
+                if entry.status() != "valid" {
+                    mismatches += 1;
+                }
+                println!(
+                    "path={} algorithm={} expected_size={} actual_size={} status={}",
+                    entry.path,
+                    hash_alg_label(entry.algorithm),
+                    entry
+                        .expected_size
+                        .map(|size| size.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    entry.actual_size,
+                    entry.status()
+                );
+                println!("expected_digest_b64={}", entry.expected_digest_b64);
+                println!("actual_digest_b64={}", entry.actual_digest_b64);
+            }
+            println!("mismatches={mismatches}");
+            if mismatches > 0 {
+                return Err(anyhow!(
+                    "ClickOnce manifest file hash verification failed ({mismatches} mismatch(es))"
+                ));
+            }
+        }
+        Command::ClickonceUpdateManifestHashes {
+            path,
+            base_directory,
+            algorithm,
+            output,
+        } => {
+            let updated =
+                update_clickonce_manifest_hashes(&path, base_directory.as_deref(), &output, algorithm)
+                    .with_context(|| {
+                        format!("clickonce-update-manifest-hashes {}", path.display())
+                    })?;
+            println!("output={}", output.display());
+            println!("updated={updated}");
+            println!("algorithm={}", hash_alg_label(algorithm));
+        }
+        Command::ClickonceSignManifest {
+            path,
+            digest,
+            cert,
+            key,
+            output,
+        } => {
+            let report = sign_clickonce_manifest_path(&path, &cert, &key, digest, &output)
+                .with_context(|| format!("clickonce-sign-manifest {}", path.display()))?;
+            println!("output={}", output.display());
+            println!("digest={:?}", report.digest);
+            println!("manifest_digest_b64={}", report.manifest_digest_b64);
+            println!("signature_len={}", report.signature_len);
+        }
+        Command::ClickonceSignManifestPrehash {
+            path,
+            digest,
+            encoding,
+            output,
+        } => {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
+            let unsigned = unsigned_clickonce_manifest_text(&text)?;
+            let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
+            let prehash = clickonce_signed_info_remote_prehash(digest, &signed_info);
+            write_digest_output(encoding, &prehash, output.as_deref())
+                .with_context(|| format!("clickonce-sign-manifest-prehash {}", path.display()))?;
+        }
+        Command::ClickonceSignManifestFromSignature {
+            path,
+            digest,
+            cert,
+            signature,
+            output,
+        } => {
+            let report = sign_clickonce_manifest_from_external_signature_path(
+                &path, &cert, &signature, digest, &output,
+            )
+            .with_context(|| {
+                format!(
+                    "clickonce-sign-manifest-from-signature {}",
+                    path.display()
+                )
+            })?;
+            println!("output={}", output.display());
+            println!("digest={:?}", report.digest);
+            println!("manifest_digest_b64={}", report.manifest_digest_b64);
+            println!("signature_len={}", report.signature_len);
+        }
+        Command::ClickonceVerifyManifestSignature {
+            path,
+            cert,
+            digest,
+            shared,
+        } => {
+            let report =
+                verify_clickonce_manifest_signature_path(&path, cert.as_deref(), digest, &shared)
+                    .with_context(|| {
+                        format!("clickonce-verify-manifest-signature {}", path.display())
+                    })?;
+            println!("clickonce-verify-manifest-signature: ok");
+            println!("digest={:?}", report.digest);
+            println!("manifest_digest_b64={}", report.manifest_digest_b64);
+            println!("manifest_digest_match=yes");
+            println!("signature_value_match=yes");
+            println!("signature_len={}", report.signature_len);
+            if trust_verify_args_present(&shared) {
+                println!("signer_trust_chain=yes");
+            }
+        }
         Command::CatalogSignerRs256Prehash {
             path,
             signer_index,
@@ -2979,6 +4876,191 @@ where
                 .with_context(|| format!("nupkg-digest {}", path.display()))?;
             write_digest_output(encoding, &digest, output.as_deref())?;
         }
+        Command::NupkgSignatureContent {
+            path,
+            algorithm,
+            output,
+        } => {
+            use std::io::Write;
+            let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
+                .with_context(|| format!("nupkg-signature-content {}", path.display()))?;
+            match output {
+                Some(path) => std::fs::write(&path, &content)
+                    .with_context(|| format!("write {}", path.display()))?,
+                None => std::io::stdout()
+                    .write_all(&content)
+                    .context("write NuGet signature content to stdout")?,
+            }
+        }
+        Command::NupkgSignaturePkcs7 {
+            path,
+            algorithm,
+            cert,
+            key,
+            chain_certs,
+            timestamp_url,
+            timestamp_digest,
+            output,
+        } => {
+            let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
+                .with_context(|| format!("nupkg-signature-pkcs7 {}", path.display()))?;
+            let pkcs7 =
+                sign_pkcs7_id_data(&content, &cert, &key, chain_certs, algorithm.into())
+                    .with_context(|| {
+                        format!(
+                            "nupkg-signature-pkcs7 create CMS for {}",
+                            path.display()
+                        )
+                    })?;
+            let pkcs7 = timestamp_pkcs7_if_requested(
+                &pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "nupkg-signature-pkcs7",
+            )?;
+            std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("package_hash_algorithm={}", nuget_hash_alg_label(algorithm.into()));
+            println!("signature_len={}", pkcs7.len());
+        }
+        Command::NupkgSignaturePkcs7Prehash {
+            path,
+            algorithm,
+            encoding,
+            output,
+        } => {
+            let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
+                .with_context(|| {
+                    format!("nupkg-signature-pkcs7-prehash {}", path.display())
+                })?;
+            let prehash = pkcs7_id_data_remote_prehash(&content, algorithm.into())?;
+            write_digest_output(encoding, &prehash, output.as_deref())?;
+        }
+        Command::NupkgSignaturePkcs7FromSignature {
+            path,
+            algorithm,
+            cert,
+            chain_certs,
+            signature,
+            timestamp_url,
+            timestamp_digest,
+            output,
+        } => {
+            let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
+                .with_context(|| {
+                    format!(
+                        "nupkg-signature-pkcs7-from-signature {}",
+                        path.display()
+                    )
+                })?;
+            let signature_bytes = std::fs::read(&signature)
+                .with_context(|| format!("read {}", signature.display()))?;
+            let pkcs7 = sign_pkcs7_id_data_with_external_signature(
+                &content,
+                &cert,
+                chain_certs,
+                algorithm.into(),
+                &signature_bytes,
+            )
+            .with_context(|| {
+                format!(
+                    "nupkg-signature-pkcs7-from-signature create CMS for {}",
+                    path.display()
+                )
+            })?;
+            let pkcs7 = timestamp_pkcs7_if_requested(
+                &pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "nupkg-signature-pkcs7-from-signature",
+            )?;
+            std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("package_hash_algorithm={}", nuget_hash_alg_label(algorithm.into()));
+            println!("signature_len={}", pkcs7.len());
+        }
+        Command::NupkgSign {
+            path,
+            algorithm,
+            cert,
+            key,
+            chain_certs,
+            timestamp_url,
+            timestamp_digest,
+            output,
+            overwrite,
+        } => {
+            let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
+                .with_context(|| format!("nupkg-sign {}", path.display()))?;
+            let pkcs7 =
+                sign_pkcs7_id_data(&content, &cert, &key, chain_certs, algorithm.into())
+                    .with_context(|| {
+                        format!("nupkg-sign create CMS for {}", path.display())
+                    })?;
+            let pkcs7 = timestamp_pkcs7_if_requested(
+                &pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "nupkg-sign",
+            )?;
+            nuget::embed_signature_path(&path, &output, &pkcs7, overwrite)
+                .with_context(|| format!("nupkg-sign embed signature into {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("package_hash_algorithm={}", nuget_hash_alg_label(algorithm.into()));
+            println!("embedded_signature={}", nuget::PACKAGE_SIGNATURE_FILE_NAME);
+            println!("signature_len={}", pkcs7.len());
+        }
+        Command::NupkgVerifySignatureContent { path, content } => {
+            let content_bytes =
+                std::fs::read(&content).with_context(|| format!("read {}", content.display()))?;
+            let parsed = nuget::verify_unsigned_package_signature_content_path(&path, &content_bytes)
+                .with_context(|| format!("nupkg-verify-signature-content {}", path.display()))?;
+            println!(
+                "package_hash_algorithm={}",
+                nuget_hash_alg_label(parsed.hash_algorithm)
+            );
+            println!("package_hash={}", hex_lower(&parsed.package_hash));
+            println!("package_hash_match=yes");
+        }
+        Command::NupkgVerifySignature {
+            path,
+            algorithm,
+            shared,
+        } => {
+            let alg = algorithm.into();
+            let signature_der = nuget::extract_signature_path(&path)
+                .with_context(|| format!("nupkg-verify-signature {}", path.display()))?;
+            let content = nuget::signed_package_signature_content_path(&path, alg)
+                .with_context(|| format!("nupkg-verify-signature {}", path.display()))?;
+            let parsed = nuget::parse_signature_content(&content)
+                .context("parse reconstructed NuGet signature content")?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = trust_verify_detached_bytes(&content, &signature_der, &opts)
+                .with_context(|| format!("nupkg-verify-signature {}", path.display()))?;
+            print_trust_ok("nupkg-verify-signature", &report);
+            println!("signature_present=yes");
+            println!("package_hash_algorithm={}", nuget_hash_alg_label(alg));
+            println!("package_hash={}", hex_lower(&parsed.package_hash));
+            println!("package_hash_match=yes");
+            println!("signature_len={}", signature_der.len());
+        }
+        Command::NupkgEmbedSignature {
+            path,
+            signature,
+            output,
+            overwrite,
+        } => {
+            let signature_der =
+                std::fs::read(&signature).with_context(|| format!("read {}", signature.display()))?;
+            nuget::embed_signature_path(&path, &output, &signature_der, overwrite)
+                .with_context(|| format!("nupkg-embed-signature {}", path.display()))?;
+            println!(
+                "embedded_signature={}\noutput={}\nsignature_len={}",
+                nuget::PACKAGE_SIGNATURE_FILE_NAME,
+                output.display(),
+                signature_der.len()
+            );
+        }
         Command::VsixSignatureInfo { path } => {
             let info = vsix::inspect_vsix_path(&path)
                 .with_context(|| format!("vsix-signature-info {}", path.display()))?;
@@ -2999,6 +5081,382 @@ where
                 println!("signature_part={part}");
             }
             println!("entries={}", info.package.entries.len());
+        }
+        Command::VsixEmbedSignatureXml {
+            path,
+            signature_xml,
+            output,
+            overwrite,
+        } => {
+            let xml = std::fs::read(&signature_xml)
+                .with_context(|| format!("read {}", signature_xml.display()))?;
+            vsix::embed_signature_xml_path(&path, &output, &xml, overwrite)
+                .with_context(|| format!("vsix-embed-signature-xml {}", path.display()))?;
+            println!(
+                "embedded_signature_xml={}\noutput={}\nsignature_xml_len={}",
+                vsix::DEFAULT_VSIX_SIGNATURE_PART,
+                output.display(),
+                xml.len()
+            );
+        }
+        Command::VsixSignatureReferenceXml {
+            path,
+            algorithm,
+            output,
+        } => {
+            use std::io::Write;
+            let xml = vsix::signature_reference_xml_path(&path, algorithm.into())
+                .with_context(|| format!("vsix-signature-reference-xml {}", path.display()))?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &xml).with_context(|| format!("write {}", path.display()))?
+                }
+                None => std::io::stdout()
+                    .write_all(&xml)
+                    .context("write VSIX signature reference XML to stdout")?,
+            }
+        }
+        Command::VsixSignatureXml {
+            path,
+            algorithm,
+            cert,
+            key,
+            output,
+        } => {
+            use std::io::Write;
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+            rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let key_bytes =
+                std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+            let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                .with_context(|| format!("parse RSA private key {}", key.display()))?;
+            let signed_info = vsix::signed_info_xml_path(&path, algorithm)
+                .with_context(|| format!("vsix-signature-xml {}", path.display()))?;
+            let signature = sign_xml_signed_info(algorithm, private_key, &signed_info)?;
+            let xml = vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
+                .into_bytes();
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &xml).with_context(|| format!("write {}", path.display()))?
+                }
+                None => std::io::stdout()
+                    .write_all(&xml)
+                    .context("write VSIX signature XML to stdout")?,
+            }
+        }
+        Command::VsixSignatureXmlPrehash {
+            path,
+            algorithm,
+            encoding,
+            output,
+        } => {
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let signed_info = vsix::signed_info_xml_path(&path, algorithm)
+                .with_context(|| format!("vsix-signature-xml-prehash {}", path.display()))?;
+            let prehash = xml_signed_info_remote_prehash(algorithm, &signed_info);
+            write_digest_output(encoding, &prehash, output.as_deref())?;
+        }
+        Command::VsixSignatureXmlFromSignature {
+            path,
+            algorithm,
+            cert,
+            signature,
+            output,
+        } => {
+            use std::io::Write;
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let cert_bytes =
+                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+            rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let signature_bytes = std::fs::read(&signature)
+                .with_context(|| format!("read {}", signature.display()))?;
+            let signed_info = vsix::signed_info_xml_path(&path, algorithm).with_context(|| {
+                format!("vsix-signature-xml-from-signature {}", path.display())
+            })?;
+            let xml =
+                vsix::signature_xml_from_signed_info(&signed_info, &signature_bytes, Some(&cert_bytes))
+                    .into_bytes();
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, &xml).with_context(|| format!("write {}", path.display()))?
+                }
+                None => std::io::stdout()
+                    .write_all(&xml)
+                    .context("write VSIX signature XML to stdout")?,
+            }
+        }
+        Command::VsixSign {
+            path,
+            algorithm,
+            cert,
+            key,
+            output,
+            overwrite,
+        } => {
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+            rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let key_bytes =
+                std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+            let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                .with_context(|| format!("parse RSA private key {}", key.display()))?;
+            let signed_info = vsix::signed_info_xml_path(&path, algorithm)
+                .with_context(|| format!("vsix-sign {}", path.display()))?;
+            let signature = sign_xml_signed_info(algorithm, private_key, &signed_info)?;
+            let xml =
+                vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
+                    .into_bytes();
+            vsix::embed_signature_xml_path(&path, &output, &xml, overwrite)
+                .with_context(|| format!("vsix-sign embed signature XML into {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("signature_xml_part={}", vsix::DEFAULT_VSIX_SIGNATURE_PART);
+            println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
+            println!("signature_xml_len={}", xml.len());
+        }
+        Command::VsixVerifySignatureReferenceXml {
+            path,
+            signature_xml,
+            algorithm,
+        } => {
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let xml = std::fs::read(&signature_xml)
+                .with_context(|| format!("read {}", signature_xml.display()))?;
+            let references = vsix::verify_signature_reference_xml_path(&path, &xml, algorithm)
+                .with_context(|| {
+                    format!(
+                        "vsix-verify-signature-reference-xml {}",
+                        path.display()
+                    )
+                })?;
+            println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
+            println!("reference_count={references}");
+            println!("reference_digest_match=yes");
+        }
+        Command::VsixVerifySignatureXml {
+            path,
+            signature_xml,
+            cert,
+            algorithm,
+            shared,
+        } => {
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let xml = std::fs::read(&signature_xml)
+                .with_context(|| format!("read {}", signature_xml.display()))?;
+            let references = vsix::verify_signature_reference_xml_path(&path, &xml, algorithm)
+                .with_context(|| format!("vsix-verify-signature-xml {}", path.display()))?;
+            let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let signed_info = vsix::signed_info_xml_from_signature_xml(&xml)?;
+            let signature = vsix::signature_value_from_signature_xml(&xml)?;
+            verify_xml_signed_info(algorithm, &signer_cert, &signed_info, &signature)?;
+            let trust_anchor_count = if trust_verify_args_present(&shared) {
+                Some(verify_xml_signer_certificate_trust(&cert_bytes, &shared)?)
+            } else {
+                None
+            };
+            println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
+            println!("reference_count={references}");
+            println!("reference_digest_match=yes");
+            println!("signature_value_match=yes");
+            if let Some(count) = trust_anchor_count {
+                println!("signer_trust_chain=yes");
+                println!("trust_anchor_count={count}");
+            }
+        }
+        Command::VsixVerifySignature {
+            path,
+            cert,
+            algorithm,
+            shared,
+        } => {
+            let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
+            let xml = vsix::extract_signature_xml_path(&path)
+                .with_context(|| format!("vsix-verify-signature {}", path.display()))?;
+            let references = vsix::verify_signature_reference_xml_path(&path, &xml, algorithm)
+                .with_context(|| format!("vsix-verify-signature {}", path.display()))?;
+            let cert_bytes = match cert {
+                Some(cert) => std::fs::read(&cert)
+                    .with_context(|| format!("read {}", cert.display()))?,
+                None => vsix::signer_certificate_from_signature_xml(&xml)
+                    .context("read embedded VSIX signer certificate")?,
+            };
+            let signer_cert =
+                rdp::parse_certificate(&cert_bytes).context("parse VSIX signer certificate")?;
+            let signed_info = vsix::signed_info_xml_from_signature_xml(&xml)?;
+            let signature = vsix::signature_value_from_signature_xml(&xml)?;
+            verify_xml_signed_info(algorithm, &signer_cert, &signed_info, &signature)?;
+            let trust_anchor_count = if trust_verify_args_present(&shared) {
+                Some(verify_xml_signer_certificate_trust(&cert_bytes, &shared)?)
+            } else {
+                None
+            };
+            println!("vsix-verify-signature: ok");
+            println!("signature_xml_present=yes");
+            println!("signature_xml_part={}", vsix::DEFAULT_VSIX_SIGNATURE_PART);
+            println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
+            println!("reference_count={references}");
+            println!("reference_digest_match=yes");
+            println!("signature_value_match=yes");
+            if let Some(count) = trust_anchor_count {
+                println!("signer_trust_chain=yes");
+                println!("trust_anchor_count={count}");
+            }
+        }
+        Command::AppinstallerInfo { path, signature } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let info = parse_appinstaller_descriptor(&text)
+                .with_context(|| format!("appinstaller-info {}", path.display()))?;
+            println!("root={}", info.root);
+            println!("namespace={}", info.namespace.unwrap_or("-".to_string()));
+            println!(
+                "main_package={}",
+                if info.has_main_package { "yes" } else { "no" }
+            );
+            println!(
+                "main_bundle={}",
+                if info.has_main_bundle { "yes" } else { "no" }
+            );
+            println!("publisher={}", info.publisher.unwrap_or("-".to_string()));
+            if let Some(signature) = signature {
+                let metadata = std::fs::metadata(&signature)
+                    .with_context(|| format!("stat {}", signature.display()))?;
+                println!("companion_signature={}", signature.display());
+                println!("companion_signature_len={}", metadata.len());
+            } else {
+                println!("companion_signature=-");
+                println!("companion_signature_len=-");
+            }
+        }
+        Command::AppinstallerVerifyCompanion {
+            path,
+            signature,
+            shared,
+        } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            parse_appinstaller_descriptor(&text)
+                .with_context(|| format!("appinstaller-verify-companion {}", path.display()))?;
+            let sig_bytes = std::fs::read(&signature)
+                .with_context(|| format!("read {}", signature.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = trust_verify_detached_bytes(text.as_bytes(), &sig_bytes, &opts)
+                .with_context(|| format!("appinstaller-verify-companion {}", path.display()))?;
+            print_trust_ok("appinstaller-verify-companion", &report);
+        }
+        Command::AppinstallerSignCompanion {
+            path,
+            cert,
+            key,
+            chain_certs,
+            digest,
+            timestamp_url,
+            timestamp_digest,
+            output,
+        } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            parse_appinstaller_descriptor(&text)
+                .with_context(|| format!("appinstaller-sign-companion {}", path.display()))?;
+            let pkcs7 = sign_pkcs7_id_data(text.as_bytes(), &cert, &key, chain_certs, digest)
+                .with_context(|| {
+                    format!(
+                        "appinstaller-sign-companion create detached PKCS#7 for {}",
+                        path.display()
+                    )
+                })?;
+            let pkcs7 = timestamp_pkcs7_if_requested(
+                &pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "appinstaller-sign-companion",
+            )?;
+            std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("digest={digest:?}");
+            println!("companion_signature_len={}", pkcs7.len());
+        }
+        Command::AppinstallerSignCompanionPrehash {
+            path,
+            digest,
+            encoding,
+            output,
+        } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            parse_appinstaller_descriptor(&text)
+                .with_context(|| format!("appinstaller-sign-companion-prehash {}", path.display()))?;
+            let prehash = pkcs7_id_data_remote_prehash(text.as_bytes(), digest)?;
+            write_digest_output(encoding, &prehash, output.as_deref())?;
+        }
+        Command::AppinstallerSignCompanionFromSignature {
+            path,
+            cert,
+            chain_certs,
+            digest,
+            signature,
+            timestamp_url,
+            timestamp_digest,
+            output,
+        } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            parse_appinstaller_descriptor(&text).with_context(|| {
+                format!(
+                    "appinstaller-sign-companion-from-signature {}",
+                    path.display()
+                )
+            })?;
+            let signature_bytes = std::fs::read(&signature)
+                .with_context(|| format!("read {}", signature.display()))?;
+            let pkcs7 = sign_pkcs7_id_data_with_external_signature(
+                text.as_bytes(),
+                &cert,
+                chain_certs,
+                digest,
+                &signature_bytes,
+            )
+            .with_context(|| {
+                format!(
+                    "appinstaller-sign-companion-from-signature create detached PKCS#7 for {}",
+                    path.display()
+                )
+            })?;
+            let pkcs7 = timestamp_pkcs7_if_requested(
+                &pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "appinstaller-sign-companion-from-signature",
+            )?;
+            std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("digest={digest:?}");
+            println!("companion_signature_len={}", pkcs7.len());
+        }
+        Command::AppinstallerSetPublisher {
+            path,
+            publisher,
+            output,
+        } => {
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let updated = update_appinstaller_publisher(&text, &publisher)
+                .with_context(|| format!("appinstaller-set-publisher {}", path.display()))?;
+            std::fs::write(&output, updated).with_context(|| format!("write {}", output.display()))?;
+            println!("output={}", output.display());
+            println!("publisher={publisher}");
+        }
+        Command::BusinessCentralAppInfo { path } => {
+            let info = inspect_business_central_app(&path)
+                .with_context(|| format!("business-central-app-info {}", path.display()))?;
+            println!("business_central_app={}", if info.is_navx { "yes" } else { "no" });
+            println!("header={}", if info.is_navx { "NAVX" } else { "-" });
+            println!("len={}", info.len);
         }
     }
     Ok(())
