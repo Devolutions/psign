@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "psign_portable"
+name = "psign_core"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

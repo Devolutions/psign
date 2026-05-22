@@ -7,7 +7,7 @@ namespace Devolutions.Psign.PowerShell.Native;
 
 internal static unsafe class PsignNative
 {
-    private const string LibraryName = "psign_portable";
+    private const string LibraryName = "psign-core";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -17,12 +17,12 @@ internal static unsafe class PsignNative
 
     internal static PortableSignature GetSignature(PortableGetSignatureRequest request)
     {
-        return Invoke<PortableGetSignatureRequest, PortableSignature>(request, psign_portable_get_signature);
+        return Invoke<PortableGetSignatureRequest, PortableSignature>(request, psign_core_get_signature);
     }
 
     internal static PortableSignResponse Sign(PortableSignRequest request)
     {
-        return Invoke<PortableSignRequest, PortableSignResponse>(request, psign_portable_sign);
+        return Invoke<PortableSignRequest, PortableSignResponse>(request, psign_core_sign);
     }
 
     private delegate PsignFfiResult NativeCall(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
@@ -43,7 +43,7 @@ internal static unsafe class PsignNative
         }
         finally
         {
-            psign_portable_free(result.Json);
+            psign_core_free(result.Json);
         }
 
         if (result.StatusCode != 0)
@@ -70,13 +70,13 @@ internal static unsafe class PsignNative
     }
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern PsignFfiResult psign_portable_get_signature(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
+    private static extern PsignFfiResult psign_core_get_signature(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern PsignFfiResult psign_portable_sign(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
+    private static extern PsignFfiResult psign_core_sign(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern void psign_portable_free(PsignFfiBuffer buffer);
+    private static extern void psign_core_free(PsignFfiBuffer buffer);
 }
 
 [StructLayout(LayoutKind.Sequential)]

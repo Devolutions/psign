@@ -1,6 +1,6 @@
 # Portable PowerShell module
 
-`Devolutions.Psign` is a PowerShell 7.4 / .NET 8 binary module that exposes portable Authenticode cmdlets over the Rust `psign_portable` shared library. The module does not call `WinVerifyTrust`, `CryptUIWizDigitalSign`, `SignerSignEx`, or registered Windows SIP DLLs.
+`Devolutions.Psign` is a PowerShell 7.4 / .NET 8 binary module that exposes portable Authenticode cmdlets over the Rust `psign-core` shared library. The module does not call `WinVerifyTrust`, `CryptUIWizDigitalSign`, `SignerSignEx`, or registered Windows SIP DLLs.
 
 ## Cmdlets
 
@@ -70,4 +70,4 @@ pwsh -File .\PowerShell\tests\Invoke-PortableSignatureTests.ps1 -Configuration R
 pwsh -File .\PowerShell\package.ps1 -Configuration Release
 ```
 
-The build stages the native library under the module RID layout, for example `runtimes\win-x64\native\psign_portable.dll`, so .NET can load it via the module resolver. The package script validates the module manifest, publishes to a temporary local repository, saves the generated module package, imports it, and confirms both cmdlets are exported.
+The build stages the native library under the module RID layout, for example `runtimes\win-x64\native\psign-core.dll`, so .NET can load it via the module resolver. The package script validates the module manifest, publishes to a temporary local repository, saves the generated module package, imports it, and confirms both cmdlets are exported.

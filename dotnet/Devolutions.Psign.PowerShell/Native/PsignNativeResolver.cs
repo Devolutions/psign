@@ -6,7 +6,7 @@ namespace Devolutions.Psign.PowerShell.Native;
 
 internal static class PsignNativeResolver
 {
-    private const string LibraryName = "psign_portable";
+    private const string LibraryName = "psign-core";
 
     [ModuleInitializer]
     internal static void Register()
@@ -29,7 +29,7 @@ internal static class PsignNativeResolver
         if (!File.Exists(nativePath))
         {
             throw new DllNotFoundException(
-                $"Could not find psign portable native library for RID '{rid}'. Expected '{nativePath}'.");
+                $"Could not find psign core native library for RID '{rid}'. Expected '{nativePath}'.");
         }
 
         return NativeLibrary.Load(nativePath, assembly, searchPath);
@@ -55,15 +55,15 @@ internal static class PsignNativeResolver
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return "psign_portable.dll";
+            return "psign-core.dll";
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            return "libpsign_portable.dylib";
+            return "libpsign-core.dylib";
         }
 
-        return "libpsign_portable.so";
+        return "libpsign-core.so";
     }
 
     private static string GetCurrentRid()

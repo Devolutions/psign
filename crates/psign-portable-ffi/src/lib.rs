@@ -28,18 +28,18 @@ pub struct PsignFfiResult {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn psign_portable_version() -> PsignFfiResult {
+pub extern "C" fn psign_core_version() -> PsignFfiResult {
     ok_json(&version())
 }
 
-/// Free a buffer returned by another `psign_portable_*` function.
+/// Free a buffer returned by another `psign_core_*` function.
 ///
 /// # Safety
 ///
 /// `buffer` must be a `PsignFfiBuffer` returned by this library and must not have
 /// been freed already. Passing any other pointer, length, or capacity is undefined behavior.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn psign_portable_free(buffer: PsignFfiBuffer) {
+pub unsafe extern "C" fn psign_core_free(buffer: PsignFfiBuffer) {
     if buffer.ptr.is_null() {
         return;
     }
@@ -56,9 +56,9 @@ pub unsafe extern "C" fn psign_portable_free(buffer: PsignFfiBuffer) {
 /// # Safety
 ///
 /// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
-/// of the call. The returned buffer must be released with `psign_portable_free`.
+/// of the call. The returned buffer must be released with `psign_core_free`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn psign_portable_get_signature(
+pub unsafe extern "C" fn psign_core_get_signature(
     request_json_ptr: *const u8,
     request_json_len: usize,
 ) -> PsignFfiResult {
@@ -70,9 +70,9 @@ pub unsafe extern "C" fn psign_portable_get_signature(
 /// # Safety
 ///
 /// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
-/// of the call. The returned buffer must be released with `psign_portable_free`.
+/// of the call. The returned buffer must be released with `psign_core_free`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn psign_portable_sign(
+pub unsafe extern "C" fn psign_core_sign(
     request_json_ptr: *const u8,
     request_json_len: usize,
 ) -> PsignFfiResult {
@@ -169,13 +169,13 @@ mod tests {
     unsafe fn result_json(result: PsignFfiResult) -> String {
         let slice = unsafe { std::slice::from_raw_parts(result.json.ptr, result.json.len) };
         let text = std::str::from_utf8(slice).expect("utf-8").to_owned();
-        unsafe { psign_portable_free(result.json) };
+        unsafe { psign_core_free(result.json) };
         text
     }
 
     #[test]
     fn version_returns_json() {
-        let result = psign_portable_version();
+        let result = psign_core_version();
         assert_eq!(result.status_code, STATUS_OK);
         let json = unsafe { result_json(result) };
         assert!(json.contains("psign-portable-core"));
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn invalid_json_returns_structured_error() {
         let request = b"{not json";
-        let result = unsafe { psign_portable_get_signature(request.as_ptr(), request.len()) };
+        let result = unsafe { psign_core_get_signature(request.as_ptr(), request.len()) };
         assert_eq!(result.status_code, STATUS_INVALID_REQUEST);
         let json = unsafe { result_json(result) };
         assert!(json.contains("InvalidRequest"));

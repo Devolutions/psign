@@ -29,17 +29,27 @@ try {
         default { $_.ToString().ToLowerInvariant() }
     }
     $rid = "$rid-$arch"
-    $nativeName = if ($IsWindows) {
-        'psign_portable.dll'
+    $cargoNativeName = if ($IsWindows) {
+        'psign_core.dll'
     } elseif ($IsMacOS) {
-        'libpsign_portable.dylib'
+        'libpsign_core.dylib'
     } else {
-        'libpsign_portable.so'
+        'libpsign_core.so'
+    }
+    $nativeName = if ($IsWindows) {
+        'psign-core.dll'
+    } elseif ($IsMacOS) {
+        'libpsign-core.dylib'
+    } else {
+        'libpsign-core.so'
     }
     $profileDir = if ($Configuration -eq 'Release') { 'release' } else { 'debug' }
-    $nativeSource = Join-Path (Join-Path (Join-Path $repo 'target') $profileDir) $nativeName
+    $nativeSource = Join-Path (Join-Path (Join-Path $repo 'target') $profileDir) $cargoNativeName
     $nativeOut = Join-Path (Join-Path (Join-Path $moduleRoot 'runtimes') $rid) 'native'
     New-Item -ItemType Directory -Force -Path $nativeOut | Out-Null
+    foreach ($staleName in @('psign_portable.dll', 'libpsign_portable.dylib', 'libpsign_portable.so')) {
+        Remove-Item -LiteralPath (Join-Path $nativeOut $staleName) -Force -ErrorAction SilentlyContinue
+    }
     Copy-Item -Force -Path $nativeSource -Destination (Join-Path $nativeOut $nativeName)
 }
 finally {
