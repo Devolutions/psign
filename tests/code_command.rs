@@ -233,6 +233,39 @@ fn code_signs_nupkg_with_portable_cert_store_identity() {
 }
 
 #[test]
+fn code_signs_nupkg_with_pfx_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let pfx = base.join("signer.pfx");
+    let input = base.join("sample.nupkg");
+    let output = base.join("signed-pfx.nupkg");
+    write_test_rsa_pfx(&pfx, "secret");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/sample.nupkg"),
+        &input,
+    )
+    .unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--pfx")
+        .arg(&pfx)
+        .args(["--password", "secret", "--output"])
+        .arg(&output)
+        .arg("sample.nupkg");
+    cmd.assert().success();
+
+    let mut info = psign();
+    info.args(["portable", "nupkg-signature-info"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"));
+}
+
+#[test]
 fn code_signs_top_level_pe_with_local_cert_key() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
@@ -1953,6 +1986,52 @@ fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
 
 fn write_test_rsa_cert_key_and_pem(cert_path: &Path, key_path: &Path, pem_path: &Path) {
     write_test_rsa_cert_key_inner(cert_path, key_path, Some(pem_path));
+}
+
+fn write_test_rsa_pfx(pfx_path: &Path, password: &str) {
+    use picky::key::PrivateKey;
+    use picky::pkcs12::{
+        Pfx, Pkcs12CryptoContext, Pkcs12HashAlgorithm, Pkcs12MacAlgorithmHmac, SafeBag,
+        SafeContents,
+    };
+    use picky::x509::Cert;
+
+    let private_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa private key");
+    let signing_key = SigningKey::<Sha256>::new(private_key.clone());
+    let subject = Name::from_str("CN=psign code pfx orchestrator test").expect("subject name");
+    let spki = SubjectPublicKeyInfoOwned::from_key(signing_key.verifying_key())
+        .expect("subject public key info");
+    let builder = CertificateBuilder::new(
+        Profile::Root,
+        SerialNumber::from(85u32),
+        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        subject,
+        spki,
+        &signing_key,
+    )
+    .expect("certificate builder");
+    let cert = builder
+        .build::<rsa::pkcs1v15::Signature>()
+        .expect("self-signed certificate");
+    let key_der = private_key
+        .to_pkcs8_der()
+        .expect("PKCS#8 private key")
+        .as_bytes()
+        .to_vec();
+    let key = PrivateKey::from_pkcs8(&key_der).expect("picky private key");
+    let cert = Cert::from_der(&cert.to_der().expect("certificate DER")).expect("picky cert");
+    let cert_bag = SafeBag::new_certificate(cert, vec![]).expect("cert bag");
+    let key_bag = SafeBag::new_key(key, vec![]).expect("key bag");
+    let mut context = Pkcs12CryptoContext::new_with_password(password).expect("PFX context");
+    let pfx = Pfx::new_with_hmac(
+        vec![SafeContents::new(vec![cert_bag, key_bag])],
+        Pkcs12MacAlgorithmHmac::new(Pkcs12HashAlgorithm::Sha256),
+        &mut context,
+    )
+    .expect("PFX")
+    .to_der()
+    .expect("PFX DER");
+    std::fs::write(pfx_path, pfx).expect("write PFX");
 }
 
 fn write_test_rsa_cert_key_inner(cert_path: &Path, key_path: &Path, pem_path: Option<&Path>) {

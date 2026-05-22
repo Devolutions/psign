@@ -1752,6 +1752,14 @@ fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
         });
     }
 
+    if let Some(pfx) = args.pfx.as_deref() {
+        let bytes = std::fs::read(pfx).with_context(|| format!("read PFX '{}'", pfx.display()))?;
+        let password = args.password.as_deref().unwrap_or("");
+        let (cert_der, key_pem) = crate::cert_store::load_pfx_cert_and_key(&bytes, password)
+            .with_context(|| format!("extract signer identity from PFX '{}'", pfx.display()))?;
+        return write_temp_signer_material(cert_der, key_pem.into_bytes());
+    }
+
     if let Some(sha1) = args.cert_sha1.as_deref() {
         let identity = crate::cert_store::resolve_signing_identity(
             args.cert_store_dir.as_deref(),
@@ -1759,25 +1767,29 @@ fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
             &args.store_name,
             sha1,
         )?;
-        let dir = unique_code_signer_temp_dir()?;
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create signer material temp directory {}", dir.display()))?;
-        let cert = dir.join("signer.der");
-        let key = dir.join("signer.key");
-        std::fs::write(&cert, identity.cert_der)
-            .with_context(|| format!("write temporary signer certificate {}", cert.display()))?;
-        std::fs::write(&key, identity.key_pem)
-            .with_context(|| format!("write temporary signer key {}", key.display()))?;
-        return Ok(CodeSignerPaths {
-            cert,
-            key,
-            temp_dir: Some(dir),
-        });
+        return write_temp_signer_material(identity.cert_der, identity.key_pem);
     }
 
     Err(anyhow!(
-        "`psign-tool code` signing execution currently requires --cert and --key or a portable cert-store --sha1 identity"
+        "`psign-tool code` signing execution currently requires --cert and --key, --pfx, or a portable cert-store --sha1 identity"
     ))
+}
+
+fn write_temp_signer_material(cert_der: Vec<u8>, key_pem: Vec<u8>) -> Result<CodeSignerPaths> {
+    let dir = unique_code_signer_temp_dir()?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create signer material temp directory {}", dir.display()))?;
+    let cert = dir.join("signer.der");
+    let key = dir.join("signer.key");
+    std::fs::write(&cert, cert_der)
+        .with_context(|| format!("write temporary signer certificate {}", cert.display()))?;
+    std::fs::write(&key, key_pem)
+        .with_context(|| format!("write temporary signer key {}", key.display()))?;
+    Ok(CodeSignerPaths {
+        cert,
+        key,
+        temp_dir: Some(dir),
+    })
 }
 
 fn unique_code_signer_temp_dir() -> Result<PathBuf> {

@@ -132,7 +132,7 @@ pub struct CodeArgs {
         long,
         value_name = "PATH",
         requires = "key",
-        conflicts_with = "cert_sha1"
+        conflicts_with_all = ["cert_sha1", "pfx"]
     )]
     pub cert: Option<PathBuf>,
     /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM for initial local package signing execution.
@@ -140,11 +140,22 @@ pub struct CodeArgs {
         long,
         value_name = "PATH",
         requires = "cert",
-        conflicts_with = "cert_sha1"
+        conflicts_with_all = ["cert_sha1", "pfx"]
     )]
     pub key: Option<PathBuf>,
+    /// PFX/PKCS#12 signer identity for local package signing execution.
+    #[arg(
+        long,
+        visible_alias = "f",
+        value_name = "PATH",
+        conflicts_with = "cert_sha1"
+    )]
+    pub pfx: Option<PathBuf>,
+    /// Optional password for the PFX/PKCS#12 signer identity.
+    #[arg(long, visible_alias = "p", requires = "pfx")]
+    pub password: Option<String>,
     /// Resolve a local portable cert-store signing identity by SHA-1 thumbprint.
-    #[arg(long = "sha1", visible_alias = "cert-sha1")]
+    #[arg(long = "sha1", visible_alias = "cert-sha1", conflicts_with = "pfx")]
     pub cert_sha1: Option<String>,
     /// Portable certificate store base directory for `--sha1`.
     #[arg(long)]

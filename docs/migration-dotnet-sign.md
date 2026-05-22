@@ -10,8 +10,8 @@
 |---------------------|--------------|---------------|
 | Expand files, file lists, `!` excludes, braces, ranges, and recursive globs | Implemented for dry-run planning | `psign-tool code --dry-run --plan-json --base-directory . --file-list files.txt` |
 | Nested package graph / inside-out ordering | Implemented for dry-run planning across ZIP/OPC containers | `psign-tool code --dry-run --plan-json package.vsix` |
-| Top-level NuGet/VSIX/App Installer local execution | Implemented for local cert/key or portable cert-store SHA-1 identity plus explicit output | `psign-tool code --cert signer.der --key signer.pkcs8 --output signed.nupkg package.nupkg`, `psign-tool code --cert-store-dir .psign-store --sha1 <thumbprint> --output signed.nupkg package.nupkg` |
-| Authenticode PE/WinMD execution | Implemented for top-level and nested PE/WinMD with local cert/key or portable cert-store SHA-1 identity | `psign-tool code --cert signer.der --key signer.pkcs8 --output signed.exe app.exe` |
+| Top-level NuGet/VSIX/App Installer local execution | Implemented for local cert/key, PFX, or portable cert-store SHA-1 identity plus explicit output | `psign-tool code --cert signer.der --key signer.pkcs8 --output signed.nupkg package.nupkg`, `psign-tool code --pfx signer.pfx --password pfx-password --output signed.nupkg package.nupkg`, `psign-tool code --cert-store-dir .psign-store --sha1 <thumbprint> --output signed.nupkg package.nupkg` |
+| Authenticode PE/WinMD execution | Implemented for top-level and nested PE/WinMD with local cert/key, PFX, or portable cert-store SHA-1 identity | `psign-tool code --cert signer.der --key signer.pkcs8 --output signed.exe app.exe` |
 | Package-native nested execution | Implemented for VSIX/ZIP -> NuGet/VSIX -> PE/WinMD inside-out signing without unsupported non-PE inner Authenticode payloads | `psign-tool code --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix` |
 | Continue after top-level errors | Implemented for `code` execution | `psign-tool code --continue-on-error --output signed-dir ...` |
 | Independent top-level concurrency | Implemented for `code` execution | `psign-tool code --max-concurrency 4 --output signed-dir ...` |
@@ -60,6 +60,7 @@ Use guarded local execution for package-native inputs while broader Authenticode
 
 ```sh
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.nupkg package.nupkg
+psign-tool code --base-directory . --pfx signer.pfx --password pfx-password --output signed.nupkg package.nupkg
 psign-tool code --base-directory . --cert-store-dir .psign-store --sha1 <thumbprint> --output signed.nupkg package.nupkg
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix
 psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
