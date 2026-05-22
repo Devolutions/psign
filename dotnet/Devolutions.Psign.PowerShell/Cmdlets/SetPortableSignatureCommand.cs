@@ -316,16 +316,10 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         string? password = Password is null ? null : SecureStringToString(Password);
         try
         {
-            X509KeyStorageFlags flags = X509KeyStorageFlags.Exportable;
-            if (!OperatingSystem.IsMacOS())
-            {
-                flags |= X509KeyStorageFlags.EphemeralKeySet;
-            }
-
             pfxCertificate = new X509Certificate2(
                 resolved,
                 password,
-                flags);
+                X509KeyStorageFlags.Exportable);
             return pfxCertificate;
         }
         finally
