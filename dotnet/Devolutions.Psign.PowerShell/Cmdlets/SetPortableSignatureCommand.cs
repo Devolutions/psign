@@ -64,7 +64,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
 
     [Parameter]
     [ValidateSet("Signer", "NotRoot", "All")]
-    public string IncludeChain { get; set; } = "Signer";
+    public string IncludeChain { get; set; } = "NotRoot";
 
     [Parameter]
     public string[] ChainCertificatePath { get; set; } = [];
@@ -387,9 +387,19 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             return [];
         }
 
-        return ChainCertificatePath
-            .Select(path => SessionState.Path.GetUnresolvedProviderPathFromPSPath(path))
-            .ToArray();
+        List<string> paths = [];
+        foreach (string path in ChainCertificatePath)
+        {
+            string resolved = SessionState.Path.GetUnresolvedProviderPathFromPSPath(path);
+            using X509Certificate2 chainCertificate = new(resolved);
+            if (IncludeChain.Equals("NotRoot", StringComparison.OrdinalIgnoreCase)
+                && IsSelfSigned(chainCertificate))
+            {
+                continue;
+            }
+            paths.Add(resolved);
+        }
+        return paths.ToArray();
     }
 
     private string[] GetChainCertificatesDerBase64()

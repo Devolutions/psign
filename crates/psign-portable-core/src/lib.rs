@@ -331,7 +331,9 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
         "msix" | "appx" | "msixbundle" | "appxbundle" => PortableFileFormat::Msix,
         "cat" => PortableFileFormat::Catalog,
         "zip" | "vsix" | "nupkg" => PortableFileFormat::Zip,
-        "ps1" | "psm1" | "psd1" | "ps1xml" => PortableFileFormat::PowerShellScript,
+        "ps1" | "psm1" | "psd1" | "ps1xml" | "psc1" | "cdxml" | "mof" => {
+            PortableFileFormat::PowerShellScript
+        }
         "vbs" | "js" | "wsf" => PortableFileFormat::WshScript,
         _ => PortableFileFormat::Unknown,
     }
@@ -502,8 +504,13 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
         .and_then(|e| e.to_str())
         .unwrap_or("ps1")
         .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "ps1" | "psd1" | "psm1") {
-        bail!("portable script signing currently supports ps1, psd1, and psm1 hash-marker scripts");
+    if !matches!(
+        ext.as_str(),
+        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof"
+    ) {
+        bail!(
+            "portable script signing supports ps1, psd1, psm1, ps1xml, psc1, cdxml, and mof scripts"
+        );
     }
 
     let script =
@@ -524,7 +531,7 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
     })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
-    let block = format_powershell_signature_block(&pkcs7);
+    let block = format_powershell_signature_block(&pkcs7, &ext);
     let mut signed = script;
     signed.extend_from_slice(block.as_bytes());
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
@@ -1446,15 +1453,35 @@ fn xml_escape_attr(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn format_powershell_signature_block(pkcs7_der: &[u8]) -> String {
+fn format_powershell_signature_block(pkcs7_der: &[u8], extension: &str) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(pkcs7_der);
-    let mut block = String::from("\r\n# SIG # Begin signature block\r\n");
+    let (begin, line_prefix, line_suffix, end) = match extension.to_ascii_lowercase().as_str() {
+        "ps1xml" | "psc1" | "cdxml" => (
+            "\r\n<!-- SIG # Begin signature block -->\r\n",
+            "<!-- ",
+            " -->\r\n",
+            "<!-- SIG # End signature block -->\r\n",
+        ),
+        "mof" => (
+            "\r\n/* SIG # Begin signature block */\r\n",
+            "/* ",
+            " */\r\n",
+            "/* SIG # End signature block */\r\n",
+        ),
+        _ => (
+            "\r\n# SIG # Begin signature block\r\n",
+            "# ",
+            "\r\n",
+            "# SIG # End signature block\r\n",
+        ),
+    };
+    let mut block = String::from(begin);
     for chunk in b64.as_bytes().chunks(64) {
-        block.push_str("# ");
+        block.push_str(line_prefix);
         block.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-        block.push_str("\r\n");
+        block.push_str(line_suffix);
     }
-    block.push_str("# SIG # End signature block\r\n");
+    block.push_str(end);
     block
 }
 
@@ -1482,9 +1509,43 @@ mod tests {
             PortableFileFormat::PowerShellScript
         );
         assert_eq!(
+            infer_format(Path::new("types.ps1xml")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
+            infer_format(Path::new("console.psc1")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
+            infer_format(Path::new("module.cdxml")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
+            infer_format(Path::new("config.mof")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
             infer_format(Path::new("unknown.bin")),
             PortableFileFormat::Unknown
         );
+    }
+
+    #[test]
+    fn formats_script_signature_marker_family() {
+        let ps1_block = format_powershell_signature_block(b"abc", "ps1");
+        assert!(ps1_block.contains("# SIG # Begin signature block"));
+        assert!(ps1_block.contains("# YWJj"));
+        assert!(ps1_block.contains("# SIG # End signature block"));
+
+        let ps1xml_block = format_powershell_signature_block(b"abc", "ps1xml");
+        assert!(ps1xml_block.contains("<!-- SIG # Begin signature block -->"));
+        assert!(ps1xml_block.contains("<!-- YWJj -->"));
+        assert!(ps1xml_block.contains("<!-- SIG # End signature block -->"));
+
+        let mof_block = format_powershell_signature_block(b"abc", "mof");
+        assert!(mof_block.contains("/* SIG # Begin signature block */"));
+        assert!(mof_block.contains("/* YWJj */"));
+        assert!(mof_block.contains("/* SIG # End signature block */"));
     }
 
     #[test]

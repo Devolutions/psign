@@ -221,6 +221,12 @@ try {
 
     $chainWork = Join-Path $temp 'tiny-chain.exe'
     Copy-Item $unsigned $chainWork
+    $defaultChainWork = Join-Path $temp 'tiny-chain-default.exe'
+    Copy-Item $unsigned $defaultChainWork
+    $defaultChainSigned = Set-PortableSignature -LiteralPath $defaultChainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -ChainCertificatePath $chainCertPath
+    if ($defaultChainSigned.EmbeddedCertificateCount -ne 1) {
+        throw "Expected default IncludeChain NotRoot to exclude a self-signed root certificate, got $($defaultChainSigned.EmbeddedCertificateCount) embedded certificates."
+    }
     $chainSigned = Set-PortableSignature -LiteralPath $chainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -IncludeChain All -ChainCertificatePath $chainCertPath
     if ($chainSigned.EmbeddedCertificateCount -lt 2) {
         throw "Expected IncludeChain All with ChainCertificatePath to embed at least 2 certificates, got $($chainSigned.EmbeddedCertificateCount)."
@@ -291,6 +297,33 @@ param([string] $Name = "portable")
         throw "Expected HashMismatch for tampered signed script, got $($scriptTampered.Status): $($scriptTampered.StatusMessage)"
     }
 
+    $ps1xmlPath = Join-Path $temp 'Types.ps1xml'
+    Set-Content -LiteralPath $ps1xmlPath -Value @'
+<Types>
+  <Type>
+    <Name>Portable.Type</Name>
+  </Type>
+</Types>
+'@ -Encoding UTF8
+    $ps1xmlSigned = Set-PortableSignature -LiteralPath $ps1xmlPath -Certificate $cert
+    if ($ps1xmlSigned.Status -ne 'Valid') {
+        throw "Expected Valid for signed ps1xml, got $($ps1xmlSigned.Status): $($ps1xmlSigned.StatusMessage)"
+    }
+    Assert-SignerCertificate -Signature $ps1xmlSigned -ExpectedCertificate $cert -Label 'ps1xml signing response'
+    $ps1xmlText = Get-Content -LiteralPath $ps1xmlPath -Raw
+    if ($ps1xmlText -notmatch '<!-- SIG # Begin signature block -->') {
+        throw 'Expected signed ps1xml to use XML Authenticode signature markers.'
+    }
+    $ps1xmlAfter = Get-PortableSignature -LiteralPath $ps1xmlPath
+    if ($ps1xmlAfter.Status -ne 'Valid') {
+        throw "Expected Valid from Get-PortableSignature for signed ps1xml, got $($ps1xmlAfter.Status): $($ps1xmlAfter.StatusMessage)"
+    }
+    Add-Content -LiteralPath $ps1xmlPath -Value '<!-- tamper -->'
+    $ps1xmlTampered = Get-PortableSignature -LiteralPath $ps1xmlPath
+    if ($ps1xmlTampered.Status -ne 'HashMismatch') {
+        throw "Expected HashMismatch for tampered signed ps1xml, got $($ps1xmlTampered.Status): $($ps1xmlTampered.StatusMessage)"
+    }
+
     $scriptContent = [System.Text.Encoding]::UTF8.GetBytes("'content mode'")
     $contentSigned = Set-PortableSignature -SourcePathOrExtension '.ps1' -Content $scriptContent -Certificate $cert
     if ($contentSigned.Status -ne 'Valid') {
@@ -335,10 +368,11 @@ param([string] $Name = "portable")
     New-Item -ItemType Directory -Force -Path $nestedDir | Out-Null
     Set-Content -LiteralPath (Join-Path $moduleDir 'PortableModule.psm1') -Value 'function Get-PortableGreeting { "hello" }' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $moduleDir 'PortableModule.psd1') -Value "@{ RootModule = 'PortableModule.psm1'; ModuleVersion = '1.0.0'; GUID = '$([System.Guid]::NewGuid())' }" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $moduleDir 'PortableModule.Types.ps1xml') -Value '<Types />' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $nestedDir 'Helper.ps1') -Value '$script:PortableHelper = $true' -Encoding UTF8
     $moduleSigned = @(Set-PortableSignature -LiteralPath $moduleDir -CertificatePath $certPath -PrivateKeyPath $keyPath)
-    if ($moduleSigned.Count -ne 3) {
-        throw "Expected 3 signed PowerShell module files, got $($moduleSigned.Count)."
+    if ($moduleSigned.Count -ne 4) {
+        throw "Expected 4 signed PowerShell module files, got $($moduleSigned.Count)."
     }
     if (@($moduleSigned | Where-Object Status -ne 'Valid').Count -ne 0) {
         throw "Expected all signed module files to be Valid, got: $($moduleSigned | ConvertTo-Json -Depth 4)"
@@ -347,8 +381,8 @@ param([string] $Name = "portable")
         Assert-SignerCertificate -Signature $moduleSignature -ExpectedCertificate $cert -Label "module signing response $($moduleSignature.Path)"
     }
     $moduleValidated = @(Get-PortableSignature -LiteralPath $moduleDir)
-    if ($moduleValidated.Count -ne 3) {
-        throw "Expected 3 validated PowerShell module files, got $($moduleValidated.Count)."
+    if ($moduleValidated.Count -ne 4) {
+        throw "Expected 4 validated PowerShell module files, got $($moduleValidated.Count)."
     }
     if (@($moduleValidated | Where-Object Status -ne 'Valid').Count -ne 0) {
         throw "Expected all validated module files to be Valid, got: $($moduleValidated | ConvertTo-Json -Depth 4)"

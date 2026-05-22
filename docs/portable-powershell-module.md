@@ -7,7 +7,7 @@
 - `Set-PortableSignature`
 - `Get-PortableSignature`
 
-Both cmdlets accept `-FilePath` and `-LiteralPath`. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes `.ps1`, `.psm1`, and `.psd1` files.
+Both cmdlets accept `-FilePath` and `-LiteralPath`. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes `.ps1`, `.psm1`, `.psd1`, and `.ps1xml` files.
 
 Both cmdlets also support the built-in Authenticode content parameter shape:
 
@@ -31,7 +31,7 @@ The P/Invoke ABI also accepts in-memory DER certificate and PKCS#8 private-key m
 
 The portable cert store follows the same layout as `psign-tool cert-store`: `<base>\<scope>\<store>\<SHA1>.der` plus `<SHA1>.key`, where scope is `CurrentUser` or `LocalMachine` and the private key is unencrypted PKCS#8 PEM. `-Thumbprint` has `-Sha1` and `-PortableStoreThumbprint` aliases. If `-CertStoreDirectory` is omitted, the module uses `PSIGN_CERT_STORE` and then `~\.psign\cert-store`.
 
-`Set-PortableSignature` supports `-IncludeChain Signer|NotRoot|All`, optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
+`Set-PortableSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
 
 ## Explicit trust
 
@@ -56,7 +56,7 @@ The current module tests cover signing and validation through the PowerShell sur
 - CAB archives
 - MSI/MSP installers
 - Devolutions ZIP Authenticode packages
-- PowerShell scripts
+- PowerShell scripts, including `.ps1xml` XML marker signatures
 - PowerShell module directories
 - MSIX/AppX packages
 

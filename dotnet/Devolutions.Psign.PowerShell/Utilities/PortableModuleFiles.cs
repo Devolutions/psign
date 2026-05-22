@@ -7,6 +7,7 @@ internal static class PortableModuleFiles
         ".ps1",
         ".psm1",
         ".psd1",
+        ".ps1xml",
     };
 
     internal static IReadOnlyList<string> Enumerate(string directory)
