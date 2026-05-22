@@ -4,7 +4,7 @@ use psign_opc_sign::nuget;
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::EncodePrivateKey;
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::signature::Keypair;
 use serde_json::Value;
 use sha2::Sha256;
@@ -167,6 +167,61 @@ fn code_signs_top_level_nupkg_with_local_cert_key() {
             "signed tests/fixtures/package-signing/unsigned/sample.nupkg",
         ))
         .stdout(predicate::str::contains(".signature.p7s"));
+
+    let mut info = psign();
+    info.args(["portable", "nupkg-signature-info"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"));
+}
+
+#[test]
+fn code_signs_nupkg_with_portable_cert_store_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let store = base.join("cert-store");
+    let cert = base.join("signer.der");
+    let key_der = base.join("signer.pkcs8");
+    let key_pem = base.join("signer.pem");
+    let input = base.join("sample.nupkg");
+    let output = base.join("signed-store.nupkg");
+    write_test_rsa_cert_key_and_pem(&cert, &key_der, &key_pem);
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/sample.nupkg"),
+        &input,
+    )
+    .unwrap();
+
+    let import = psign()
+        .args(["cert-store", "import", "--cert-store-dir"])
+        .arg(&store)
+        .arg("--key")
+        .arg(&key_pem)
+        .arg(&cert)
+        .output()
+        .expect("import cert-store identity");
+    assert!(
+        import.status.success(),
+        "cert-store import failed: {}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let import_stdout = String::from_utf8(import.stdout).unwrap();
+    let thumbprint = import_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("thumbprint_sha1="))
+        .expect("import reports thumbprint");
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--cert-store-dir")
+        .arg(&store)
+        .args(["--sha1", thumbprint, "--output"])
+        .arg(&output)
+        .arg("sample.nupkg");
+    cmd.assert().success();
 
     let mut info = psign();
     info.args(["portable", "nupkg-signature-info"])
@@ -1893,6 +1948,14 @@ fn repo_root() -> PathBuf {
 }
 
 fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
+    write_test_rsa_cert_key_inner(cert_path, key_path, None);
+}
+
+fn write_test_rsa_cert_key_and_pem(cert_path: &Path, key_path: &Path, pem_path: &Path) {
+    write_test_rsa_cert_key_inner(cert_path, key_path, Some(pem_path));
+}
+
+fn write_test_rsa_cert_key_inner(cert_path: &Path, key_path: &Path, pem_path: Option<&Path>) {
     let private_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa private key");
     let signing_key = SigningKey::<Sha256>::new(private_key.clone());
     let subject = Name::from_str("CN=psign code orchestrator test").expect("subject name");
@@ -1911,6 +1974,16 @@ fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
         .build::<rsa::pkcs1v15::Signature>()
         .expect("self-signed certificate");
     std::fs::write(cert_path, cert.to_der().expect("certificate DER")).expect("write cert");
+    if let Some(pem_path) = pem_path {
+        std::fs::write(
+            pem_path,
+            private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("PKCS#8 private key PEM")
+                .as_bytes(),
+        )
+        .expect("write key PEM");
+    }
     std::fs::write(
         key_path,
         private_key

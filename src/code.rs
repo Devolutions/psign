@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use x509_cert::der::{
     Encode as _,
     asn1::{ObjectIdentifier, OctetString},
@@ -192,16 +193,9 @@ pub fn build_code_plan(args: &CodeArgs) -> Result<CodePlan> {
 }
 
 fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> {
-    let Some(cert) = args.cert.as_deref() else {
-        return Err(anyhow!(
-            "`psign-tool code` signing execution currently requires --cert and --key for local package signing"
-        ));
-    };
-    let Some(key) = args.key.as_deref() else {
-        return Err(anyhow!(
-            "`psign-tool code` signing execution currently requires --cert and --key for local package signing"
-        ));
-    };
+    let signer = resolve_code_signer_paths(args)?;
+    let cert = signer.cert.as_path();
+    let key = signer.key.as_path();
     if args.output.is_none() {
         return Err(anyhow!(
             "`psign-tool code` signing execution currently requires --output to avoid in-place package mutation"
@@ -1727,6 +1721,71 @@ fn timestamp_digest_bytes(digest: DigestAlgorithm, bytes: &[u8]) -> Result<Vec<u
             "`psign-tool code` timestamping supports SHA-1, SHA-256, SHA-384, or SHA-512"
         )),
     }
+}
+
+struct CodeSignerPaths {
+    cert: PathBuf,
+    key: PathBuf,
+    temp_dir: Option<PathBuf>,
+}
+
+impl Drop for CodeSignerPaths {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.temp_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+fn resolve_code_signer_paths(args: &CodeArgs) -> Result<CodeSignerPaths> {
+    if args.cert.is_some() || args.key.is_some() {
+        let cert = args.cert.clone().ok_or_else(|| {
+            anyhow!("`psign-tool code` signing execution requires --cert with --key")
+        })?;
+        let key = args.key.clone().ok_or_else(|| {
+            anyhow!("`psign-tool code` signing execution requires --key with --cert")
+        })?;
+        return Ok(CodeSignerPaths {
+            cert,
+            key,
+            temp_dir: None,
+        });
+    }
+
+    if let Some(sha1) = args.cert_sha1.as_deref() {
+        let identity = crate::cert_store::resolve_signing_identity(
+            args.cert_store_dir.as_deref(),
+            args.machine_store,
+            &args.store_name,
+            sha1,
+        )?;
+        let dir = unique_code_signer_temp_dir()?;
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create signer material temp directory {}", dir.display()))?;
+        let cert = dir.join("signer.der");
+        let key = dir.join("signer.key");
+        std::fs::write(&cert, identity.cert_der)
+            .with_context(|| format!("write temporary signer certificate {}", cert.display()))?;
+        std::fs::write(&key, identity.key_pem)
+            .with_context(|| format!("write temporary signer key {}", key.display()))?;
+        return Ok(CodeSignerPaths {
+            cert,
+            key,
+            temp_dir: Some(dir),
+        });
+    }
+
+    Err(anyhow!(
+        "`psign-tool code` signing execution currently requires --cert and --key or a portable cert-store --sha1 identity"
+    ))
+}
+
+fn unique_code_signer_temp_dir() -> Result<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| anyhow!("system clock before Unix epoch: {e}"))?
+        .as_nanos();
+    Ok(std::env::temp_dir().join(format!("psign-code-signer-{}-{nanos}", std::process::id())))
 }
 
 fn nuget_hash_algorithm(digest: DigestAlgorithm) -> Result<nuget::NuGetHashAlgorithm> {

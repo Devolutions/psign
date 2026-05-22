@@ -89,12 +89,13 @@ This path builds Authenticode CMS locally, sends the CMS authenticated-attribute
 
 ## 1.4 Package-native helper workflows
 
-`dotnet/sign`-style package orchestration is being added through `psign-tool code` and package-native helpers. The command can plan nested graphs and has guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, unsigned MSIX/AppX prepare including nested packages inside upload/bundle containers, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer inputs, `--continue-on-error`, `--skip-signed`, `--overwrite`, and package-native VSIX/ZIP/MSIX -> NuGet -> PE/ClickOnce-manifest nesting:
+`dotnet/sign`-style package orchestration is being added through `psign-tool code` and package-native helpers. The command can plan nested graphs and has guarded local cert/key or portable cert-store SHA-1 execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, unsigned MSIX/AppX prepare including nested packages inside upload/bundle containers, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer inputs, `--continue-on-error`, `--skip-signed`, `--overwrite`, and package-native VSIX/ZIP/MSIX -> NuGet -> PE/ClickOnce-manifest nesting:
 
 ```bash
 psign-tool code --dry-run --plan-json --base-directory . --file-list files.txt
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.exe app.exe
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.nupkg package.nupkg
+psign-tool code --base-directory . --cert-store-dir .psign-store --sha1 <thumbprint> --output signed.nupkg package.nupkg
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix
 psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.zip bundle.zip

@@ -128,13 +128,35 @@ pub struct CodeArgs {
     #[arg(long, conflicts_with = "skip_signed")]
     pub overwrite: bool,
     /// Signer certificate as DER or PEM for initial local package signing execution.
-    #[arg(long, value_name = "PATH", requires = "key")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "key",
+        conflicts_with = "cert_sha1"
+    )]
     pub cert: Option<PathBuf>,
     /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM for initial local package signing execution.
-    #[arg(long, value_name = "PATH", requires = "cert")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "cert",
+        conflicts_with = "cert_sha1"
+    )]
     pub key: Option<PathBuf>,
+    /// Resolve a local portable cert-store signing identity by SHA-1 thumbprint.
+    #[arg(long = "sha1", visible_alias = "cert-sha1")]
+    pub cert_sha1: Option<String>,
+    /// Portable certificate store base directory for `--sha1`.
+    #[arg(long)]
+    pub cert_store_dir: Option<PathBuf>,
+    /// Use the LocalMachine scope in the portable certificate store for `--sha1`.
+    #[arg(long, visible_alias = "sm")]
+    pub machine_store: bool,
+    /// Portable certificate store name for `--sha1`.
+    #[arg(long = "store", visible_alias = "s", default_value = "MY")]
+    pub store_name: String,
     /// Additional certificate to include in generated package PKCS#7 signatures.
-    #[arg(long = "chain-cert", value_name = "PATH", requires = "cert")]
+    #[arg(long = "chain-cert", value_name = "PATH")]
     pub chain_certs: Vec<PathBuf>,
     /// Build and print the signing graph without modifying files.
     #[arg(long)]
