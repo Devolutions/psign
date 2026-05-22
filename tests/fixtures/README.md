@@ -31,6 +31,10 @@ Package-signing fixtures live under `tests/fixtures/package-signing/`:
 - `unsigned/sample.vsix` and `signed/sample.signed.vsix` exercise OPC
   XMLDSig marker paths produced by
   `System.IO.Packaging.PackageDigitalSignatureManager`.
+- `unsigned/with-pe.nupkg`, `unsigned/nested.vsix`, and
+  `unsigned/deep-nested.vsix` add nested signable payload coverage for the
+  dotnet/sign-style inside-out orchestration work. Signed counterparts are
+  reference outputs from the same tools above.
 - `package-signing-fixtures.json` records sizes and SHA-256 hashes.
 
 Regenerate them on Windows with the Devolutions test signing PFX:

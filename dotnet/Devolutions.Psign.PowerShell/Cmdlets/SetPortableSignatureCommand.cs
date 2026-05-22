@@ -86,6 +86,53 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
     [Parameter]
     public SwitchParameter Force { get; set; }
 
+    // Azure Key Vault parameters
+    [Parameter]
+    public string? AzureKeyVaultUrl { get; set; }
+
+    [Parameter]
+    public string? AzureKeyVaultCertificate { get; set; }
+
+    [Parameter]
+    public string? AzureKeyVaultAccessToken { get; set; }
+
+    [Parameter]
+    public string? AzureKeyVaultClientId { get; set; }
+
+    [Parameter]
+    public string? AzureKeyVaultClientSecret { get; set; }
+
+    [Parameter]
+    public string? AzureKeyVaultTenantId { get; set; }
+
+    [Parameter]
+    public SwitchParameter AzureKeyVaultManagedIdentity { get; set; }
+
+    // Artifact Signing / Trusted Signing parameters
+    [Parameter]
+    public string? ArtifactSigningEndpoint { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningAccountName { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningProfileName { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningAccessToken { get; set; }
+
+    [Parameter]
+    public SwitchParameter ArtifactSigningManagedIdentity { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningTenantId { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningClientId { get; set; }
+
+    [Parameter]
+    public string? ArtifactSigningClientSecret { get; set; }
+
     protected override void ProcessRecord()
     {
         ValidateSigningMaterial();
@@ -150,27 +197,42 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                 return;
             }
 
-            PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
-            {
-                Path = tempPath,
-                HashAlgorithm = HashAlgorithm,
-                CertificatePath = CertificatePath is null
-                    ? null
-                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath),
-                PrivateKeyPath = PrivateKeyPath is null
-                    ? null
-                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
-                CertificateDerBase64 = GetCertificateDerBase64(),
-                PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
-                PfxPath = PfxPath is null
-                    ? null
-                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
-                PfxPassword = Password is null ? null : SecureStringToString(Password),
-                ChainCertificatePaths = GetChainCertificatePaths(),
-                ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
-                TimestampServer = TimestampServer,
-                TimestampHashAlgorithm = TimestampServer is null ? null : TimestampHashAlgorithm,
-            });
+                PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
+                {
+                    Path = tempPath,
+                    HashAlgorithm = HashAlgorithm,
+                    CertificatePath = CertificatePath is null
+                        ? null
+                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath),
+                    PrivateKeyPath = PrivateKeyPath is null
+                        ? null
+                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
+                    CertificateDerBase64 = GetCertificateDerBase64(),
+                    PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
+                    PfxPath = PfxPath is null
+                        ? null
+                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
+                    PfxPassword = Password is null ? null : SecureStringToString(Password),
+                    ChainCertificatePaths = GetChainCertificatePaths(),
+                    ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
+                    TimestampServer = TimestampServer,
+                    TimestampHashAlgorithm = TimestampServer is null ? null : TimestampHashAlgorithm,
+                    AzureKeyVaultUrl = AzureKeyVaultUrl,
+                    AzureKeyVaultCertificate = AzureKeyVaultCertificate,
+                    AzureKeyVaultAccessToken = AzureKeyVaultAccessToken,
+                    AzureKeyVaultClientId = AzureKeyVaultClientId,
+                    AzureKeyVaultClientSecret = AzureKeyVaultClientSecret,
+                    AzureKeyVaultTenantId = AzureKeyVaultTenantId,
+                    AzureKeyVaultManagedIdentity = AzureKeyVaultManagedIdentity.IsPresent ? true : null,
+                    ArtifactSigningEndpoint = ArtifactSigningEndpoint,
+                    ArtifactSigningAccountName = ArtifactSigningAccountName,
+                    ArtifactSigningProfileName = ArtifactSigningProfileName,
+                    ArtifactSigningAccessToken = ArtifactSigningAccessToken,
+                    ArtifactSigningManagedIdentity = ArtifactSigningManagedIdentity.IsPresent ? true : null,
+                    ArtifactSigningTenantId = ArtifactSigningTenantId,
+                    ArtifactSigningClientId = ArtifactSigningClientId,
+                    ArtifactSigningClientSecret = ArtifactSigningClientSecret,
+                });
             response.Signature.SourcePathOrExtension = sourcePathOrExtension;
             response.Signature.Content = File.ReadAllBytes(tempPath);
             WriteObject(response.Signature);
@@ -231,6 +293,21 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                     ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
                     TimestampServer = TimestampServer,
                     TimestampHashAlgorithm = TimestampServer is null ? null : TimestampHashAlgorithm,
+                    AzureKeyVaultUrl = AzureKeyVaultUrl,
+                    AzureKeyVaultCertificate = AzureKeyVaultCertificate,
+                    AzureKeyVaultAccessToken = AzureKeyVaultAccessToken,
+                    AzureKeyVaultClientId = AzureKeyVaultClientId,
+                    AzureKeyVaultClientSecret = AzureKeyVaultClientSecret,
+                    AzureKeyVaultTenantId = AzureKeyVaultTenantId,
+                    AzureKeyVaultManagedIdentity = AzureKeyVaultManagedIdentity.IsPresent ? true : null,
+                    ArtifactSigningEndpoint = ArtifactSigningEndpoint,
+                    ArtifactSigningAccountName = ArtifactSigningAccountName,
+                    ArtifactSigningProfileName = ArtifactSigningProfileName,
+                    ArtifactSigningAccessToken = ArtifactSigningAccessToken,
+                    ArtifactSigningManagedIdentity = ArtifactSigningManagedIdentity.IsPresent ? true : null,
+                    ArtifactSigningTenantId = ArtifactSigningTenantId,
+                    ArtifactSigningClientId = ArtifactSigningClientId,
+                    ArtifactSigningClientSecret = ArtifactSigningClientSecret,
                 });
                 WriteObject(response.Signature);
             }
@@ -298,11 +375,27 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         {
             materialCount++;
         }
+        if (AzureKeyVaultUrl is not null)
+        {
+            if (AzureKeyVaultCertificate is null)
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new PSInvalidOperationException("-AzureKeyVaultCertificate is required when using -AzureKeyVaultUrl."),
+                    "PortableSignatureAkvCertificateRequired",
+                    ErrorCategory.InvalidArgument,
+                    this));
+            }
+            materialCount++;
+        }
+        if (ArtifactSigningEndpoint is not null || ArtifactSigningAccountName is not null)
+        {
+            materialCount++;
+        }
 
         if (materialCount != 1)
         {
             ThrowTerminatingError(new ErrorRecord(
-                new PSInvalidOperationException("Supply exactly one signing source: -Certificate, -CertificatePath/-PrivateKeyPath, -PfxPath, or -Thumbprint with a portable cert store."),
+                new PSInvalidOperationException("Supply exactly one signing source: -Certificate, -CertificatePath/-PrivateKeyPath, -PfxPath, -Thumbprint, -AzureKeyVaultUrl, or -ArtifactSigningEndpoint/-ArtifactSigningAccountName."),
                 "PortableSignatureSigningMaterialRequired",
                 ErrorCategory.InvalidArgument,
                 this));

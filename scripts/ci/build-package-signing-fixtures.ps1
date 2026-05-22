@@ -91,7 +91,10 @@ function Add-ManifestEntry {
 }
 
 function New-UnsignedNuGetPackage {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$PayloadDllPath = ""
+    )
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("psign-nupkg-fixture-" + [guid]::NewGuid())
     try {
         New-Item -ItemType Directory -Force -Path (Join-Path $stage "lib\net8.0") | Out-Null
@@ -101,6 +104,7 @@ function New-UnsignedNuGetPackage {
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="psmdcp" ContentType="application/vnd.openxmlformats-package.core-properties+xml" />
   <Default Extension="txt" ContentType="text/plain" />
+  <Default Extension="dll" ContentType="application/octet-stream" />
   <Default Extension="nuspec" ContentType="application/octet" />
 </Types>
 '@
@@ -116,6 +120,9 @@ function New-UnsignedNuGetPackage {
 </package>
 '@
         Write-Utf8NoBom -Path (Join-Path $stage "lib\net8.0\sample.txt") -Text "psign NuGet fixture`n"
+        if ($PayloadDllPath) {
+            Copy-Item -LiteralPath $PayloadDllPath -Destination (Join-Path $stage "lib\net8.0\tiny32.dll") -Force
+        }
         New-ZipFromDirectory -SourceDir $stage -Destination $Path
     }
     finally {
@@ -124,16 +131,36 @@ function New-UnsignedNuGetPackage {
 }
 
 function New-UnsignedVsixPackage {
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [string]$PackagePayloadPath = "",
+        [string]$PayloadDllPath = ""
+    )
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("psign-vsix-fixture-" + [guid]::NewGuid())
     try {
         New-Item -ItemType Directory -Force -Path (Join-Path $stage "_rels") | Out-Null
+        $assetLines = [System.Collections.Generic.List[string]]::new()
+        if ($PayloadDllPath) {
+            $assetLines.Add('    <Asset Type="Microsoft.VisualStudio.MefComponent" Path="payload/tiny32.dll" />')
+        }
+        $packagePayloadName = ""
+        if ($PackagePayloadPath) {
+            $packagePayloadName = Split-Path -Leaf $PackagePayloadPath
+            $assetLines.Add("    <Asset Type=`"NuGetPackage`" Path=`"packages/$packagePayloadName`" />")
+        }
+        if ($assetLines.Count -eq 0) {
+            $assetsXml = "  <Assets />"
+        } else {
+            $assetsXml = "  <Assets>`n$($assetLines -join "`n")`n  </Assets>"
+        }
         Write-Utf8NoBom -Path (Join-Path $stage "[Content_Types].xml") -Text @'
 <?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="vsixmanifest" ContentType="text/xml" />
   <Default Extension="txt" ContentType="text/plain" />
+  <Default Extension="dll" ContentType="application/octet-stream" />
+  <Default Extension="nupkg" ContentType="application/zip" />
 </Types>
 '@
         Write-Utf8NoBom -Path (Join-Path $stage "_rels\.rels") -Text @'
@@ -142,7 +169,7 @@ function New-UnsignedVsixPackage {
   <Relationship Id="R1" Type="http://schemas.microsoft.com/developer/vsx-schema/2011/relationships/extension-manifest" Target="/extension.vsixmanifest" />
 </Relationships>
 '@
-        Write-Utf8NoBom -Path (Join-Path $stage "extension.vsixmanifest") -Text @'
+        Write-Utf8NoBom -Path (Join-Path $stage "extension.vsixmanifest") -Text @"
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
@@ -153,10 +180,18 @@ function New-UnsignedVsixPackage {
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,18.0)" />
   </Installation>
-  <Assets />
+$assetsXml
 </PackageManifest>
-'@
+"@
         Write-Utf8NoBom -Path (Join-Path $stage "payload.txt") -Text "psign VSIX fixture`n"
+        if ($PayloadDllPath) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $stage "payload") | Out-Null
+            Copy-Item -LiteralPath $PayloadDllPath -Destination (Join-Path $stage "payload\tiny32.dll") -Force
+        }
+        if ($PackagePayloadPath) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $stage "packages") | Out-Null
+            Copy-Item -LiteralPath $PackagePayloadPath -Destination (Join-Path $stage "packages\$packagePayloadName") -Force
+        }
         New-ZipFromDirectory -SourceDir $stage -Destination $Path
     }
     finally {
@@ -204,22 +239,42 @@ $unsignedDir = Join-Path $OutputDir "unsigned"
 $signedDir = Join-Path $OutputDir "signed"
 New-Item -ItemType Directory -Force -Path $unsignedDir, $signedDir | Out-Null
 
+$payloadDll = Join-Path $WorkspaceRoot "tests\fixtures\pe-authenticode-upstream\tiny32.efi"
+if (-not (Test-Path -LiteralPath $payloadDll)) {
+    throw "PE payload fixture not found: $payloadDll"
+}
+
 $unsignedNupkg = Join-Path $unsignedDir "sample.nupkg"
 $unsignedSnupkg = Join-Path $unsignedDir "sample.snupkg"
 $unsignedVsix = Join-Path $unsignedDir "sample.vsix"
+$unsignedNupkgWithPe = Join-Path $unsignedDir "with-pe.nupkg"
+$unsignedNestedVsix = Join-Path $unsignedDir "nested.vsix"
+$unsignedDeepNestedVsix = Join-Path $unsignedDir "deep-nested.vsix"
 $signedNupkg = Join-Path $signedDir "sample.signed.nupkg"
 $signedSnupkg = Join-Path $signedDir "sample.signed.snupkg"
 $signedVsix = Join-Path $signedDir "sample.signed.vsix"
+$signedNupkgWithPe = Join-Path $signedDir "with-pe.signed.nupkg"
+$signedNestedVsix = Join-Path $signedDir "nested.signed.vsix"
+$signedDeepNestedVsix = Join-Path $signedDir "deep-nested.signed.vsix"
 
 New-UnsignedNuGetPackage -Path $unsignedNupkg
 New-UnsignedNuGetPackage -Path $unsignedSnupkg
 New-UnsignedVsixPackage -Path $unsignedVsix
+New-UnsignedNuGetPackage -Path $unsignedNupkgWithPe -PayloadDllPath $payloadDll
+New-UnsignedVsixPackage -Path $unsignedNestedVsix -PackagePayloadPath $unsignedNupkg -PayloadDllPath $payloadDll
+New-UnsignedVsixPackage -Path $unsignedDeepNestedVsix -PackagePayloadPath $unsignedNupkgWithPe
 Copy-Item -LiteralPath $unsignedNupkg -Destination $signedNupkg -Force
 Copy-Item -LiteralPath $unsignedSnupkg -Destination $signedSnupkg -Force
 Copy-Item -LiteralPath $unsignedVsix -Destination $signedVsix -Force
+Copy-Item -LiteralPath $unsignedNupkgWithPe -Destination $signedNupkgWithPe -Force
+Copy-Item -LiteralPath $unsignedNestedVsix -Destination $signedNestedVsix -Force
+Copy-Item -LiteralPath $unsignedDeepNestedVsix -Destination $signedDeepNestedVsix -Force
 Invoke-DotnetNuGetSign -PackagePath $signedNupkg -CertificatePath $PfxPath
 Invoke-DotnetNuGetSign -PackagePath $signedSnupkg -CertificatePath $PfxPath
 Invoke-VsixSign -PackagePath $signedVsix -CertificatePath $PfxPath
+Invoke-DotnetNuGetSign -PackagePath $signedNupkgWithPe -CertificatePath $PfxPath
+Invoke-VsixSign -PackagePath $signedNestedVsix -CertificatePath $PfxPath
+Invoke-VsixSign -PackagePath $signedDeepNestedVsix -CertificatePath $PfxPath
 
 $entries = [System.Collections.Generic.List[object]]::new()
 Add-ManifestEntry -List $entries -Id "package-nupkg-unsigned" -Family "nuget" -State "unsigned" -Path $unsignedNupkg
@@ -228,6 +283,12 @@ Add-ManifestEntry -List $entries -Id "package-snupkg-unsigned" -Family "nuget-sy
 Add-ManifestEntry -List $entries -Id "package-snupkg-signed" -Family "nuget-symbols" -State "signed" -Path $signedSnupkg -SourcePath $unsignedSnupkg -Tool "dotnet nuget sign"
 Add-ManifestEntry -List $entries -Id "package-vsix-unsigned" -Family "vsix" -State "unsigned" -Path $unsignedVsix
 Add-ManifestEntry -List $entries -Id "package-vsix-signed" -Family "vsix" -State "signed" -Path $signedVsix -SourcePath $unsignedVsix -Tool "System.IO.Packaging.PackageDigitalSignatureManager"
+Add-ManifestEntry -List $entries -Id "package-nupkg-with-pe-unsigned" -Family "nuget" -State "unsigned" -Path $unsignedNupkgWithPe
+Add-ManifestEntry -List $entries -Id "package-nupkg-with-pe-signed" -Family "nuget" -State "signed" -Path $signedNupkgWithPe -SourcePath $unsignedNupkgWithPe -Tool "dotnet nuget sign"
+Add-ManifestEntry -List $entries -Id "package-vsix-nested-unsigned" -Family "vsix" -State "unsigned" -Path $unsignedNestedVsix
+Add-ManifestEntry -List $entries -Id "package-vsix-nested-signed" -Family "vsix" -State "signed" -Path $signedNestedVsix -SourcePath $unsignedNestedVsix -Tool "System.IO.Packaging.PackageDigitalSignatureManager"
+Add-ManifestEntry -List $entries -Id "package-vsix-deep-nested-unsigned" -Family "vsix" -State "unsigned" -Path $unsignedDeepNestedVsix
+Add-ManifestEntry -List $entries -Id "package-vsix-deep-nested-signed" -Family "vsix" -State "signed" -Path $signedDeepNestedVsix -SourcePath $unsignedDeepNestedVsix -Tool "System.IO.Packaging.PackageDigitalSignatureManager"
 
 $manifest = [ordered]@{
     generated_by = "scripts/ci/build-package-signing-fixtures.ps1"

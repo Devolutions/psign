@@ -14,6 +14,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
 - `cert-store`: Portable file-backed certificate store under `~/.psign/cert-store` by default, with Windows-style store/thumbprint selection.
+- `code`: dotnet/sign-style orchestration entry point. It supports `--dry-run` / `--plan-json` planning over inputs, file lists, globs, and nested ZIP/OPC containers, plus guarded local cert/key, PFX, portable cert-store SHA-1, Azure Key Vault, or Artifact Signing execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, MSIX/AppX unsigned-package prepare including nested packages inside upload/bundle containers, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer publisher updates + top-level or nested companion signatures, `--continue-on-error`, `--skip-signed`, `--overwrite`, and inside-out VSIX/ZIP -> NuGet/VSIX -> PE/ClickOnce-manifest signing.
 - `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs, including PE/WinMD signing through Azure Artifact Signing REST without Microsoft client DLLs.
 
 ## MSIX parity notes
@@ -65,7 +66,7 @@ dotnet tool run psign-tool -- --help
 Create local dotnet tool packages from prebuilt release artifacts:
 
 ```powershell
-pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.2.0 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
+pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.3.0 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
 ```
 
 The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`, plus an `any` fallback package for unsupported runtimes.
@@ -99,7 +100,57 @@ cargo build -p psign --bin psign-tool --locked
 # Portable package inspection helpers:
 # psign-tool portable nupkg-signature-info package.nupkg
 # psign-tool portable nupkg-digest package.nupkg --algorithm sha256
+# psign-tool portable nupkg-signature-content package.nupkg --output signature-content.txt
+# psign-tool portable nupkg-signature-pkcs7 package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signature.p7s
+# psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --encoding raw --output prehash.bin
+# psign-tool portable nupkg-signature-pkcs7-from-signature package.nupkg --cert signer.der --signature remote.sig --output signature.p7s
+# psign-tool portable nupkg-verify-signature-content package.nupkg --content signature-content.txt
+# psign-tool portable nupkg-embed-signature package.nupkg --signature signature.p7s --output signed.nupkg
+# psign-tool portable nupkg-sign package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg
+# psign-tool portable nupkg-verify-signature signed.nupkg --trusted-ca signer.der --allow-loose-signing-cert
 # psign-tool portable vsix-signature-info extension.vsix
+# psign-tool portable vsix-signature-reference-xml extension.vsix --output signature-reference.xml
+# psign-tool portable vsix-verify-signature-reference-xml extension.vsix --signature-xml signature-reference.xml
+# psign-tool portable vsix-signature-xml extension.vsix --cert signer.der --key signer.pkcs8 --output signature.xml
+# psign-tool portable vsix-signature-xml-prehash extension.vsix --encoding raw --output prehash.bin
+# psign-tool portable vsix-signature-xml-from-signature extension.vsix --cert signer.der --signature remote.sig --output signature.xml
+# psign-tool portable vsix-verify-signature-xml extension.vsix --signature-xml signature.xml --cert signer.der --trusted-ca root.der
+# psign-tool portable vsix-embed-signature-xml extension.vsix --signature-xml signature.xml --output signed.vsix
+# psign-tool portable vsix-sign extension.vsix --cert signer.der --key signer.pkcs8 --output signed.vsix
+# psign-tool portable vsix-verify-signature signed.vsix --trusted-ca root.der
+# psign-tool portable appinstaller-info app.appinstaller --signature app.appinstaller.p7
+# psign-tool portable appinstaller-sign-companion app.appinstaller --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output app.appinstaller.p7
+# psign-tool portable appinstaller-sign-companion-prehash app.appinstaller --encoding raw --output prehash.bin
+# psign-tool portable appinstaller-sign-companion-from-signature app.appinstaller --cert signer.der --signature remote.sig --output app.appinstaller.p7
+# psign-tool portable appinstaller-verify-companion app.appinstaller --signature app.appinstaller.p7 --anchor-dir anchors
+# psign-tool portable appinstaller-set-publisher app.appinstaller --publisher "CN=Example" --output updated.appinstaller
+# psign-tool portable business-central-app-info package.app
+# psign-tool portable msix-manifest-info package.msix
+# psign-tool portable msix-set-publisher package.msix --publisher "CN=Example" --output updated.msix
+# psign-tool portable clickonce-deploy-info app.exe.deploy
+# psign-tool portable clickonce-copy-deploy-payload app.exe.deploy --output app.exe
+# psign-tool portable clickonce-update-manifest-hashes app.exe.manifest --base-directory . --output updated.manifest
+# psign-tool portable clickonce-manifest-hashes updated.manifest --base-directory .
+# psign-tool portable clickonce-sign-manifest updated.manifest --cert signer.der --key signer.pkcs8 --output signed.manifest
+# psign-tool portable clickonce-sign-manifest-prehash updated.manifest --encoding raw --output prehash.bin
+# psign-tool portable clickonce-sign-manifest-from-signature updated.manifest --cert signer.der --signature remote.sig --output signed.manifest
+# psign-tool portable clickonce-verify-manifest-signature signed.manifest --trusted-ca signer.der
+# dotnet/sign-style dry-run planning for nested package orchestration:
+# psign-tool code --dry-run --plan-json --base-directory . --file-list files.txt
+# Initial guarded code execution for PE/NuGet/VSIX/ZIP/MSIX/ClickOnce/App Installer inputs:
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.exe app.exe
+# psign-tool code --base-directory . --pfx signer.pfx --password "pfx-password" --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --cert-store-dir ~/.psign/cert-store --sha1 <thumbprint> --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --azure-key-vault-url https://vault.vault.azure.net --azure-key-vault-certificate cert --azure-key-vault-accesstoken "$TOKEN" --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --artifact-signing-endpoint https://wus2.codesigning.azure.net --artifact-signing-account-name acct --artifact-signing-profile-name profile --artifact-signing-access-token "$TOKEN" --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg package.nupkg
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.vsix extension.vsix
+# psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.zip package-bundle.zip
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output prepared.msix app.msix
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.manifest app.exe.manifest
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.signed.exe.deploy app.exe.deploy
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output updated.appinstaller.p7 app.appinstaller
 # Optional portable REST helpers (Linux/macOS):
 # cargo build -p psign --bin psign-tool --locked --features artifact-signing-rest
 # cargo build -p psign --bin psign-tool --locked --features azure-kv-sign
@@ -166,6 +217,13 @@ psign-tool --mode portable sign /sha1 ABCDEF0123456789ABCDEF0123456789ABCDEF01 /
 ```
 
 The portable signing path supports local RSA/SHA-2 Authenticode signing for PE/WinMD plus the package/script formats exposed by the portable core. Unsupported native signing options, CSP/KSP selection, auto-selection, and non-exportable local keys return explicit errors in portable mode.
+
+Cloud-backed signing options also accept Azure.Identity-style selectors:
+`--azure-key-vault-credential-type` and `--artifact-signing-credential-type`
+(`default`, `managed-identity`, `access-token`, `client-secret`,
+`workload-identity`). Managed identity maps to the existing managed-identity
+flows; workload identity is represented in provider planning but explicit
+signing execution is not wired yet.
 
 ## Generate binary manifest and dependency graph
 

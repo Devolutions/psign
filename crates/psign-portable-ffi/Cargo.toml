@@ -1,6 +1,6 @@
 [package]
 name = "psign-portable-ffi"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "C ABI shared library for psign portable Authenticode operations"
 license.workspace = true
@@ -9,6 +9,11 @@ repository.workspace = true
 [lib]
 name = "psign_core"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+azure-kv-sign = ["psign-portable-core/azure-kv-sign"]
+artifact-signing-rest = ["psign-portable-core/artifact-signing-rest"]
 
 [dependencies]
 anyhow = "1"

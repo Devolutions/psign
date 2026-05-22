@@ -10,11 +10,25 @@ internal static class PortableModuleFiles
         ".ps1xml",
     };
 
+    private static readonly HashSet<string> SignablePackageExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".dll",
+        ".exe",
+        ".nupkg",
+        ".snupkg",
+        ".vsix",
+        ".manifest",
+        ".application",
+        ".vsto",
+        ".appinstaller",
+    };
+
     internal static IReadOnlyList<string> Enumerate(string directory)
     {
         return Directory
             .EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-            .Where(path => SignablePowerShellExtensions.Contains(Path.GetExtension(path)))
+            .Where(path => SignablePowerShellExtensions.Contains(Path.GetExtension(path))
+                        || SignablePackageExtensions.Contains(Path.GetExtension(path)))
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }

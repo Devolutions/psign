@@ -6,6 +6,7 @@ use base64::Engine as _;
 use predicates::prelude::*;
 use psign_authenticode_trust::pe_first_pkcs7_terminal_root;
 use psign_authenticode_trust::{inspect_authenticode_pkcs7_der, inspect_pe_authenticode};
+use psign_opc_sign::nuget;
 use psign_sip_digest::cab_digest;
 use psign_sip_digest::catalog_digest;
 use psign_sip_digest::msi_digest;
@@ -21,6 +22,7 @@ use rsa::signature::SignatureEncoding;
 use rsa::signature::hazmat::PrehashSigner;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
@@ -71,6 +73,8 @@ fn help_lists_core_subcommands() {
         "msi-signer-rs256-prehash",
         "verify-esd",
         "verify-msix",
+        "msix-manifest-info",
+        "msix-set-publisher",
         "verify-catalog",
         "verify-catalog-member",
         "catalog-signer-rs256-prehash",
@@ -96,7 +100,41 @@ fn help_lists_core_subcommands() {
         "rdp",
         "nupkg-signature-info",
         "nupkg-digest",
+        "nupkg-signature-content",
+        "nupkg-signature-pkcs7",
+        "nupkg-signature-pkcs7-prehash",
+        "nupkg-signature-pkcs7-from-signature",
+        "nupkg-sign",
+        "nupkg-verify-signature-content",
+        "nupkg-verify-signature",
+        "nupkg-embed-signature",
         "vsix-signature-info",
+        "vsix-embed-signature-xml",
+        "vsix-signature-reference-xml",
+        "vsix-signature-xml",
+        "vsix-signature-xml-prehash",
+        "vsix-signature-xml-from-signature",
+        "vsix-sign",
+        "vsix-verify-signature-reference-xml",
+        "vsix-verify-signature-xml",
+        "vsix-verify-signature",
+        "appinstaller-info",
+        "appinstaller-verify-companion",
+        "appinstaller-sign-companion",
+        "appinstaller-sign-companion-prehash",
+        "appinstaller-sign-companion-from-signature",
+        "appinstaller-set-publisher",
+        "business-central-app-info",
+        "msix-manifest-info",
+        "msix-set-publisher",
+        "clickonce-deploy-info",
+        "clickonce-copy-deploy-payload",
+        "clickonce-manifest-hashes",
+        "clickonce-update-manifest-hashes",
+        "clickonce-sign-manifest",
+        "clickonce-sign-manifest-prehash",
+        "clickonce-sign-manifest-from-signature",
+        "clickonce-verify-manifest-signature",
         "rfc3161-timestamp-req",
         "rfc3161-timestamp-resp-inspect",
     ] {
@@ -180,6 +218,500 @@ fn nupkg_digest_rejects_signed_package_fixture() {
 }
 
 #[test]
+fn nupkg_signature_content_records_unsigned_package_hash() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let expected_unsigned =
+        nuget::canonical_unsigned_package_bytes_path(&package).expect("canonical unsigned package");
+    let expected_hash = hex_lower(&Sha256::digest(expected_unsigned));
+
+    let mut cmd = portable_cmd();
+    cmd.arg("nupkg-signature-content")
+        .arg(&package)
+        .arg("--algorithm")
+        .arg("sha256");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Version:1"))
+        .stdout(predicate::str::contains("2.16.840.1.101.3.4.2.1-Hash:"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let content = dir.path().join("signature-content.txt");
+    let mut write = portable_cmd();
+    write
+        .arg("nupkg-signature-content")
+        .arg(&package)
+        .arg("--output")
+        .arg(&content);
+    write.assert().success();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature-content")
+        .arg(&package)
+        .arg("--content")
+        .arg(&content);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("package_hash_algorithm=sha256"))
+        .stdout(predicate::str::contains(format!(
+            "package_hash={expected_hash}"
+        )))
+        .stdout(predicate::str::contains("package_hash_match=yes"));
+}
+
+#[test]
+fn nupkg_signature_pkcs7_creates_verifiable_signature_blob() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let content = dir.path().join("signature-content.txt");
+    let signature = dir.path().join("signature.p7s");
+    let signed = dir.path().join("signed.nupkg");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut content_cmd = portable_cmd();
+    content_cmd
+        .arg("nupkg-signature-content")
+        .arg(&package)
+        .arg("--output")
+        .arg(&content);
+    content_cmd.assert().success();
+
+    let mut sign = portable_cmd();
+    sign.arg("nupkg-signature-pkcs7")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signature);
+    sign.assert()
+        .success()
+        .stdout(predicate::str::contains("signature_len="));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("trust-verify-detached")
+        .arg(&content)
+        .arg(&signature)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-detached: ok"));
+
+    let mut embed = portable_cmd();
+    embed
+        .arg("nupkg-embed-signature")
+        .arg(&package)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--output")
+        .arg(&signed);
+    embed.assert().success();
+
+    let mut info = portable_cmd();
+    info.arg("nupkg-signature-info").arg(&signed);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"));
+}
+
+#[test]
+fn nupkg_signature_pkcs7_from_external_signature_creates_verifiable_blob() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let content = dir.path().join("signature-content.txt");
+    let prehash = dir.path().join("prehash.bin");
+    let external_signature = dir.path().join("external.sig");
+    let signature = dir.path().join("signature.p7s");
+    let signed = dir.path().join("signed.nupkg");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut content_cmd = portable_cmd();
+    content_cmd
+        .arg("nupkg-signature-content")
+        .arg(&package)
+        .arg("--output")
+        .arg(&content);
+    content_cmd.assert().success();
+
+    let mut prehash_cmd = portable_cmd();
+    prehash_cmd
+        .arg("nupkg-signature-pkcs7-prehash")
+        .arg(&package)
+        .arg("--encoding")
+        .arg("raw")
+        .arg("--output")
+        .arg(&prehash);
+    prehash_cmd.assert().success();
+
+    let key_bytes = std::fs::read(&key).expect("read test key");
+    let private_key = rdp::parse_rsa_private_key(&key_bytes).expect("parse test key");
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signed_attrs_digest = std::fs::read(&prehash).expect("read prehash");
+    let raw_signature = signing_key
+        .sign_prehash(&signed_attrs_digest)
+        .expect("external RSA signature")
+        .to_bytes();
+    std::fs::write(&external_signature, raw_signature).expect("write external signature");
+
+    let mut assemble = portable_cmd();
+    assemble
+        .arg("nupkg-signature-pkcs7-from-signature")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--signature")
+        .arg(&external_signature)
+        .arg("--output")
+        .arg(&signature);
+    assemble
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signature_len="));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("trust-verify-detached")
+        .arg(&content)
+        .arg(&signature)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-detached: ok"));
+
+    let mut embed = portable_cmd();
+    embed
+        .arg("nupkg-embed-signature")
+        .arg(&package)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--output")
+        .arg(&signed);
+    embed.assert().success();
+
+    let mut nupkg_verify = portable_cmd();
+    nupkg_verify
+        .arg("nupkg-verify-signature")
+        .arg(&signed)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    nupkg_verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nupkg-verify-signature: ok"));
+}
+
+#[test]
+fn nupkg_sign_creates_signed_package_with_verifiable_embedded_signature() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let content = dir.path().join("signature-content.txt");
+    let signed = dir.path().join("signed.nupkg");
+    let extracted = dir.path().join("signature.p7s");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut content_cmd = portable_cmd();
+    content_cmd
+        .arg("nupkg-signature-content")
+        .arg(&package)
+        .arg("--output")
+        .arg(&content);
+    content_cmd.assert().success();
+
+    let mut sign = portable_cmd();
+    sign.arg("nupkg-sign")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signed);
+    sign.assert().success().stdout(predicate::str::contains(
+        "embedded_signature=.signature.p7s",
+    ));
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&signed).unwrap()).unwrap();
+    let mut signature = Vec::new();
+    archive
+        .by_name(".signature.p7s")
+        .unwrap()
+        .read_to_end(&mut signature)
+        .unwrap();
+    std::fs::write(&extracted, signature).unwrap();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("trust-verify-detached")
+        .arg(&content)
+        .arg(&extracted)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-detached: ok"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn nupkg_sign_embeds_rfc3161_timestamp_attribute() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let signed = dir.path().join("signed-timestamped.nupkg");
+    let extracted = dir.path().join("signature.p7s");
+    let tsa_root = dir.path().join("tsa-root.der");
+    write_test_rsa_cert_key(&cert, &key);
+    let tsa_root_arg = tsa_root.to_str().unwrap();
+    let gen_time = generalized_time_tomorrow_noon_utc();
+    let (mut guard, timestamp_url) =
+        spawn_psign_server_with_gen_time(&gen_time, &["--cert-output", tsa_root_arg]);
+
+    let mut sign = portable_cmd();
+    sign.arg("nupkg-sign")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--output")
+        .arg(&signed);
+    sign.assert().success();
+    let status = guard.0.wait().expect("timestamp server exit");
+    assert!(status.success(), "timestamp server failed with {status}");
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&signed).unwrap()).unwrap();
+    let mut signature = Vec::new();
+    archive
+        .by_name(".signature.p7s")
+        .unwrap()
+        .read_to_end(&mut signature)
+        .unwrap();
+    std::fs::write(&extracted, signature).unwrap();
+
+    let mut inspect = portable_cmd();
+    inspect
+        .arg("inspect-authenticode")
+        .arg(&extracted)
+        .arg("--input")
+        .arg("pkcs7");
+    inspect
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "microsoft_nested_rfc3161_attribute",
+        ))
+        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature")
+        .arg(&signed)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--trusted-ca")
+        .arg(&tsa_root)
+        .arg("--allow-loose-signing-cert")
+        .arg("--prefer-timestamp-signing-time")
+        .arg("--require-valid-timestamp");
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nupkg-verify-signature: ok"));
+}
+
+#[test]
+fn nupkg_verify_signature_validates_embedded_signature_and_package_hash() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let signed = dir.path().join("signed.nupkg");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("nupkg-sign")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signed);
+    sign.assert().success();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature")
+        .arg(&signed)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nupkg-verify-signature: ok"))
+        .stdout(predicate::str::contains("signature_present=yes"))
+        .stdout(predicate::str::contains("package_hash_algorithm=sha256"))
+        .stdout(predicate::str::contains("package_hash_match=yes"))
+        .stdout(predicate::str::contains("signature_len="));
+}
+
+#[test]
+fn nupkg_verify_signature_rejects_tampered_signed_package() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let signed = dir.path().join("signed.nupkg");
+    let tampered = dir.path().join("tampered.nupkg");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("nupkg-sign")
+        .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signed);
+    sign.assert().success();
+    append_zip_entry(&signed, &tampered, "tampered.txt", b"changed");
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature")
+        .arg(&tampered)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify.assert().failure().stderr(predicate::str::contains(
+        "detached content digest does not match",
+    ));
+}
+
+#[test]
+fn nupkg_verify_signature_requires_embedded_signature() {
+    let package = package_fixture("unsigned/sample.nupkg");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature")
+        .arg(&package)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify.assert().failure().stderr(predicate::str::contains(
+        "package does not contain .signature.p7s",
+    ));
+}
+
+#[test]
+fn nupkg_verify_signature_content_rejects_tampered_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = package_fixture("unsigned/sample.nupkg");
+    let content = dir.path().join("signature-content.txt");
+    let tampered = package_fixture("unsigned/with-pe.nupkg");
+
+    let mut write = portable_cmd();
+    write
+        .arg("nupkg-signature-content")
+        .arg(&original)
+        .arg("--output")
+        .arg(&content);
+    write.assert().success();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("nupkg-verify-signature-content")
+        .arg(&tampered)
+        .arg("--content")
+        .arg(&content);
+    verify
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("hash mismatch"));
+}
+
+#[test]
+fn nupkg_embed_signature_creates_stored_root_signature_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.nupkg");
+    let sig = dir.path().join("signature.p7s");
+    let output = dir.path().join("signed.nupkg");
+    std::fs::write(&sig, b"cms-placeholder").unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("nupkg-embed-signature")
+        .arg(&input)
+        .arg("--signature")
+        .arg(&sig)
+        .arg("--output")
+        .arg(&output);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "embedded_signature=.signature.p7s",
+        ))
+        .stdout(predicate::str::contains("signature_len=15"));
+
+    let mut info = portable_cmd();
+    info.arg("nupkg-signature-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("signed=yes"))
+        .stdout(predicate::str::contains("signature_stored=yes"))
+        .stdout(predicate::str::contains("signature_len=15"));
+}
+
+#[test]
+fn nupkg_embed_signature_rejects_existing_signature_without_overwrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let sig = dir.path().join("signature.p7s");
+    let output = dir.path().join("signed.nupkg");
+    std::fs::write(&sig, b"cms-placeholder").unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("nupkg-embed-signature")
+        .arg(package_fixture("signed/sample.signed.nupkg"))
+        .arg("--signature")
+        .arg(&sig)
+        .arg("--output")
+        .arg(&output);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("already contains .signature.p7s"));
+}
+
+#[test]
 fn vsix_signature_info_detects_opc_signature_parts() {
     let package = package_fixture("signed/sample.signed.vsix");
 
@@ -195,6 +727,923 @@ fn vsix_signature_info_detects_opc_signature_parts() {
         .stdout(predicate::str::contains(
             "signature_part=package/services/digital-signature/xml-signature/",
         ));
+}
+
+#[test]
+fn vsix_embed_signature_xml_creates_opc_signature_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let xml = dir.path().join("signature.xml");
+    let output = dir.path().join("signed.vsix");
+    std::fs::write(&xml, b"<Signature/>").unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("vsix-embed-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml)
+        .arg("--output")
+        .arg(&output);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("embedded_signature_xml="))
+        .stdout(predicate::str::contains("signature_xml_len=12"));
+
+    let mut info = portable_cmd();
+    info.arg("vsix-signature-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("opc_signature=yes"))
+        .stdout(predicate::str::contains(
+            "signature_origin=package/services/digital-signature/origin.psdsor",
+        ))
+        .stdout(predicate::str::contains("signature_parts=1"));
+}
+
+#[test]
+fn vsix_signature_reference_xml_verifies_package_part_digests() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let xml = dir.path().join("signature-reference.xml");
+
+    let mut write = portable_cmd();
+    write
+        .arg("vsix-signature-reference-xml")
+        .arg(&input)
+        .arg("--output")
+        .arg(&xml);
+    write.assert().success();
+
+    let text = std::fs::read_to_string(&xml).unwrap();
+    assert!(text.contains("<Reference URI="));
+    assert!(text.contains("<DigestValue>"));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("vsix-verify-signature-reference-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "reference_digest_algorithm=sha256",
+        ))
+        .stdout(predicate::str::contains("reference_digest_match=yes"));
+}
+
+#[test]
+fn vsix_signature_xml_signs_verifies_and_embeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let xml = dir.path().join("signature.xml");
+    let output = dir.path().join("signed.vsix");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("vsix-signature-xml")
+        .arg(&input)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&xml);
+    sign.assert().success();
+
+    let text = std::fs::read_to_string(&xml).unwrap();
+    assert!(text.contains("<SignatureValue>"));
+    assert!(!text.contains("<SignatureValue></SignatureValue>"));
+    assert!(text.contains("<X509Certificate>"));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("vsix-verify-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("reference_digest_match=yes"))
+        .stdout(predicate::str::contains("signature_value_match=yes"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+
+    let mut embed = portable_cmd();
+    embed
+        .arg("vsix-embed-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml)
+        .arg("--output")
+        .arg(&output);
+    embed.assert().success();
+
+    let mut info = portable_cmd();
+    info.arg("vsix-signature-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("opc_signature=yes"))
+        .stdout(predicate::str::contains("signature_parts=1"));
+}
+
+#[test]
+fn vsix_signature_xml_from_external_signature_signs_verifies_and_embeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let prehash = dir.path().join("prehash.bin");
+    let external_signature = dir.path().join("external.sig");
+    let xml = dir.path().join("signature.xml");
+    let output = dir.path().join("signed.vsix");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut prehash_cmd = portable_cmd();
+    prehash_cmd
+        .arg("vsix-signature-xml-prehash")
+        .arg(&input)
+        .arg("--encoding")
+        .arg("raw")
+        .arg("--output")
+        .arg(&prehash);
+    prehash_cmd.assert().success();
+
+    let key_bytes = std::fs::read(&key).expect("read test key");
+    let private_key = rdp::parse_rsa_private_key(&key_bytes).expect("parse test key");
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signed_info_digest = std::fs::read(&prehash).expect("read prehash");
+    let raw_signature = signing_key
+        .sign_prehash(&signed_info_digest)
+        .expect("external RSA signature")
+        .to_bytes();
+    std::fs::write(&external_signature, raw_signature).expect("write external signature");
+
+    let mut assemble = portable_cmd();
+    assemble
+        .arg("vsix-signature-xml-from-signature")
+        .arg(&input)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--signature")
+        .arg(&external_signature)
+        .arg("--output")
+        .arg(&xml);
+    assemble.assert().success();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("vsix-verify-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("reference_digest_match=yes"))
+        .stdout(predicate::str::contains("signature_value_match=yes"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+
+    let mut embed = portable_cmd();
+    embed
+        .arg("vsix-embed-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&xml)
+        .arg("--output")
+        .arg(&output);
+    embed.assert().success();
+
+    let mut embedded_verify = portable_cmd();
+    embedded_verify
+        .arg("vsix-verify-signature")
+        .arg(&output)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    embedded_verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vsix-verify-signature: ok"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+}
+
+#[test]
+fn vsix_sign_creates_verifiable_signed_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let output = dir.path().join("signed.vsix");
+    let extracted_xml = dir.path().join("signature.xml");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("vsix-sign")
+        .arg(&input)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&output);
+    sign.assert()
+        .success()
+        .stdout(predicate::str::contains("signature_xml_part="));
+
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+    let mut xml = Vec::new();
+    archive
+        .by_name("package/services/digital-signature/xml-signature/psign-signature.psdsxs")
+        .unwrap()
+        .read_to_end(&mut xml)
+        .unwrap();
+    std::fs::write(&extracted_xml, xml).unwrap();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("vsix-verify-signature-xml")
+        .arg(&input)
+        .arg("--signature-xml")
+        .arg(&extracted_xml)
+        .arg("--cert")
+        .arg(&cert);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signature_value_match=yes"));
+
+    let mut info = portable_cmd();
+    info.arg("vsix-signature-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("opc_signature=yes"));
+
+    let mut embedded_verify = portable_cmd();
+    embedded_verify
+        .arg("vsix-verify-signature")
+        .arg(&output)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    embedded_verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vsix-verify-signature: ok"))
+        .stdout(predicate::str::contains("signature_xml_present=yes"))
+        .stdout(predicate::str::contains("reference_digest_match=yes"))
+        .stdout(predicate::str::contains("signature_value_match=yes"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+}
+
+#[test]
+fn vsix_verify_signature_rejects_tampered_signed_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let output = dir.path().join("signed.vsix");
+    let tampered = dir.path().join("tampered.vsix");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("vsix-sign")
+        .arg(&input)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&output);
+    sign.assert().success();
+    append_zip_entry(&output, &tampered, "tampered.txt", b"changed");
+
+    let mut verify = portable_cmd();
+    verify.arg("vsix-verify-signature").arg(&tampered);
+    verify.assert().failure().stderr(predicate::str::contains(
+        "signature reference count mismatch",
+    ));
+}
+
+#[test]
+fn vsix_verify_signature_requires_embedded_signature_xml() {
+    let input = package_fixture("unsigned/sample.vsix");
+
+    let mut verify = portable_cmd();
+    verify.arg("vsix-verify-signature").arg(&input);
+    verify.assert().failure().stderr(predicate::str::contains(
+        "VSIX package does not contain OPC signature XML",
+    ));
+}
+
+#[test]
+fn vsix_signature_reference_xml_rejects_different_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = package_fixture("unsigned/sample.vsix");
+    let different = package_fixture("unsigned/nested.vsix");
+    let xml = dir.path().join("signature-reference.xml");
+
+    let mut write = portable_cmd();
+    write
+        .arg("vsix-signature-reference-xml")
+        .arg(&input)
+        .arg("--output")
+        .arg(&xml);
+    write.assert().success();
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("vsix-verify-signature-reference-xml")
+        .arg(&different)
+        .arg("--signature-xml")
+        .arg(&xml);
+    verify.assert().failure().stderr(predicate::str::contains(
+        "signature reference count mismatch",
+    ));
+}
+
+#[test]
+fn appinstaller_info_reports_descriptor_and_companion_signature() {
+    let descriptor =
+        repo_root().join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let signature =
+        repo_root().join("tests/fixtures/generated-signed/appinstaller/sample.appinstaller.p7");
+
+    let mut cmd = portable_cmd();
+    cmd.arg("appinstaller-info")
+        .arg(&descriptor)
+        .arg("--signature")
+        .arg(&signature);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("root=AppInstaller"))
+        .stdout(predicate::str::contains(
+            "namespace=http://schemas.microsoft.com/appx/appinstaller/2018",
+        ))
+        .stdout(predicate::str::contains("main_package=yes"))
+        .stdout(predicate::str::contains("main_bundle=no"))
+        .stdout(predicate::str::contains(
+            "publisher=CN=Test Code Signing Certificate",
+        ))
+        .stdout(predicate::str::contains("companion_signature_len="));
+}
+
+#[test]
+fn appinstaller_verify_companion_uses_detached_trust_path() {
+    let repo = repo_root();
+    let descriptor =
+        repo.join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let signature =
+        repo.join("tests/fixtures/generated-signed/appinstaller/sample.appinstaller.p7");
+
+    let mut cmd = portable_cmd();
+    cmd.arg("appinstaller-verify-companion")
+        .arg(&descriptor)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--anchor-dir")
+        .arg(anchor_dir(&repo));
+    cmd.assert().success().stdout(predicate::str::contains(
+        "appinstaller-verify-companion: ok",
+    ));
+}
+
+#[test]
+fn appinstaller_sign_companion_creates_verifiable_detached_pkcs7() {
+    let descriptor =
+        repo_root().join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let signature = dir.path().join("sample.appinstaller.p7");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("appinstaller-sign-companion")
+        .arg(&descriptor)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signature);
+    sign.assert()
+        .success()
+        .stdout(predicate::str::contains("companion_signature_len="));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("appinstaller-verify-companion")
+        .arg(&descriptor)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify.assert().success().stdout(predicate::str::contains(
+        "appinstaller-verify-companion: ok",
+    ));
+}
+
+#[test]
+fn appinstaller_sign_companion_from_external_signature_creates_verifiable_detached_pkcs7() {
+    let descriptor =
+        repo_root().join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let prehash = dir.path().join("prehash.bin");
+    let external_signature = dir.path().join("external.sig");
+    let signature = dir.path().join("sample.appinstaller.p7");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut prehash_cmd = portable_cmd();
+    prehash_cmd
+        .arg("appinstaller-sign-companion-prehash")
+        .arg(&descriptor)
+        .arg("--encoding")
+        .arg("raw")
+        .arg("--output")
+        .arg(&prehash);
+    prehash_cmd.assert().success();
+
+    let key_bytes = std::fs::read(&key).expect("read test key");
+    let private_key = rdp::parse_rsa_private_key(&key_bytes).expect("parse test key");
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signed_attrs_digest = std::fs::read(&prehash).expect("read prehash");
+    let raw_signature = signing_key
+        .sign_prehash(&signed_attrs_digest)
+        .expect("external RSA signature")
+        .to_bytes();
+    std::fs::write(&external_signature, raw_signature).expect("write external signature");
+
+    let mut assemble = portable_cmd();
+    assemble
+        .arg("appinstaller-sign-companion-from-signature")
+        .arg(&descriptor)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--signature")
+        .arg(&external_signature)
+        .arg("--output")
+        .arg(&signature);
+    assemble
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("companion_signature_len="));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("appinstaller-verify-companion")
+        .arg(&descriptor)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
+    verify.assert().success().stdout(predicate::str::contains(
+        "appinstaller-verify-companion: ok",
+    ));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn appinstaller_sign_companion_embeds_rfc3161_timestamp_attribute() {
+    let descriptor =
+        repo_root().join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    let signature = dir.path().join("sample.appinstaller.p7");
+    let tsa_root = dir.path().join("tsa-root.der");
+    write_test_rsa_cert_key(&cert, &key);
+    let tsa_root_arg = tsa_root.to_str().unwrap();
+    let gen_time = generalized_time_tomorrow_noon_utc();
+    let (mut guard, timestamp_url) =
+        spawn_psign_server_with_gen_time(&gen_time, &["--cert-output", tsa_root_arg]);
+
+    let mut sign = portable_cmd();
+    sign.arg("appinstaller-sign-companion")
+        .arg(&descriptor)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--output")
+        .arg(&signature);
+    sign.assert().success();
+    let status = guard.0.wait().expect("timestamp server exit");
+    assert!(status.success(), "timestamp server failed with {status}");
+
+    let mut inspect = portable_cmd();
+    inspect
+        .arg("inspect-authenticode")
+        .arg(&signature)
+        .arg("--input")
+        .arg("pkcs7");
+    inspect
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "microsoft_nested_rfc3161_attribute",
+        ))
+        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("appinstaller-verify-companion")
+        .arg(&descriptor)
+        .arg("--signature")
+        .arg(&signature)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .arg("--trusted-ca")
+        .arg(&tsa_root)
+        .arg("--allow-loose-signing-cert")
+        .arg("--prefer-timestamp-signing-time")
+        .arg("--require-valid-timestamp");
+    verify.assert().success().stdout(predicate::str::contains(
+        "appinstaller-verify-companion: ok",
+    ));
+}
+
+#[test]
+fn appinstaller_set_publisher_updates_descriptor_metadata() {
+    let descriptor =
+        repo_root().join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("updated.appinstaller");
+    let publisher = "CN=Updated Publisher, O=Example & Co";
+
+    let mut cmd = portable_cmd();
+    cmd.arg("appinstaller-set-publisher")
+        .arg(&descriptor)
+        .arg("--publisher")
+        .arg(publisher)
+        .arg("--output")
+        .arg(&output);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("publisher=CN=Updated Publisher"));
+
+    let xml = std::fs::read_to_string(&output).unwrap();
+    assert!(xml.contains("Publisher=\"CN=Updated Publisher, O=Example &amp; Co\""));
+
+    let mut info = portable_cmd();
+    info.arg("appinstaller-info").arg(&output);
+    info.assert().success().stdout(predicate::str::contains(
+        "publisher=CN=Updated Publisher, O=Example &amp; Co",
+    ));
+}
+
+#[test]
+fn appinstaller_set_publisher_updates_prefixed_main_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let descriptor = dir.path().join("prefixed.appinstaller");
+    let output = dir.path().join("updated-prefixed.appinstaller");
+    std::fs::write(
+        &descriptor,
+        r#"<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2021" xmlns:pkg="urn:example" Version="1.0.0.0" Uri="https://example.invalid/app.appinstaller"><pkg:MainPackage Name="Example.App" Publisher="CN=Old" Version="1.0.0.0" ProcessorArchitecture="x64" Uri="https://example.invalid/app.msix"/></AppInstaller>"#,
+    )
+    .unwrap();
+
+    let mut cmd = portable_cmd();
+    cmd.arg("appinstaller-set-publisher")
+        .arg(&descriptor)
+        .arg("--publisher")
+        .arg("CN=Updated Publisher")
+        .arg("--output")
+        .arg(&output);
+    cmd.assert().success();
+
+    let xml = std::fs::read_to_string(&output).unwrap();
+    assert!(xml.contains(r#"<pkg:MainPackage"#));
+    assert!(xml.contains(r#"Publisher="CN=Updated Publisher""#));
+
+    let mut info = portable_cmd();
+    info.arg("appinstaller-info").arg(&output);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("main_package=yes"))
+        .stdout(predicate::str::contains("publisher=CN=Updated Publisher"));
+}
+
+#[test]
+fn business_central_app_info_detects_navx_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let valid = dir.path().join("valid.app");
+    let invalid = dir.path().join("invalid.app");
+    std::fs::write(&valid, b"NAVX\x00fixture").unwrap();
+    std::fs::write(&invalid, b"not-navx").unwrap();
+
+    let mut valid_cmd = portable_cmd();
+    valid_cmd.arg("business-central-app-info").arg(&valid);
+    valid_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("business_central_app=yes"))
+        .stdout(predicate::str::contains("header=NAVX"));
+
+    let mut invalid_cmd = portable_cmd();
+    invalid_cmd.arg("business-central-app-info").arg(&invalid);
+    invalid_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("business_central_app=no"))
+        .stdout(predicate::str::contains("header=-"));
+}
+
+#[test]
+fn msix_manifest_info_and_set_publisher_update_identity() {
+    let input = repo_root().join("tests/fixtures/generated-unsigned/msix/sample.msix");
+
+    let mut info = portable_cmd();
+    info.arg("msix-manifest-info").arg(&input);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("package_name=Psign.ParityMinimal"))
+        .stdout(predicate::str::contains(
+            "publisher=CN=Test Code Signing Certificate",
+        ))
+        .stdout(predicate::str::contains("version=1.0.0.0"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("updated.msix");
+    let publisher = "CN=Updated MSIX Publisher, O=Example & Co";
+    let mut update = portable_cmd();
+    update
+        .arg("msix-set-publisher")
+        .arg(&input)
+        .arg("--publisher")
+        .arg(publisher)
+        .arg("--output")
+        .arg(&output);
+    update
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publisher=CN=Updated MSIX"));
+
+    let mut updated_info = portable_cmd();
+    updated_info.arg("msix-manifest-info").arg(&output);
+    updated_info
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "publisher=CN=Updated MSIX Publisher, O=Example &amp; Co",
+        ));
+}
+
+#[test]
+fn clickonce_deploy_info_and_copy_payload_use_content_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let deployed = dir.path().join("app.exe.deploy");
+    let output = dir.path().join("app.exe");
+    std::fs::write(&deployed, b"payload").unwrap();
+
+    let mut info = portable_cmd();
+    info.arg("clickonce-deploy-info").arg(&deployed);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("deployed=yes"))
+        .stdout(predicate::str::contains("content_name=app.exe"))
+        .stdout(predicate::str::contains("len=7"));
+
+    let mut copy = portable_cmd();
+    copy.arg("clickonce-copy-deploy-payload")
+        .arg(&deployed)
+        .arg("--output")
+        .arg(&output);
+    copy.assert()
+        .success()
+        .stdout(predicate::str::contains("content_name=app.exe"))
+        .stdout(predicate::str::contains("bytes=7"));
+    assert_eq!(std::fs::read(&output).unwrap(), b"payload");
+}
+
+#[test]
+fn clickonce_manifest_hashes_can_update_and_verify_file_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let payload_dir = dir.path().join("bin");
+    std::fs::create_dir(&payload_dir).unwrap();
+    std::fs::write(payload_dir.join("app.dll"), b"ClickOnce payload").unwrap();
+    let manifest = dir.path().join("app.exe.manifest");
+    let updated = dir.path().join("app.updated.manifest");
+    std::fs::write(
+        &manifest,
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:dsig="http://www.w3.org/2000/09/xmldsig#">
+  <file name="bin/app.dll" size="0">
+    <hash>
+      <dsig:DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
+      <dsig:DigestValue>stale</dsig:DigestValue>
+    </hash>
+  </file>
+</assembly>"#,
+    )
+    .unwrap();
+
+    let mut verify_stale = portable_cmd();
+    verify_stale
+        .arg("clickonce-manifest-hashes")
+        .arg(&manifest)
+        .arg("--base-directory")
+        .arg(dir.path());
+    verify_stale
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("hash verification failed"))
+        .stdout(predicate::str::contains("status=mismatch"));
+
+    let mut update = portable_cmd();
+    update
+        .arg("clickonce-update-manifest-hashes")
+        .arg(&manifest)
+        .arg("--base-directory")
+        .arg(dir.path())
+        .arg("--algorithm")
+        .arg("sha256")
+        .arg("--output")
+        .arg(&updated);
+    update
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated=1"))
+        .stdout(predicate::str::contains("algorithm=sha256"));
+
+    let updated_text = std::fs::read_to_string(&updated).unwrap();
+    assert!(updated_text.contains("size=\"17\""));
+    assert!(updated_text.contains("http://www.w3.org/2001/04/xmlenc#sha256"));
+    assert!(!updated_text.contains(">stale<"));
+
+    let mut verify_updated = portable_cmd();
+    verify_updated
+        .arg("clickonce-manifest-hashes")
+        .arg(&updated)
+        .arg("--base-directory")
+        .arg(dir.path());
+    verify_updated
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("references=1"))
+        .stdout(predicate::str::contains("path=bin/app.dll"))
+        .stdout(predicate::str::contains("algorithm=sha256"))
+        .stdout(predicate::str::contains("status=valid"))
+        .stdout(predicate::str::contains("mismatches=0"));
+}
+
+#[test]
+fn clickonce_sign_manifest_creates_verifiable_portable_xmldsig() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("app.exe.manifest");
+    let signed = dir.path().join("app.signed.manifest");
+    let tampered = dir.path().join("app.tampered.manifest");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::write(
+        &manifest,
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity name="ClickOnce.Sample" version="1.0.0.0" />
+  <description asmv2:publisher="Example" xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" />
+</assembly>"#,
+    )
+    .unwrap();
+
+    let mut sign = portable_cmd();
+    sign.arg("clickonce-sign-manifest")
+        .arg(&manifest)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signed);
+    sign.assert()
+        .success()
+        .stdout(predicate::str::contains("signature_len="));
+
+    let signed_text = std::fs::read_to_string(&signed).unwrap();
+    assert!(signed_text.contains("<Signature xmlns=\"http://www.w3.org/2000/09/xmldsig#\">"));
+    assert!(signed_text.contains("<X509Certificate>"));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("clickonce-verify-manifest-signature")
+        .arg(&signed)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "clickonce-verify-manifest-signature: ok",
+        ))
+        .stdout(predicate::str::contains("manifest_digest_match=yes"))
+        .stdout(predicate::str::contains("signature_value_match=yes"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+
+    std::fs::write(
+        &tampered,
+        signed_text.replace("ClickOnce.Sample", "ClickOnce.Tampered"),
+    )
+    .unwrap();
+    let mut verify_tampered = portable_cmd();
+    verify_tampered
+        .arg("clickonce-verify-manifest-signature")
+        .arg(&tampered)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    verify_tampered
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "SignedInfo does not match manifest digest",
+        ));
+}
+
+#[test]
+fn clickonce_sign_manifest_from_external_signature_creates_verifiable_xmldsig() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("app.exe.manifest");
+    let prehash = dir.path().join("prehash.bin");
+    let external_signature = dir.path().join("external.sig");
+    let signed = dir.path().join("app.signed.manifest");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::write(
+        &manifest,
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity name="ClickOnce.External" version="1.0.0.0" />
+</assembly>"#,
+    )
+    .unwrap();
+
+    let mut prehash_cmd = portable_cmd();
+    prehash_cmd
+        .arg("clickonce-sign-manifest-prehash")
+        .arg(&manifest)
+        .arg("--encoding")
+        .arg("raw")
+        .arg("--output")
+        .arg(&prehash);
+    prehash_cmd.assert().success();
+
+    let key_bytes = std::fs::read(&key).expect("read test key");
+    let private_key = rdp::parse_rsa_private_key(&key_bytes).expect("parse test key");
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signed_info_digest = std::fs::read(&prehash).expect("read prehash");
+    let raw_signature = signing_key
+        .sign_prehash(&signed_info_digest)
+        .expect("external RSA signature")
+        .to_bytes();
+    std::fs::write(&external_signature, raw_signature).expect("write external signature");
+
+    let mut assemble = portable_cmd();
+    assemble
+        .arg("clickonce-sign-manifest-from-signature")
+        .arg(&manifest)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--signature")
+        .arg(&external_signature)
+        .arg("--output")
+        .arg(&signed);
+    assemble
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signature_len="));
+
+    let mut verify = portable_cmd();
+    verify
+        .arg("clickonce-verify-manifest-signature")
+        .arg(&signed)
+        .arg("--trusted-ca")
+        .arg(&cert);
+    verify
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "clickonce-verify-manifest-signature: ok",
+        ))
+        .stdout(predicate::str::contains("manifest_digest_match=yes"))
+        .stdout(predicate::str::contains("signature_value_match=yes"))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
 }
 
 fn package_fixture(rel: &str) -> PathBuf {
@@ -352,6 +1801,31 @@ fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
             .as_bytes(),
     )
     .expect("write key");
+}
+
+fn append_zip_entry(input: &Path, output: &Path, entry_name: &str, entry_bytes: &[u8]) {
+    let input_file = std::fs::File::open(input).expect("open input zip");
+    let mut archive = zip::ZipArchive::new(input_file).expect("read input zip");
+    let output_file = std::fs::File::create(output).expect("create output zip");
+    let mut writer = zip::ZipWriter::new(output_file);
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).expect("read zip entry");
+        let name = entry.name().to_string();
+        let options = zip::write::FileOptions::default().compression_method(entry.compression());
+        if entry.is_dir() {
+            writer.add_directory(name, options).unwrap();
+        } else {
+            writer.start_file(name, options).unwrap();
+            std::io::copy(&mut entry, &mut writer).unwrap();
+        }
+    }
+
+    writer
+        .start_file(entry_name, zip::write::FileOptions::default())
+        .unwrap();
+    writer.write_all(entry_bytes).unwrap();
+    writer.finish().unwrap();
 }
 
 #[test]
@@ -1844,6 +3318,35 @@ fn portable_verify_negative_msix_encrypted_extension_cli() {
         err.contains("encrypted") || err.contains("Eappx"),
         "stderr should mention encrypted MSIX path; got:\n{err}"
     );
+}
+
+#[test]
+fn portable_msix_metadata_helpers_reject_encrypted_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("fake.eappx");
+    let out = dir.path().join("out.eappx");
+    std::fs::write(&p, b"not-a-real-package").unwrap();
+
+    let mut info = portable_cmd();
+    info.arg("msix-manifest-info").arg(&p);
+    info.assert()
+        .failure()
+        .stderr(predicate::str::contains("encrypted MSIX/AppX packages"))
+        .stderr(predicate::str::contains("Windows AppxSip OS delegation"));
+
+    let mut update = portable_cmd();
+    update
+        .arg("msix-set-publisher")
+        .arg(&p)
+        .arg("--publisher")
+        .arg("CN=Example")
+        .arg("--output")
+        .arg(&out);
+    update
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("encrypted MSIX/AppX packages"))
+        .stderr(predicate::str::contains("Windows AppxSip OS delegation"));
 }
 
 #[test]

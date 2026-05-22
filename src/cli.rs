@@ -45,6 +45,8 @@ pub enum Command {
     CertStore(CertStoreArgs),
     /// Portable-only diagnostics and helpers (no Win32 APIs).
     Portable(PortableArgs),
+    /// Plan or run dotnet/sign-style code-signing orchestration over files, globs, and nested containers.
+    Code(CodeArgs),
     /// Verify embedded Authenticode signature on a file.
     Verify(VerifyArgs),
     /// Sign a file using mssign32 (`SignerSignEx3`).
@@ -76,6 +78,168 @@ pub struct PortableArgs {
 pub struct CertStoreArgs {
     #[command(subcommand)]
     pub command: CertStoreCommand,
+}
+
+#[derive(Args, Debug)]
+pub struct CodeArgs {
+    /// Base directory used to resolve relative input patterns and file-list entries.
+    #[arg(long)]
+    pub base_directory: Option<PathBuf>,
+    /// Text file containing include and `!` exclude patterns, one per line.
+    #[arg(long)]
+    pub file_list: Option<PathBuf>,
+    /// Output file/directory for future signing runs. Dry-run records it but does not write signed content.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Recurse into ZIP/OPC containers such as VSIX and NuGet packages.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub recurse_containers: bool,
+    /// Maximum independent top-level signing concurrency used by the orchestrator.
+    #[arg(long)]
+    pub max_concurrency: Option<usize>,
+    /// Authenticode/package application display name.
+    #[arg(long)]
+    pub application_name: Option<String>,
+    /// Package publisher name.
+    #[arg(long)]
+    pub publisher_name: Option<String>,
+    /// Authenticode description.
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Authenticode description URL.
+    #[arg(long)]
+    pub description_url: Option<String>,
+    /// File digest algorithm for future signing runs.
+    #[arg(long, value_enum, ignore_case = true, default_value_t = DigestAlgorithm::Sha256)]
+    pub file_digest: DigestAlgorithm,
+    /// RFC3161 timestamp URL for future signing runs.
+    #[arg(long)]
+    pub timestamp_url: Option<String>,
+    /// RFC3161 timestamp digest algorithm for future signing runs.
+    #[arg(long, value_enum, ignore_case = true)]
+    pub timestamp_digest: Option<DigestAlgorithm>,
+    /// Continue planning/signing remaining top-level inputs after an error.
+    #[arg(long)]
+    pub continue_on_error: bool,
+    /// Skip files already signed when future signing support is enabled.
+    #[arg(long)]
+    pub skip_signed: bool,
+    /// Replace existing package-native signatures instead of failing when NuGet/VSIX signatures are present.
+    #[arg(long, conflicts_with = "skip_signed")]
+    pub overwrite: bool,
+    /// Signer certificate as DER or PEM for initial local package signing execution.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "key",
+        conflicts_with_all = ["cert_sha1", "pfx"]
+    )]
+    pub cert: Option<PathBuf>,
+    /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM for initial local package signing execution.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "cert",
+        conflicts_with_all = ["cert_sha1", "pfx"]
+    )]
+    pub key: Option<PathBuf>,
+    /// PFX/PKCS#12 signer identity for local package signing execution.
+    #[arg(
+        long,
+        visible_alias = "f",
+        value_name = "PATH",
+        conflicts_with = "cert_sha1"
+    )]
+    pub pfx: Option<PathBuf>,
+    /// Optional password for the PFX/PKCS#12 signer identity.
+    #[arg(long, visible_alias = "p", requires = "pfx")]
+    pub password: Option<String>,
+    /// Resolve a local portable cert-store signing identity by SHA-1 thumbprint.
+    #[arg(long = "sha1", visible_alias = "cert-sha1", conflicts_with = "pfx")]
+    pub cert_sha1: Option<String>,
+    /// Portable certificate store base directory for `--sha1`.
+    #[arg(long)]
+    pub cert_store_dir: Option<PathBuf>,
+    /// Use the LocalMachine scope in the portable certificate store for `--sha1`.
+    #[arg(long, visible_alias = "sm")]
+    pub machine_store: bool,
+    /// Portable certificate store name for `--sha1`.
+    #[arg(long = "store", visible_alias = "s", default_value = "MY")]
+    pub store_name: String,
+    /// Azure Key Vault URL for remote package/orchestrator signing.
+    #[arg(long = "azure-key-vault-url", visible_alias = "kvu")]
+    pub azure_key_vault_url: Option<String>,
+    /// Azure Key Vault signing certificate name.
+    #[arg(long = "azure-key-vault-certificate", visible_alias = "kvc")]
+    pub azure_key_vault_certificate: Option<String>,
+    /// Optional Azure Key Vault certificate version.
+    #[arg(long = "azure-key-vault-certificate-version", visible_alias = "kvcv")]
+    pub azure_key_vault_certificate_version: Option<String>,
+    #[arg(long = "azure-key-vault-client-id", visible_alias = "kvi")]
+    pub azure_key_vault_client_id: Option<String>,
+    #[arg(long = "azure-key-vault-client-secret", visible_alias = "kvs")]
+    pub azure_key_vault_client_secret: Option<String>,
+    #[arg(long = "azure-key-vault-tenant-id", visible_alias = "kvt")]
+    pub azure_key_vault_tenant_id: Option<String>,
+    #[arg(long = "azure-key-vault-accesstoken", visible_alias = "kva")]
+    pub azure_key_vault_access_token: Option<String>,
+    /// Managed identity / DefaultAzureCredential-style acquisition via IMDS.
+    #[arg(long = "azure-key-vault-managed-identity", visible_alias = "kvm")]
+    pub azure_key_vault_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Key Vault signing.
+    #[arg(long = "azure-key-vault-credential-type", value_enum)]
+    pub azure_key_vault_credential_type: Option<AzureCredentialType>,
+    /// OAuth authority host prefix, e.g. `https://login.microsoftonline.com`.
+    #[arg(long = "azure-authority", visible_alias = "au")]
+    pub azure_authority: Option<String>,
+    /// Artifact Signing metadata JSON (same shape as Microsoft's dlib `/dmdf` file).
+    #[arg(long = "artifact-signing-metadata")]
+    pub artifact_signing_metadata: Option<PathBuf>,
+    /// Artifact Signing regional hostname segment, e.g. `westus`, when not using metadata Endpoint.
+    #[arg(long = "artifact-signing-region")]
+    pub artifact_signing_region: Option<String>,
+    /// Artifact Signing data-plane endpoint, e.g. `https://wus2.codesigning.azure.net`.
+    #[arg(long = "artifact-signing-endpoint")]
+    pub artifact_signing_endpoint: Option<String>,
+    #[arg(long = "artifact-signing-account-name")]
+    pub artifact_signing_account_name: Option<String>,
+    #[arg(long = "artifact-signing-profile-name")]
+    pub artifact_signing_profile_name: Option<String>,
+    #[arg(long = "artifact-signing-signature-algorithm")]
+    pub artifact_signing_signature_algorithm: Option<String>,
+    #[arg(long = "artifact-signing-api-version")]
+    pub artifact_signing_api_version: Option<String>,
+    #[arg(long = "artifact-signing-correlation-id")]
+    pub artifact_signing_correlation_id: Option<String>,
+    #[arg(long = "artifact-signing-access-token")]
+    pub artifact_signing_access_token: Option<String>,
+    #[arg(long = "artifact-signing-managed-identity")]
+    pub artifact_signing_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Artifact Signing.
+    #[arg(long = "artifact-signing-credential-type", value_enum)]
+    pub artifact_signing_credential_type: Option<AzureCredentialType>,
+    #[arg(long = "artifact-signing-tenant-id")]
+    pub artifact_signing_tenant_id: Option<String>,
+    #[arg(long = "artifact-signing-client-id")]
+    pub artifact_signing_client_id: Option<String>,
+    #[arg(long = "artifact-signing-client-secret")]
+    pub artifact_signing_client_secret: Option<String>,
+    #[arg(long = "artifact-signing-authority")]
+    pub artifact_signing_authority: Option<String>,
+    /// Override Artifact Signing data-plane origin for deterministic local tests.
+    #[arg(long = "artifact-signing-endpoint-base-url", hide = true)]
+    pub artifact_signing_endpoint_base_url: Option<String>,
+    /// Additional certificate to include in generated package PKCS#7 signatures.
+    #[arg(long = "chain-cert", value_name = "PATH")]
+    pub chain_certs: Vec<PathBuf>,
+    /// Build and print the signing graph without modifying files.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit the dry-run signing graph as JSON.
+    #[arg(long, requires = "dry_run")]
+    pub plan_json: bool,
+    /// Files or glob patterns to include.
+    pub inputs: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -253,6 +417,20 @@ pub enum DigestAlgorithm {
     /// Native `/fd certHash` — digest algorithm follows the signing certificate.
     #[value(name = "cert-hash", alias = "certHash")]
     CertHash,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AzureCredentialType {
+    /// Infer from explicit token/client-secret/managed-identity options.
+    Default,
+    /// Use managed identity. For user-assigned identities, pass the existing client-id option.
+    ManagedIdentity,
+    /// Use an already acquired bearer access token.
+    AccessToken,
+    /// Use tenant/client-id/client-secret service-principal credentials.
+    ClientSecret,
+    /// Reserve the Azure.Identity workload identity shape; execution support is not wired yet.
+    WorkloadIdentity,
 }
 
 impl DigestAlgorithm {
@@ -693,6 +871,9 @@ pub struct SignArgs {
     /// Managed identity / `DefaultAzureCredential`-style acquisition via IMDS (`-kvm`).
     #[arg(long = "azure-key-vault-managed-identity", visible_alias = "kvm")]
     pub azure_key_vault_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Key Vault signing.
+    #[arg(long = "azure-key-vault-credential-type", value_enum)]
+    pub azure_key_vault_credential_type: Option<AzureCredentialType>,
     /// OAuth authority host prefix (`-au`), e.g. `https://login.microsoftonline.com`.
     #[arg(long = "azure-authority", visible_alias = "au")]
     pub azure_authority: Option<String>,
@@ -719,6 +900,9 @@ pub struct SignArgs {
     pub artifact_signing_access_token: Option<String>,
     #[arg(long = "artifact-signing-managed-identity")]
     pub artifact_signing_managed_identity: bool,
+    /// Azure.Identity-style credential selector for Artifact Signing.
+    #[arg(long = "artifact-signing-credential-type", value_enum)]
+    pub artifact_signing_credential_type: Option<AzureCredentialType>,
     #[arg(long = "artifact-signing-tenant-id")]
     pub artifact_signing_tenant_id: Option<String>,
     #[arg(long = "artifact-signing-client-id")]

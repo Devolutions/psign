@@ -24,8 +24,11 @@ tests/fixtures/**/*.msixbundle binary
 tests/fixtures/**/*.msi binary
 tests/fixtures/**/*.msp binary
 tests/fixtures/**/*.mst binary
+tests/fixtures/**/*.nupkg binary
 tests/fixtures/**/*.ocx binary
 tests/fixtures/**/*.p7 binary
 tests/fixtures/**/*.pfx binary
+tests/fixtures/**/*.snupkg binary
 tests/fixtures/**/*.sys binary
+tests/fixtures/**/*.vsix binary
 tests/fixtures/**/*.winmd binary

@@ -473,6 +473,81 @@ pub fn create_authenticode_pkcs7_der_with_rsa_signature(
     encode_pkcs7_content_info_signed_data_der(&sd)
 }
 
+/// Return the digest a remote RSA signer must sign for a generic CMS `SignedData` document.
+///
+/// The returned bytes are the SHA-2 digest of DER `SignedAttributes` (`SET OF Attribute`) per
+/// RFC 5652 §5.4. Pass the raw RSA PKCS#1 v1.5 signature over this digest to
+/// [`create_pkcs7_signed_data_der_with_rsa_signature`].
+pub fn pkcs7_remote_rsa_signed_attrs_digest(
+    econtent_type: ObjectIdentifier,
+    econtent_der: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> Result<Vec<u8>> {
+    let attrs = pkcs7_signed_attrs(econtent_type, econtent_der, digest_algorithm)?;
+    let der = signed_attributes_der(&attrs)?;
+    Ok(digest_algorithm.digest_bytes(&der))
+}
+
+/// Create generic PKCS#7 `ContentInfo(SignedData)` DER from externally produced RSA signature bytes.
+///
+/// `econtent_der` must be one complete DER TLV for the value whose digest appears in PKCS#9
+/// `messageDigest`. Set `detached` to omit the encapsulated content from the resulting CMS while
+/// still signing the supplied `econtent_der`; this matches NuGet/App Installer companion flows.
+pub fn create_pkcs7_signed_data_der_with_rsa_signature(
+    econtent_type: ObjectIdentifier,
+    econtent_der: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+    signer_cert: Certificate,
+    chain_certs: Vec<Certificate>,
+    encrypted_digest: &[u8],
+    detached: bool,
+) -> Result<Vec<u8>> {
+    let attrs = pkcs7_signed_attrs(econtent_type, econtent_der, digest_algorithm)?;
+    let signer_id = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+        issuer: signer_cert.tbs_certificate.issuer.clone(),
+        serial_number: signer_cert.tbs_certificate.serial_number.clone(),
+    });
+    let signer_info = SignerInfo {
+        version: CmsVersion::V1,
+        sid: signer_id,
+        digest_alg: digest_algorithm.digest_algorithm(),
+        signed_attrs: Some(attrs),
+        signature_algorithm: digest_algorithm.rsa_signature_algorithm(),
+        signature: SignatureValue::new(encrypted_digest.to_vec())
+            .map_err(|e| anyhow!("SignerInfo.signature OCTET STRING: {e}"))?,
+        unsigned_attrs: None,
+    };
+    let mut rd = SliceReader::new(econtent_der)
+        .map_err(|e| anyhow!("encapsulated content DER reader: {e}"))?;
+    let econtent =
+        Any::decode(&mut rd).map_err(|e| anyhow!("encapsulated content as CMS Any: {e}"))?;
+    rd.finish(())
+        .map_err(|e| anyhow!("trailing octets after encapsulated content DER: {e}"))?;
+    let digest_algorithms = SetOfVec::try_from(vec![digest_algorithm.digest_algorithm()])
+        .map_err(|e| anyhow!("DigestAlgorithmIdentifiers SET: {e}"))?;
+    let mut certs = Vec::with_capacity(chain_certs.len() + 1);
+    certs.push(CertificateChoices::Certificate(signer_cert));
+    certs.extend(chain_certs.into_iter().map(CertificateChoices::Certificate));
+    let certificates = Some(CertificateSet(
+        SetOfVec::try_from(certs).map_err(|e| anyhow!("CertificateSet SET: {e}"))?,
+    ));
+    let signer_infos = SignerInfos(
+        SetOfVec::try_from(vec![signer_info]).map_err(|e| anyhow!("SignerInfos SET: {e}"))?,
+    );
+    let sd = SignedData {
+        version: CmsVersion::V1,
+        digest_algorithms,
+        encap_content_info: EncapsulatedContentInfo {
+            econtent_type,
+            econtent: (!detached).then_some(econtent),
+        },
+        certificates,
+        crls: None,
+        signer_infos,
+    };
+    encode_pkcs7_content_info_signed_data_der(&sd)
+}
+
 /// Attach a raw RFC3161 `timeStampToken` `ContentInfo` as a Microsoft Authenticode unsigned attribute.
 pub fn signed_data_add_rfc3161_timestamp_token(
     sd: &SignedData,
@@ -1114,6 +1189,28 @@ fn authenticode_signed_attrs(
     )?;
     SetOfVec::try_from(vec![
         pkcs9_content_type_attribute(authenticode::SPC_INDIRECT_DATA_OBJID)?,
+        pkcs9_message_digest_attribute(&econtent_digest)?,
+    ])
+    .map_err(|e| anyhow!("SignedAttributes SET OF Attribute canonicalization: {e}"))
+}
+
+fn pkcs7_signed_attrs(
+    econtent_type: ObjectIdentifier,
+    econtent_der: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> Result<SignedAttributes> {
+    let mut rd = SliceReader::new(econtent_der)
+        .map_err(|e| anyhow!("encapsulated content DER reader: {e}"))?;
+    let econtent =
+        Any::decode(&mut rd).map_err(|e| anyhow!("encapsulated content as CMS Any: {e}"))?;
+    rd.finish(())
+        .map_err(|e| anyhow!("trailing octets after encapsulated content DER: {e}"))?;
+    let econtent_digest = cms_digest_encapsulated_econtent_bytes(
+        &digest_algorithm.digest_algorithm().oid,
+        &econtent,
+    )?;
+    SetOfVec::try_from(vec![
+        pkcs9_content_type_attribute(econtent_type)?,
         pkcs9_message_digest_attribute(&econtent_digest)?,
     ])
     .map_err(|e| anyhow!("SignedAttributes SET OF Attribute canonicalization: {e}"))

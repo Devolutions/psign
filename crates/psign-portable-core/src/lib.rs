@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use der::Encode as _;
 use picky::key::PrivateKey;
 use picky::pkcs12::{
     Pfx, Pkcs12CryptoContext, Pkcs12ParsingParams, SafeBag, SafeBagKind, SafeContentsKind,
@@ -39,6 +40,10 @@ pub enum PortableFileFormat {
     Msix,
     Catalog,
     Zip,
+    NuGet,
+    Vsix,
+    ClickOnceManifest,
+    AppInstaller,
     PowerShellScript,
     WshScript,
     Unknown,
@@ -174,6 +179,38 @@ pub struct PortableSignRequest {
     pub timestamp_server: Option<String>,
     #[serde(default)]
     pub timestamp_hash_algorithm: Option<PortableTimestampDigestAlgorithm>,
+    // Azure Key Vault cloud signing
+    #[serde(default)]
+    pub azure_key_vault_url: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_certificate: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_access_token: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_client_id: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_client_secret: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_tenant_id: Option<String>,
+    #[serde(default)]
+    pub azure_key_vault_managed_identity: Option<bool>,
+    // Azure Artifact Signing / Trusted Signing
+    #[serde(default)]
+    pub artifact_signing_endpoint: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_account_name: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_profile_name: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_access_token: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_managed_identity: Option<bool>,
+    #[serde(default)]
+    pub artifact_signing_tenant_id: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_client_id: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +299,10 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         PortableFileFormat::Cab => sign_cab(&request, &output_path),
         PortableFileFormat::Msi => sign_msi(&request, &output_path),
         PortableFileFormat::Msix => sign_msix(&request, &output_path),
+        PortableFileFormat::NuGet => sign_nuget(&request, &output_path),
+        PortableFileFormat::Vsix => sign_vsix(&request, &output_path),
+        PortableFileFormat::ClickOnceManifest => sign_clickonce_manifest(&request, &output_path),
+        PortableFileFormat::AppInstaller => sign_appinstaller(&request, &output_path),
         PortableFileFormat::Zip => sign_zip(&request, &output_path),
         PortableFileFormat::PowerShellScript => sign_script(&request, &output_path),
         PortableFileFormat::WshScript => bail!("portable WSH script signing is not supported yet"),
@@ -300,6 +341,10 @@ pub fn portable_get_signature(
         PortableFileFormat::Cab => inspect_cab(&request.path),
         PortableFileFormat::Msi => inspect_msi(&request.path),
         PortableFileFormat::Msix => inspect_msix(&request.path),
+        PortableFileFormat::NuGet => inspect_nuget(&request.path, &data),
+        PortableFileFormat::Vsix => inspect_vsix_opc(&request.path, &data),
+        PortableFileFormat::ClickOnceManifest => inspect_clickonce_manifest(&request.path, &data),
+        PortableFileFormat::AppInstaller => inspect_appinstaller(&request.path),
         PortableFileFormat::Zip => inspect_zip(&request.path, &data),
         PortableFileFormat::PowerShellScript | PortableFileFormat::WshScript => {
             inspect_script(&request.path, &data)
@@ -330,7 +375,11 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
         "msi" | "msp" => PortableFileFormat::Msi,
         "msix" | "appx" | "msixbundle" | "appxbundle" => PortableFileFormat::Msix,
         "cat" => PortableFileFormat::Catalog,
-        "zip" | "vsix" | "nupkg" => PortableFileFormat::Zip,
+        "nupkg" | "snupkg" => PortableFileFormat::NuGet,
+        "vsix" => PortableFileFormat::Vsix,
+        "manifest" | "application" | "vsto" => PortableFileFormat::ClickOnceManifest,
+        "appinstaller" => PortableFileFormat::AppInstaller,
+        "zip" => PortableFileFormat::Zip,
         "ps1" | "psm1" | "psd1" | "ps1xml" | "psc1" | "cdxml" | "mof" => {
             PortableFileFormat::PowerShellScript
         }
@@ -497,6 +546,228 @@ fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
 }
 
+fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+    let data =
+        std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    let nuget_alg = match request.hash_algorithm {
+        PortableDigestAlgorithm::Sha256 => psign_opc_sign::nuget::NuGetHashAlgorithm::Sha256,
+        PortableDigestAlgorithm::Sha384 => psign_opc_sign::nuget::NuGetHashAlgorithm::Sha384,
+        PortableDigestAlgorithm::Sha512 => psign_opc_sign::nuget::NuGetHashAlgorithm::Sha512,
+    };
+    let unsigned = psign_opc_sign::nuget::canonical_unsigned_package_bytes(Cursor::new(data))
+        .with_context(|| {
+            format!(
+                "canonicalize NuGet package for signing {}",
+                request.path.display()
+            )
+        })?;
+    let content =
+        psign_opc_sign::nuget::signature_content_bytes(nuget_alg, &nuget_alg.hash(&unsigned));
+    // Create a CMS SignedData with id-data content type, then detach eContent
+    let econtent_der = der_encode_octet_string(&content)?;
+    let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
+    let pkcs7_bytes = pkcs7::create_pkcs7_signed_data_der_rsa(
+        id_data,
+        &econtent_der,
+        request.hash_algorithm.into(),
+        signer_cert,
+        chain,
+        private_key,
+    )
+    .with_context(|| format!("create NuGet CMS signature for {}", request.path.display()))?;
+    // Detach eContent (NuGet signatures are detached CMS)
+    let mut sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_bytes)
+        .context("parse generated CMS before detaching eContent")?;
+    sd.encap_content_info.econtent = None;
+    let pkcs7_detached = pkcs7::encode_pkcs7_content_info_signed_data_der(&sd)?;
+    let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7_detached)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
+    let mut out = Cursor::new(Vec::new());
+    psign_opc_sign::nuget::embed_signature(Cursor::new(unsigned), &mut out, &pkcs7_final, false)
+        .with_context(|| format!("embed NuGet signature into {}", request.path.display()))?;
+    std::fs::write(output_path, out.into_inner())
+        .with_context(|| format!("write {}", output_path.display()))
+}
+
+fn sign_vsix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+    let data =
+        std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    let vsix_alg = match request.hash_algorithm {
+        PortableDigestAlgorithm::Sha256 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
+        PortableDigestAlgorithm::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
+        PortableDigestAlgorithm::Sha512 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha512,
+    };
+    let signed_info = psign_opc_sign::vsix::signed_info_xml(Cursor::new(data.clone()), vsix_alg)
+        .with_context(|| format!("create VSIX SignedInfo XML for {}", request.path.display()))?;
+    let cert_der = signer_cert.to_der().context("encode signer cert DER")?;
+    let signature = sign_xml_signed_info_rsa(vsix_alg, &signed_info, &private_key)?;
+    let _chain = chain; // chain included in KeyInfo is just the signer cert for VSIX
+    let xml = psign_opc_sign::vsix::signature_xml_from_signed_info(
+        &signed_info,
+        &signature,
+        Some(&cert_der),
+    )
+    .into_bytes();
+    let mut out = Cursor::new(Vec::new());
+    psign_opc_sign::vsix::embed_signature_xml(Cursor::new(data), &mut out, &xml, false)
+        .with_context(|| format!("embed VSIX signature XML into {}", request.path.display()))?;
+    std::fs::write(output_path, out.into_inner())
+        .with_context(|| format!("write {}", output_path.display()))
+}
+
+fn sign_clickonce_manifest(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+    let data =
+        std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let text = std::str::from_utf8(&data).with_context(|| {
+        format!(
+            "read ClickOnce manifest {} as UTF-8",
+            request.path.display()
+        )
+    })?;
+    let (signer_cert, private_key, _chain) = load_signing_material(request)?;
+    let vsix_alg = match request.hash_algorithm {
+        PortableDigestAlgorithm::Sha256 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
+        PortableDigestAlgorithm::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
+        PortableDigestAlgorithm::Sha512 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha512,
+    };
+    let unsigned = remove_clickonce_xml_signature(text);
+    let signed_info = clickonce_manifest_signed_info_xml_bytes(&unsigned, vsix_alg);
+    let cert_der = signer_cert.to_der().context("encode signer cert DER")?;
+    let signature = sign_xml_signed_info_rsa(vsix_alg, &signed_info, &private_key)?;
+    let signature_xml = build_clickonce_signature_xml(&signed_info, &signature, &cert_der);
+    let signed = insert_clickonce_signature_in_manifest(&unsigned, &signature_xml)?;
+    std::fs::write(output_path, signed.as_bytes())
+        .with_context(|| format!("write {}", output_path.display()))
+}
+
+fn sign_appinstaller(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+    let data =
+        std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    // Create a detached CMS over the descriptor content
+    let econtent_der = der_encode_octet_string(&data)?;
+    let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
+    let pkcs7_bytes = pkcs7::create_pkcs7_signed_data_der_rsa(
+        id_data,
+        &econtent_der,
+        request.hash_algorithm.into(),
+        signer_cert,
+        chain,
+        private_key,
+    )
+    .with_context(|| {
+        format!(
+            "create detached PKCS#7 companion signature for {}",
+            request.path.display()
+        )
+    })?;
+    // Detach eContent
+    let mut sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_bytes)
+        .context("parse generated CMS before detaching eContent")?;
+    sd.encap_content_info.econtent = None;
+    let pkcs7_detached = pkcs7::encode_pkcs7_content_info_signed_data_der(&sd)?;
+    let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7_detached)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
+    // Write the .p7 companion alongside the output descriptor
+    let companion_path = output_path.with_extension(
+        output_path
+            .extension()
+            .map(|e| format!("{}.p7", e.to_string_lossy()))
+            .unwrap_or_else(|| "p7".to_string()),
+    );
+    // Copy the original descriptor to output if needed
+    if output_path != request.path {
+        std::fs::copy(&request.path, output_path).with_context(|| {
+            format!(
+                "copy {} to {}",
+                request.path.display(),
+                output_path.display()
+            )
+        })?;
+    }
+    std::fs::write(&companion_path, pkcs7_final)
+        .with_context(|| format!("write companion {}", companion_path.display()))
+}
+
+fn sign_xml_signed_info_rsa(
+    algorithm: psign_opc_sign::vsix::VsixHashAlgorithm,
+    signed_info: &[u8],
+    private_key: &rsa::RsaPrivateKey,
+) -> Result<Vec<u8>> {
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::SignatureEncoding;
+    use rsa::signature::Signer;
+
+    let signature = match algorithm {
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha256 => {
+            let signing_key = SigningKey::<sha2::Sha256>::new(private_key.clone());
+            signing_key.sign(signed_info).to_vec()
+        }
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha384 => {
+            let signing_key = SigningKey::<sha2::Sha384>::new(private_key.clone());
+            signing_key.sign(signed_info).to_vec()
+        }
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha512 => {
+            let signing_key = SigningKey::<sha2::Sha512>::new(private_key.clone());
+            signing_key.sign(signed_info).to_vec()
+        }
+    };
+    Ok(signature)
+}
+
+/// Remove an existing XML `<Signature>` element from a ClickOnce manifest.
+fn remove_clickonce_xml_signature(text: &str) -> String {
+    // Find `<Signature xmlns=` and remove the entire element
+    if let Some(start) = text.find("<Signature")
+        && let Some(end) = text[start..].find("</Signature>")
+    {
+        let end = start + end + "</Signature>".len();
+        let mut out = String::with_capacity(text.len() - (end - start));
+        out.push_str(&text[..start]);
+        out.push_str(&text[end..]);
+        return out;
+    }
+    text.to_owned()
+}
+
+/// Build the SignedInfo XML for a ClickOnce manifest (enveloped signature).
+fn clickonce_manifest_signed_info_xml_bytes(
+    unsigned_manifest_text: &str,
+    algorithm: psign_opc_sign::vsix::VsixHashAlgorithm,
+) -> Vec<u8> {
+    let manifest_digest = algorithm.hash(unsigned_manifest_text.as_bytes());
+    let digest_b64 = base64::engine::general_purpose::STANDARD.encode(manifest_digest);
+    format!(
+        r#"<SignedInfo><CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><SignatureMethod Algorithm="{}"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="{}"/><DigestValue>{digest_b64}</DigestValue></Reference></SignedInfo>"#,
+        algorithm.signature_uri(),
+        algorithm.digest_uri(),
+    )
+    .into_bytes()
+}
+
+fn build_clickonce_signature_xml(signed_info: &[u8], signature: &[u8], cert_der: &[u8]) -> String {
+    let signed_info_str = String::from_utf8_lossy(signed_info);
+    format!(
+        r#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">{signed_info_str}<SignatureValue>{}</SignatureValue><KeyInfo><X509Data><X509Certificate>{}</X509Certificate></X509Data></KeyInfo></Signature>"#,
+        base64::engine::general_purpose::STANDARD.encode(signature),
+        base64::engine::general_purpose::STANDARD.encode(cert_der)
+    )
+}
+
+fn insert_clickonce_signature_in_manifest(text: &str, signature_xml: &str) -> Result<String> {
+    // Find the last closing tag of the root element and insert before it
+    let close_pos = text.rfind("</").ok_or_else(|| {
+        anyhow::anyhow!("ClickOnce manifest does not have a closing root element tag")
+    })?;
+    let mut out = String::with_capacity(text.len() + signature_xml.len());
+    out.push_str(&text[..close_pos]);
+    out.push_str(signature_xml);
+    out.push_str(&text[close_pos..]);
+    Ok(out)
+}
+
 fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let ext = request
         .path
@@ -537,6 +808,22 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
 }
 
+fn has_azure_key_vault_provider(request: &PortableSignRequest) -> bool {
+    request.azure_key_vault_url.is_some()
+}
+
+fn has_artifact_signing_provider(request: &PortableSignRequest) -> bool {
+    request.artifact_signing_endpoint.is_some() || request.artifact_signing_account_name.is_some()
+}
+
+fn has_local_signing_material(request: &PortableSignRequest) -> bool {
+    request.certificate_path.is_some()
+        || request.certificate_der_base64.is_some()
+        || request.pfx_path.is_some()
+        || request.private_key_path.is_some()
+        || request.private_key_der_base64.is_some()
+}
+
 fn load_signing_material(
     request: &PortableSignRequest,
 ) -> Result<(
@@ -544,6 +831,55 @@ fn load_signing_material(
     rsa::RsaPrivateKey,
     Vec<x509_cert::Certificate>,
 )> {
+    // Reject mixed local + cloud providers
+    let has_akv = has_azure_key_vault_provider(request);
+    let has_as = has_artifact_signing_provider(request);
+    let has_local = has_local_signing_material(request);
+
+    if has_akv && has_as {
+        bail!(
+            "provide only one cloud signing provider (Azure Key Vault or Artifact Signing), not both"
+        );
+    }
+    if has_akv && has_local {
+        bail!(
+            "provide either Azure Key Vault cloud signing or local certificate/key material, not both"
+        );
+    }
+    if has_as && has_local {
+        bail!(
+            "provide either Artifact Signing cloud signing or local certificate/key material, not both"
+        );
+    }
+    if has_akv {
+        #[cfg(feature = "azure-kv-sign")]
+        {
+            bail!(
+                "Azure Key Vault portable signing is not yet available through this API — use psign-tool code azure-key-vault"
+            );
+        }
+        #[cfg(not(feature = "azure-kv-sign"))]
+        {
+            bail!(
+                "Azure Key Vault signing support is not compiled into this build (feature: azure-kv-sign)"
+            );
+        }
+    }
+    if has_as {
+        #[cfg(feature = "artifact-signing-rest")]
+        {
+            bail!(
+                "Artifact Signing portable signing is not yet available through this API — use psign-tool code artifact-signing"
+            );
+        }
+        #[cfg(not(feature = "artifact-signing-rest"))]
+        {
+            bail!(
+                "Artifact Signing support is not compiled into this build (feature: artifact-signing-rest)"
+            );
+        }
+    }
+
     let uses_pfx = request.pfx_path.is_some();
     if uses_pfx
         && (request.certificate_der_base64.is_some()
@@ -823,6 +1159,13 @@ fn apply_trust_if_requested(
                 )
             })
         }
+        PortableFileFormat::NuGet
+        | PortableFileFormat::AppInstaller
+        | PortableFileFormat::Vsix
+        | PortableFileFormat::ClickOnceManifest => Err(anyhow::anyhow!(
+            "explicit trust verification is not yet available for format {:?} through the portable inspection path",
+            format
+        )),
         _ => Err(anyhow::anyhow!(
             "explicit trust verification is not implemented for format {:?}",
             format
@@ -1072,6 +1415,160 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
         timestamp_signing_time: summary.timestamp_signing_time,
         diagnostics: Vec::new(),
     })
+}
+
+fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
+    let has_sig = psign_opc_sign::nuget::inspect_nupkg_path(path)
+        .map(|info| info.signed)
+        .unwrap_or(false);
+    if !has_sig {
+        return Ok(base_response(
+            path.to_path_buf(),
+            PortableFileFormat::NuGet,
+            PortableSignatureStatus::NotSigned,
+            "NuGet package does not contain .signature.p7s",
+        ));
+    }
+    // Extract signature and parse CMS
+    let sig_bytes = extract_nuget_signature_p7s(data)?;
+    let report = inspect_authenticode_pkcs7_der(&sig_bytes).ok();
+    let summary = report
+        .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+        .unwrap_or_default();
+    Ok(PortableSignatureResponse {
+        schema_version: SCHEMA_VERSION,
+        path: path.to_path_buf(),
+        format: PortableFileFormat::NuGet,
+        status: PortableSignatureStatus::Valid,
+        status_message:
+            "NuGet package signature (.signature.p7s) is present; trust was not evaluated."
+                .to_string(),
+        trust_status: None,
+        signature_count: 1,
+        signer_index: summary.signer_index,
+        signer_certificate_der_base64: summary.signer_certificate_der_base64,
+        timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+        embedded_certificate_count: summary.embedded_certificate_count,
+        digest_algorithm: summary.digest_algorithm,
+        timestamp_kinds: summary.timestamp_kinds,
+        timestamp_signing_time: summary.timestamp_signing_time,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn inspect_vsix_opc(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
+    let has_sig = psign_opc_sign::vsix::inspect_vsix_path(path)
+        .map(|info| info.has_opc_signature)
+        .unwrap_or(false);
+    if !has_sig {
+        return Ok(base_response(
+            path.to_path_buf(),
+            PortableFileFormat::Vsix,
+            PortableSignatureStatus::NotSigned,
+            "VSIX package does not contain an OPC digital signature",
+        ));
+    }
+    // Extract the signature XML and report
+    let sig_xml = psign_opc_sign::vsix::extract_signature_xml_path(path).unwrap_or_default();
+    if sig_xml.is_empty() {
+        return Ok(base_response(
+            path.to_path_buf(),
+            PortableFileFormat::Vsix,
+            PortableSignatureStatus::NotSigned,
+            "VSIX package OPC signature part could not be extracted",
+        ));
+    }
+    // Verify reference digests
+    let vsix_alg = psign_opc_sign::vsix::VsixHashAlgorithm::Sha256;
+    let refs_ok =
+        psign_opc_sign::vsix::verify_signature_reference_xml(Cursor::new(data), &sig_xml, vsix_alg)
+            .is_ok();
+    let status = if refs_ok {
+        PortableSignatureStatus::Valid
+    } else {
+        PortableSignatureStatus::HashMismatch
+    };
+    let message = if refs_ok {
+        "VSIX OPC XMLDSig signature references are valid; trust was not evaluated."
+    } else {
+        "VSIX OPC XMLDSig signature reference digests do not match package content."
+    };
+    Ok(base_response(
+        path.to_path_buf(),
+        PortableFileFormat::Vsix,
+        status,
+        message,
+    ))
+}
+
+fn inspect_clickonce_manifest(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
+    let text = std::str::from_utf8(data).unwrap_or("");
+    let has_sig = text.contains("<Signature") && text.contains("</Signature>");
+    if !has_sig {
+        return Ok(base_response(
+            path.to_path_buf(),
+            PortableFileFormat::ClickOnceManifest,
+            PortableSignatureStatus::NotSigned,
+            "ClickOnce manifest does not contain an XMLDSig Signature element",
+        ));
+    }
+    Ok(base_response(
+        path.to_path_buf(),
+        PortableFileFormat::ClickOnceManifest,
+        PortableSignatureStatus::Valid,
+        "ClickOnce manifest contains an XMLDSig Signature; trust was not evaluated.",
+    ))
+}
+
+fn inspect_appinstaller(path: &Path) -> Result<PortableSignatureResponse> {
+    // Check for companion .p7 file
+    let companion_path = path.with_extension(
+        path.extension()
+            .map(|e| format!("{}.p7", e.to_string_lossy()))
+            .unwrap_or_else(|| "p7".to_string()),
+    );
+    if !companion_path.exists() {
+        return Ok(base_response(
+            path.to_path_buf(),
+            PortableFileFormat::AppInstaller,
+            PortableSignatureStatus::NotSigned,
+            "App Installer descriptor does not have a companion .p7 signature file",
+        ));
+    }
+    let pkcs7_bytes = std::fs::read(&companion_path)
+        .with_context(|| format!("read companion {}", companion_path.display()))?;
+    let report = inspect_authenticode_pkcs7_der(&pkcs7_bytes).ok();
+    let summary = report
+        .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+        .unwrap_or_default();
+    Ok(PortableSignatureResponse {
+        schema_version: SCHEMA_VERSION,
+        path: path.to_path_buf(),
+        format: PortableFileFormat::AppInstaller,
+        status: PortableSignatureStatus::Valid,
+        status_message:
+            "App Installer companion .p7 signature is present; trust was not evaluated.".to_string(),
+        trust_status: None,
+        signature_count: 1,
+        signer_index: summary.signer_index,
+        signer_certificate_der_base64: summary.signer_certificate_der_base64,
+        timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+        embedded_certificate_count: summary.embedded_certificate_count,
+        digest_algorithm: summary.digest_algorithm,
+        timestamp_kinds: summary.timestamp_kinds,
+        timestamp_signing_time: summary.timestamp_signing_time,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn extract_nuget_signature_p7s(data: &[u8]) -> Result<Vec<u8>> {
+    let mut archive = ZipArchive::new(Cursor::new(data)).context("open NuGet ZIP")?;
+    let mut entry = archive
+        .by_name(psign_opc_sign::nuget::PACKAGE_SIGNATURE_FILE_NAME)
+        .context("read .signature.p7s")?;
+    let mut p7s = Vec::new();
+    entry.read_to_end(&mut p7s)?;
+    Ok(p7s)
 }
 
 fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
@@ -1453,6 +1950,14 @@ fn xml_escape_attr(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn der_encode_octet_string(data: &[u8]) -> Result<Vec<u8>> {
+    let octet = der::asn1::OctetString::new(data)
+        .map_err(|e| anyhow::anyhow!("encode OCTET STRING: {e}"))?;
+    octet
+        .to_der()
+        .map_err(|e| anyhow::anyhow!("encode OCTET STRING DER: {e}"))
+}
+
 fn format_powershell_signature_block(pkcs7_der: &[u8], extension: &str) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(pkcs7_der);
     let (begin, line_prefix, line_suffix, end) = match extension.to_ascii_lowercase().as_str() {
@@ -1498,7 +2003,35 @@ mod tests {
         );
         assert_eq!(
             infer_format(Path::new("package.nupkg")),
+            PortableFileFormat::NuGet
+        );
+        assert_eq!(
+            infer_format(Path::new("symbols.snupkg")),
+            PortableFileFormat::NuGet
+        );
+        assert_eq!(
+            infer_format(Path::new("extension.vsix")),
+            PortableFileFormat::Vsix
+        );
+        assert_eq!(
+            infer_format(Path::new("archive.zip")),
             PortableFileFormat::Zip
+        );
+        assert_eq!(
+            infer_format(Path::new("app.manifest")),
+            PortableFileFormat::ClickOnceManifest
+        );
+        assert_eq!(
+            infer_format(Path::new("deploy.application")),
+            PortableFileFormat::ClickOnceManifest
+        );
+        assert_eq!(
+            infer_format(Path::new("addin.vsto")),
+            PortableFileFormat::ClickOnceManifest
+        );
+        assert_eq!(
+            infer_format(Path::new("installer.appinstaller")),
+            PortableFileFormat::AppInstaller
         );
         assert_eq!(
             infer_format(Path::new("install.msi")),
@@ -1563,5 +2096,103 @@ mod tests {
             .expect("inspect PE");
         assert_eq!(response.status, PortableSignatureStatus::Valid);
         assert!(response.signature_count > 0);
+    }
+
+    #[test]
+    fn rejects_mixed_azure_key_vault_and_local_material() {
+        let request = PortableSignRequest {
+            path: PathBuf::from("test.dll"),
+            azure_key_vault_url: Some("https://myvault.vault.azure.net".to_string()),
+            azure_key_vault_certificate: Some("my-cert".to_string()),
+            certificate_path: Some(PathBuf::from("cert.pem")),
+            private_key_path: Some(PathBuf::from("key.pem")),
+            ..default_sign_request()
+        };
+        let err = load_signing_material(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("not both"),
+            "expected mutual exclusion error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_mixed_azure_key_vault_and_artifact_signing() {
+        let request = PortableSignRequest {
+            path: PathBuf::from("test.dll"),
+            azure_key_vault_url: Some("https://myvault.vault.azure.net".to_string()),
+            azure_key_vault_certificate: Some("my-cert".to_string()),
+            artifact_signing_endpoint: Some("https://signing.example.com".to_string()),
+            ..default_sign_request()
+        };
+        let err = load_signing_material(&request).unwrap_err();
+        assert!(
+            err.to_string().contains("not both"),
+            "expected mutual exclusion error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_azure_key_vault_without_compiled_feature() {
+        let request = PortableSignRequest {
+            path: PathBuf::from("test.dll"),
+            azure_key_vault_url: Some("https://myvault.vault.azure.net".to_string()),
+            azure_key_vault_certificate: Some("my-cert".to_string()),
+            ..default_sign_request()
+        };
+        let err = load_signing_material(&request).unwrap_err();
+        // Without the feature compiled, we get either "not compiled" or "not yet available"
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Azure Key Vault"),
+            "expected AKV error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_artifact_signing_without_compiled_feature() {
+        let request = PortableSignRequest {
+            path: PathBuf::from("test.dll"),
+            artifact_signing_endpoint: Some("https://signing.example.com".to_string()),
+            ..default_sign_request()
+        };
+        let err = load_signing_material(&request).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Artifact Signing"),
+            "expected AS error, got: {msg}"
+        );
+    }
+
+    fn default_sign_request() -> PortableSignRequest {
+        PortableSignRequest {
+            path: PathBuf::from("test.dll"),
+            output_path: None,
+            hash_algorithm: PortableDigestAlgorithm::Sha256,
+            certificate_path: None,
+            private_key_path: None,
+            certificate_der_base64: None,
+            private_key_der_base64: None,
+            pfx_path: None,
+            pfx_password: None,
+            chain_certificate_paths: vec![],
+            chain_certificates_der_base64: vec![],
+            timestamp_server: None,
+            timestamp_hash_algorithm: None,
+            azure_key_vault_url: None,
+            azure_key_vault_certificate: None,
+            azure_key_vault_access_token: None,
+            azure_key_vault_client_id: None,
+            azure_key_vault_client_secret: None,
+            azure_key_vault_tenant_id: None,
+            azure_key_vault_managed_identity: None,
+            artifact_signing_endpoint: None,
+            artifact_signing_account_name: None,
+            artifact_signing_profile_name: None,
+            artifact_signing_access_token: None,
+            artifact_signing_managed_identity: None,
+            artifact_signing_tenant_id: None,
+            artifact_signing_client_id: None,
+            artifact_signing_client_secret: None,
+        }
     }
 }

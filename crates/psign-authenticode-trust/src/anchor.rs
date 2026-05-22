@@ -109,7 +109,7 @@ pub fn cert_sha1_thumbprint(cert: &Cert) -> Result<[u8; 20]> {
     Ok(out)
 }
 
-fn parse_cert_bytes(raw: &[u8]) -> Result<Cert> {
+pub fn parse_cert_bytes(raw: &[u8]) -> Result<Cert> {
     let trimmed = raw.trim_ascii_start();
     if trimmed.starts_with(b"-----BEGIN ") {
         let s =

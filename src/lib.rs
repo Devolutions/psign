@@ -8,10 +8,12 @@
 
 pub mod cert_store;
 pub mod cli;
+pub mod code;
 pub mod native_argv;
 pub mod portable_sign;
 pub mod rdp;
 pub mod response_argv;
+pub mod signing_provider;
 #[cfg(windows)]
 pub mod win;
 
@@ -329,6 +331,7 @@ fn execute_portable_inspect(
 fn execute_windows(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
     use crate::cli::Command;
     match &cli.command {
+        Command::Code(args) => crate::code::code_command(args),
         Command::CertStore(args) => crate::cert_store::cert_store_command(args),
         Command::Portable(args) => run_portable_args(&args.args),
         Command::Verify(args) => crate::win::verify::verify_file(args, &cli.global),
@@ -357,6 +360,7 @@ fn execute_windows(_cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
 fn execute_portable(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
     use crate::cli::Command;
     match &cli.command {
+        Command::Code(args) => crate::code::code_command(args),
         Command::CertStore(args) => crate::cert_store::cert_store_command(args),
         Command::Portable(args) => run_portable_args(&args.args),
         Command::Verify(args) => execute_portable_verify(args),
@@ -387,6 +391,9 @@ fn execute(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
     }
     if let crate::cli::Command::Portable(args) = &cli.command {
         return run_portable_args(&args.args);
+    }
+    if let crate::cli::Command::Code(args) = &cli.command {
+        return crate::code::code_command(args);
     }
     match effective_tool_mode(resolved_tool_mode(&cli.global)?) {
         crate::cli::ToolMode::Windows => execute_windows(cli),

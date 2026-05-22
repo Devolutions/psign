@@ -8,7 +8,7 @@
     <ToolCommandName>psign-tool</ToolCommandName>
     <PackageId>Devolutions.Psign.Tool</PackageId>
 
-    <Version Condition="'$(Version)' == ''">0.2.0</Version>
+    <Version Condition="'$(Version)' == ''">0.3.0</Version>
     <Authors>Devolutions</Authors>
     <Description>RID-specific dotnet tool wrapper around prebuilt psign-tool native executables.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>

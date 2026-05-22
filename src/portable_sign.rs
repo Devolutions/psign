@@ -1,5 +1,5 @@
 use crate::CommandOutput;
-use crate::cli::{DigestAlgorithm, GlobalOpts, SignArgs};
+use crate::cli::{AzureCredentialType, DigestAlgorithm, GlobalOpts, SignArgs};
 use anyhow::{Context, Result, anyhow};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -193,6 +193,10 @@ fn validate_supported_options(args: &SignArgs) -> Result<()> {
         "--azure-key-vault-managed-identity",
         args.azure_key_vault_managed_identity,
     )?;
+    reject_option(
+        "--azure-key-vault-credential-type",
+        args.azure_key_vault_credential_type.is_some(),
+    )?;
     reject_string_option("--azure-authority", &args.azure_authority)?;
     reject_artifact_signing_options(args)?;
     reject_path_option("--input-file-list", &args.sign_input_file_list)?;
@@ -235,6 +239,10 @@ fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
         &args.trusted_signing_dlib_root,
     )?;
     reject_path_option("--dmdf", &args.dmdf)?;
+    reject_workload_identity(
+        "--azure-key-vault-credential-type",
+        args.azure_key_vault_credential_type,
+    )?;
     if args.timestamp_url.is_some() && args.timestamp_digest.is_none() {
         return Err(anyhow!(
             "portable Azure Key Vault sign requires --td/--timestamp-digest with --tr/--timestamp-url"
@@ -325,6 +333,10 @@ fn validate_artifact_signing_supported_options(args: &SignArgs) -> Result<()> {
             "use either --artifact-signing-metadata or --dmdf as Artifact Signing metadata, not both"
         ));
     }
+    reject_workload_identity(
+        "--artifact-signing-credential-type",
+        args.artifact_signing_credential_type,
+    )?;
     if args.timestamp_url.is_some() && args.timestamp_digest.is_none() {
         return Err(anyhow!(
             "portable Artifact Signing sign requires --td/--timestamp-digest with --tr/--timestamp-url"
@@ -513,7 +525,7 @@ fn run_portable_sign_pe_azure_key_vault(
         "--azure-key-vault-accesstoken",
         &args.azure_key_vault_access_token,
     );
-    if args.azure_key_vault_managed_identity {
+    if effective_azure_key_vault_managed_identity(args) {
         argv.push(OsString::from("--azure-key-vault-managed-identity"));
     }
     push_option(
@@ -610,7 +622,7 @@ fn run_portable_sign_pe_artifact_signing(
         "--artifact-signing-access-token",
         &args.artifact_signing_access_token,
     );
-    if args.artifact_signing_managed_identity {
+    if effective_artifact_signing_managed_identity(args) {
         argv.push(OsString::from("--artifact-signing-managed-identity"));
     }
     push_option(
@@ -704,6 +716,7 @@ fn azure_key_vault_requested(args: &SignArgs) -> bool {
         || text_present(&args.azure_key_vault_tenant_id)
         || text_present(&args.azure_key_vault_access_token)
         || args.azure_key_vault_managed_identity
+        || args.azure_key_vault_credential_type.is_some()
         || text_present(&args.azure_authority)
 }
 
@@ -719,6 +732,7 @@ fn artifact_signing_requested(args: &SignArgs) -> bool {
         || text_present(&args.artifact_signing_correlation_id)
         || text_present(&args.artifact_signing_access_token)
         || args.artifact_signing_managed_identity
+        || args.artifact_signing_credential_type.is_some()
         || text_present(&args.artifact_signing_tenant_id)
         || text_present(&args.artifact_signing_client_id)
         || text_present(&args.artifact_signing_client_secret)
@@ -728,6 +742,31 @@ fn artifact_signing_requested(args: &SignArgs) -> bool {
 
 fn text_present(value: &Option<String>) -> bool {
     value.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
+fn effective_azure_key_vault_managed_identity(args: &SignArgs) -> bool {
+    args.azure_key_vault_managed_identity
+        || matches!(
+            args.azure_key_vault_credential_type,
+            Some(AzureCredentialType::ManagedIdentity)
+        )
+}
+
+fn effective_artifact_signing_managed_identity(args: &SignArgs) -> bool {
+    args.artifact_signing_managed_identity
+        || matches!(
+            args.artifact_signing_credential_type,
+            Some(AzureCredentialType::ManagedIdentity)
+        )
+}
+
+fn reject_workload_identity(name: &str, value: Option<AzureCredentialType>) -> Result<()> {
+    if matches!(value, Some(AzureCredentialType::WorkloadIdentity)) {
+        return Err(anyhow!(
+            "{name}=workload-identity is accepted by provider planning but is not wired for signing execution yet"
+        ));
+    }
+    Ok(())
 }
 
 fn success_exit_code(args: &SignArgs) -> i32 {
@@ -799,6 +838,10 @@ fn reject_artifact_signing_options(args: &SignArgs) -> Result<()> {
     reject_bool_option(
         "--artifact-signing-managed-identity",
         args.artifact_signing_managed_identity,
+    )?;
+    reject_option(
+        "--artifact-signing-credential-type",
+        args.artifact_signing_credential_type.is_some(),
     )?;
     reject_string_option(
         "--artifact-signing-tenant-id",

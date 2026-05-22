@@ -34,7 +34,7 @@ Split digest (`/dg`, `/ds`, …), sealing (`/seal`, `/itos`, …), biometric/enc
 
 ## Portable package signing (not SIP)
 
-VSIX and NuGet package signatures should not be modeled as Rust SIP gaps. VSIX uses OPC XML Digital Signature package parts/relationships, while NuGet package signing (`dotnet nuget sign` semantics) embeds one stored root ZIP entry named **`.signature.p7s`** containing CMS `SignedData` over a NuGet properties document. The dedicated **`psign-opc-sign`** crate owns these ZIP/OPC/NuGet primitives; current portable CLI coverage is inspection/hash groundwork (`nupkg-signature-info`, `nupkg-digest`, `vsix-signature-info`), not full XMLDSig/CMS package signing yet.
+VSIX and NuGet package signatures should not be modeled as Rust SIP gaps. VSIX uses OPC XML Digital Signature package parts/relationships, while NuGet package signing (`dotnet nuget sign` semantics) embeds one stored root ZIP entry named **`.signature.p7s`** containing CMS `SignedData` over a NuGet properties document. The dedicated **`psign-opc-sign`** crate owns these ZIP/OPC/NuGet primitives; portable CLI coverage now includes marker inspection, package hash content, local NuGet CMS signing/verification, and deterministic local VSIX XMLDSig signing/verification.
 
 ## Tier 1b / 1c style gaps inside Rust SIP
 
