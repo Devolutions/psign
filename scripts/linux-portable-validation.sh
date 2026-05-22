@@ -14,6 +14,7 @@ cargo metadata --locked --format-version 1 >/dev/null
 
 echo "== clippy portable crates =="
 cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust \
+  -p psign-portable-core -p psign-portable-ffi \
   -p psign-codesigning-rest -p psign-azure-kv-rest \
   --all-targets --locked -- -D warnings
 
@@ -34,6 +35,12 @@ cargo test -p psign-sip-digest --lib --locked
 
 echo "== unit tests: authenticode-trust =="
 cargo test -p psign-authenticode-trust --lib --locked
+
+echo "== unit tests: portable-core =="
+cargo test -p psign-portable-core --locked
+
+echo "== unit tests: portable-ffi =="
+cargo test -p psign-portable-ffi --locked
 
 echo "== unit tests: codesigning-rest =="
 cargo test -p psign-codesigning-rest --lib --locked

@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_psgallery:
+        description: Publish Devolutions.Psign to PowerShell Gallery
+        required: false
+        default: false
+        type: boolean
       github-env:
         description: GitHub environment selection
         required: false
@@ -44,6 +49,7 @@ jobs:
       build_ref: ${{ steps.info.outputs.build_ref }}
       publish_env: ${{ steps.info.outputs.publish_env }}
       publish_nuget: ${{ steps.info.outputs.publish_nuget }}
+      publish_psgallery: ${{ steps.info.outputs.publish_psgallery }}
       dry_run: ${{ steps.info.outputs.dry_run }}
     steps:
       - name: Checkout
@@ -93,6 +99,7 @@ jobs:
           $releaseTag = "v$releaseVersion"
           $isMasterBranch = $sourceBranch -eq 'master'
           $publishNuget = Parse-BoolOrDefault '${{ github.event.inputs.publish_nuget }}' $false
+          $publishPsgallery = Parse-BoolOrDefault '${{ github.event.inputs.publish_psgallery }}' $false
           $dryRun = Parse-BoolOrDefault '${{ github.event.inputs.dry_run_nuget }}' $true
           $requestedEnvironment = '${{ inputs['github-env'] }}'.Trim().ToLowerInvariant()
           if ([string]::IsNullOrWhiteSpace($requestedEnvironment)) {
@@ -114,7 +121,7 @@ jobs:
             }
           }
 
-          if ($requestedEnvironment -eq 'test' -and ($isMasterBranch -or ((-not $dryRun) -and $publishNuget))) {
+          if ($requestedEnvironment -eq 'test' -and ($isMasterBranch -or ((-not $dryRun) -and ($publishNuget -or $publishPsgallery)))) {
             $publishEnv = 'publish-prod'
             Write-Host '::notice::github-env=test was promoted to publish-prod'
           }
@@ -123,7 +130,7 @@ jobs:
             $dryRun = $true
           }
 
-          if (-not $publishNuget) {
+          if ((-not $publishNuget) -and (-not $publishPsgallery)) {
             $dryRun = $true
           }
 
@@ -131,6 +138,7 @@ jobs:
           "build_ref=$buildRef" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "publish_env=$publishEnv" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "publish_nuget=$($publishNuget.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "publish_psgallery=$($publishPsgallery.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           Write-Host "::notice::Release tag: $releaseTag"
@@ -139,6 +147,7 @@ jobs:
           Write-Host "::notice::GitHub environment mode: $requestedEnvironment"
           Write-Host "::notice::Publish environment: $publishEnv"
           Write-Host "::notice::Publish NuGet: $($publishNuget.ToString().ToLowerInvariant())"
+          Write-Host "::notice::Publish PowerShell Gallery: $($publishPsgallery.ToString().ToLowerInvariant())"
           Write-Host "::notice::NuGet dry-run: $($dryRun.ToString().ToLowerInvariant())"
 
   build:
@@ -150,36 +159,42 @@ jobs:
       matrix:
         include:
           - name: linux-x64
+            rid: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: psign-tool-linux-x64.zip
             binary: psign-tool
 
           - name: linux-arm64
+            rid: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             archive: psign-tool-linux-arm64.zip
             binary: psign-tool
 
           - name: windows-x64
+            rid: win-x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: psign-tool-windows-x64.zip
             binary: psign-tool.exe
 
           - name: windows-arm64
+            rid: win-arm64
             os: windows-2022
             target: aarch64-pc-windows-msvc
             archive: psign-tool-windows-arm64.zip
             binary: psign-tool.exe
 
           - name: macos-x64
+            rid: osx-x64
             os: macos-14
             target: x86_64-apple-darwin
             archive: psign-tool-macos-x64.zip
             binary: psign-tool
 
           - name: macos-arm64
+            rid: osx-arm64
             os: macos-14
             target: aarch64-apple-darwin
             archive: psign-tool-macos-arm64.zip
@@ -231,6 +246,45 @@ jobs:
           )
 
           cargo @cargoArgs
+
+      - name: Build psign-core shared library
+        shell: pwsh
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          $target = '${{ matrix.target }}'
+          cargo build --locked --release -p psign-portable-ffi --target $target
+
+      - name: Stage psign-core native library
+        shell: pwsh
+        env:
+          RID: ${{ matrix.rid }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $sourceName = if ($env:TARGET -like '*windows-msvc') {
+            'psign_core.dll'
+          } elseif ($env:TARGET -like '*apple-darwin') {
+            'libpsign_core.dylib'
+          } else {
+            'libpsign_core.so'
+          }
+
+          $destName = if ($env:TARGET -like '*windows-msvc') {
+            'psign-core.dll'
+          } elseif ($env:TARGET -like '*apple-darwin') {
+            'libpsign-core.dylib'
+          } else {
+            'libpsign-core.so'
+          }
+
+          $sourcePath = Join-Path (Join-Path (Join-Path 'target' $env:TARGET) 'release') $sourceName
+          if (-not (Test-Path -LiteralPath $sourcePath)) {
+            throw "psign-core native library not found: $sourcePath"
+          }
+
+          $nativeOut = Join-Path (Join-Path 'psign-core' $env:RID) 'native'
+          New-Item -ItemType Directory -Force -Path $nativeOut | Out-Null
+          Copy-Item -Force -LiteralPath $sourcePath -Destination (Join-Path $nativeOut $destName)
 
       - name: Verify Windows version info
         if: contains(matrix.target, 'windows-msvc')
@@ -296,6 +350,22 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
+      - name: Upload psign-core native library
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: psign-core-${{ matrix.rid }}
+          path: psign-core/${{ matrix.rid }}/native/*
+          if-no-files-found: error
+
+      - name: Upload unsigned Windows psign-core native library
+        if: ${{ contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-psign-core-${{ matrix.rid }}
+          path: psign-core/${{ matrix.rid }}/native/*
+          if-no-files-found: error
+
   sign_windows:
     name: Sign and package Windows artifacts
     runs-on: ubuntu-latest
@@ -316,6 +386,18 @@ jobs:
         with:
           name: psign-tool-windows-arm64.zip-unsigned-bin
           path: work/win-arm64
+
+      - name: Download unsigned Windows x64 psign-core
+        uses: actions/download-artifact@v8
+        with:
+          name: unsigned-psign-core-win-x64
+          path: work/psign-core-win-x64
+
+      - name: Download unsigned Windows arm64 psign-core
+        uses: actions/download-artifact@v8
+        with:
+          name: unsigned-psign-core-win-arm64
+          path: work/psign-core-win-arm64
 
       - name: Download Linux x64 psign-tool
         uses: actions/download-artifact@v8
@@ -435,6 +517,38 @@ jobs:
             throw "psign-tool signing failed for win-arm64 with exit code $LASTEXITCODE"
           }
 
+          psign-tool --mode portable --verbose sign `
+            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
+            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
+            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
+            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            --timestamp-digest sha256 `
+            --digest sha256 `
+            --exit-codes azure `
+            "work/psign-core-win-x64/psign-core.dll"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "psign-core signing failed for win-x64 with exit code $LASTEXITCODE"
+          }
+
+          psign-tool --mode portable --verbose sign `
+            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
+            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
+            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
+            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+            --timestamp-digest sha256 `
+            --digest sha256 `
+            --exit-codes azure `
+            "work/psign-core-win-arm64/psign-core.dll"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "psign-core signing failed for win-arm64 with exit code $LASTEXITCODE"
+          }
+
       - name: Package Windows artifacts
         shell: pwsh
         run: |
@@ -461,6 +575,20 @@ jobs:
         with:
           name: psign-tool-windows-arm64.zip
           path: psign-tool-windows-arm64.zip
+          if-no-files-found: error
+
+      - name: Upload artifact psign-core-win-x64
+        uses: actions/upload-artifact@v7
+        with:
+          name: psign-core-win-x64
+          path: work/psign-core-win-x64/psign-core.dll
+          if-no-files-found: error
+
+      - name: Upload artifact psign-core-win-arm64
+        uses: actions/upload-artifact@v7
+        with:
+          name: psign-core-win-arm64
+          path: work/psign-core-win-arm64/psign-core.dll
           if-no-files-found: error
 
   pack_dotnet_tool:
@@ -525,6 +653,65 @@ jobs:
           path: dist/nuget/Devolutions.Psign.Tool*.nupkg
           if-no-files-found: error
 
+  pack_powershell_module:
+    name: Pack PowerShell module from prebuilt psign-core libraries
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - sign_windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.build_ref }}
+
+      - name: Download psign-core native artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: psign-core-*
+          path: dist/native
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Package PowerShell module
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if (-not $tag.StartsWith('v')) {
+            throw "Release tag must start with 'v'. Actual: $tag"
+          }
+
+          $version = $tag.Substring(1)
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $archivePath = Join-Path 'dist' "Devolutions.Psign.$version.zip"
+
+          ./PowerShell/package.ps1 `
+            -Configuration Release `
+            -NativeArtifactsRoot 'dist/native' `
+            -SkipNativeBuild `
+            -OutputDirectory 'dist/powershell' `
+            -ModuleArchivePath $archivePath
+
+      - name: Upload PowerShell module package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: devolutions-psign-powershell-nupkg
+          path: dist/powershell/Devolutions.Psign*.nupkg
+          if-no-files-found: error
+
+      - name: Upload PowerShell module artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: powershell-module
+          path: dist/Devolutions.Psign.*.zip
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
@@ -532,6 +719,7 @@ jobs:
       - preflight
       - sign_windows
       - pack_dotnet_tool
+      - pack_powershell_module
 
     steps:
       - name: Download platform zip artifacts
@@ -546,6 +734,18 @@ jobs:
           name: devolutions-psign-tool-nupkg
           path: dist
 
+      - name: Download PowerShell module NuGet artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: devolutions-psign-powershell-nupkg
+          path: dist
+
+      - name: Download PowerShell module archive artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: powershell-module
+          path: dist
+
       - name: Generate checksums
         shell: pwsh
         working-directory: dist
@@ -553,7 +753,9 @@ jobs:
           $releaseAssets = Get-ChildItem -Recurse -File |
             Where-Object {
               $_.Name -like 'psign-tool-*.zip' -or
-              $_.Name -like 'Devolutions.Psign.Tool*.nupkg'
+              $_.Name -like 'Devolutions.Psign.Tool*.nupkg' -or
+              $_.Name -like 'Devolutions.Psign.*.nupkg' -or
+              $_.Name -like 'Devolutions.Psign.*.zip'
             } |
             Sort-Object Name
 
@@ -583,7 +785,9 @@ jobs:
           $assets = Get-ChildItem -Path dist -Recurse -File |
             Where-Object {
               $_.Name -like 'psign-tool-*.zip' -or
-              $_.Name -like 'Devolutions.Psign.Tool*.nupkg'
+              $_.Name -like 'Devolutions.Psign.Tool*.nupkg' -or
+              $_.Name -like 'Devolutions.Psign.*.nupkg' -or
+              $_.Name -like 'Devolutions.Psign.*.zip'
             } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
@@ -726,3 +930,45 @@ jobs:
               & dotnet @pushArgs
             }
           }
+
+  publish_psgallery:
+    name: Publish PowerShell Gallery
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - pack_powershell_module
+      - publish
+    if: needs.preflight.outputs.dry_run != 'true' && needs.preflight.outputs.publish_psgallery == 'true'
+    environment: ${{ needs.preflight.outputs.publish_env }}
+    env:
+      PSGALLERY_NUGET_API_KEY: ${{ secrets.PSGALLERY_NUGET_API_KEY }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download PowerShell module artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: powershell-module
+          path: dist/powershell-module
+
+      - name: Publish Devolutions.Psign to PowerShell Gallery
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PSGALLERY_NUGET_API_KEY)) {
+            throw 'PSGALLERY_NUGET_API_KEY is not configured.'
+          }
+
+          $archive = Get-ChildItem -Path dist/powershell-module -Filter 'Devolutions.Psign.*.zip' |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $archive) {
+            throw 'PowerShell module archive was not downloaded.'
+          }
+
+          $expandedRoot = Join-Path 'dist' 'powershell-gallery'
+          Expand-Archive -Path $archive.FullName -DestinationPath $expandedRoot -Force
+          $modulePath = (Resolve-Path (Join-Path $expandedRoot 'Devolutions.Psign')).Path
+
+          Test-ModuleManifest -Path (Join-Path $modulePath 'Devolutions.Psign.psd1') | Out-Null
+          Publish-Module -Path $modulePath -NuGetApiKey $env:PSGALLERY_NUGET_API_KEY -Verbose

@@ -10,11 +10,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust stable (rustfmt, clippy)
+      - name: Install Rust stable (rustfmt)
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup component add rustfmt clippy --toolchain stable
+          rustup component add rustfmt --toolchain stable
 
       - name: rustfmt
         run: cargo fmt --all --check
@@ -22,8 +22,22 @@ jobs:
       - name: Cargo.lock consistency
         run: cargo metadata --locked --format-version 1 > /dev/null
 
-      - name: clippy (portable digest + trust + Azure REST crates)
-        run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
+  portable-clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable (clippy)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy --toolchain stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: clippy (portable digest + trust + core + Azure REST crates)
+        run: cargo clippy -p psign-sip-digest -p psign-digest-cli -p psign-authenticode-trust -p psign-portable-core -p psign-portable-ffi -p psign-codesigning-rest -p psign-azure-kv-rest --all-targets --locked -- -D warnings
 
       - name: clippy (digest-cli with artifact-signing-rest)
         run: cargo clippy -p psign-digest-cli --all-targets --features artifact-signing-rest --locked -- -D warnings
@@ -37,11 +51,30 @@ jobs:
       - name: clippy (psign portable lib)
         run: cargo clippy -p psign --lib --locked -- -D warnings
 
+  portable-crate-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.1
+
       - name: SIP digest crate tests (no Win32)
         run: cargo test -p psign-sip-digest --lib --locked
 
       - name: Authenticode trust crate tests (no Win32)
         run: cargo test -p psign-authenticode-trust --lib --locked
+
+      - name: Portable core crate tests (no Win32)
+        run: cargo test -p psign-portable-core --locked
+
+      - name: Portable FFI crate tests (no Win32)
+        run: cargo test -p psign-portable-ffi --locked
 
       - name: Codesigning REST crate tests (no Win32)
         run: cargo test -p psign-codesigning-rest --locked
@@ -49,17 +82,52 @@ jobs:
       - name: Azure KV REST crate tests (no Win32)
         run: cargo test -p psign-azure-kv-rest --locked
 
-      - name: Portable digest CLI (integration smoke)
-        run: cargo test -p psign --test cli_pe_digest --locked
-
-      - name: Portable digest CLI (artifact-signing-rest subcommand)
-        run: cargo test -p psign --test cli_pe_digest --features artifact-signing-rest --locked
-
-      - name: Portable digest CLI (azure-kv-sign-portable subcommand)
-        run: cargo test -p psign --test cli_pe_digest --features azure-kv-sign --locked
-
       - name: Check psign stub binary + portable lib
         run: cargo check -p psign --bins --lib --locked
 
       - name: Portable lib unit tests (native argv / response files)
         run: cargo test -p psign --lib --locked
+
+  portable-cli-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: integration-smoke
+            features: ""
+          - name: artifact-signing-rest
+            features: "--features artifact-signing-rest"
+          - name: azure-kv-sign-portable
+            features: "--features azure-kv-sign"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Portable digest CLI (${{ matrix.name }})
+        run: cargo test -p psign --test cli_pe_digest ${{ matrix.features }} --locked
+
+  portable-checks:
+    runs-on: ubuntu-latest
+    needs:
+      - portable-clippy
+      - portable-crate-tests
+      - portable-cli-tests
+    if: always()
+    steps:
+      - name: Check split portable jobs
+        env:
+          PORTABLE_CLIPPY: ${{ needs.portable-clippy.result }}
+          PORTABLE_CRATE_TESTS: ${{ needs.portable-crate-tests.result }}
+          PORTABLE_CLI_TESTS: ${{ needs.portable-cli-tests.result }}
+        run: |
+          test "$PORTABLE_CLIPPY" = "success"
+          test "$PORTABLE_CRATE_TESTS" = "success"
+          test "$PORTABLE_CLI_TESTS" = "success"

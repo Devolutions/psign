@@ -14,3 +14,8 @@ tmp-ci-*/
 /nuget/tmp-tool/
 /nuget/tool/bin/
 /nuget/tool/obj/
+/dotnet/**/bin/
+/dotnet/**/obj/
+/PowerShell/Devolutions.Psign/lib/
+/PowerShell/Devolutions.Psign/runtimes/
+/artifacts/

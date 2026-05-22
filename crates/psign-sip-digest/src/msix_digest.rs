@@ -1881,6 +1881,83 @@ pub fn verify_msix_digest_consistency(path: &Path) -> Result<()> {
     verify_msix_digest_consistency_bytes(&buf, &ext)
 }
 
+/// Compute the APPX Authenticode `messageDigest` blob for a cleartext MSIX / APPX package.
+///
+/// The input package must already contain `AppxSignature.p7x` and the matching
+/// `[Content_Types].xml` declaration. The signature entry bytes are ignored for
+/// the ZIP-derived AXPC/AXCD digest pieces, matching `AppxSip.dll` semantics.
+pub fn msix_authenticode_digest_blob(
+    buf: &[u8],
+    ext: &str,
+) -> Result<(PeAuthenticodeHashKind, Vec<u8>)> {
+    let ext = ext.to_ascii_lowercase();
+    if is_encrypted_msix_extension(&ext) {
+        return Err(anyhow!(
+            "Rust MSIX SIP digest parity applies only to cleartext OPC/ZIP packages (.msix, .appx, bundles)"
+        ));
+    }
+    if !matches!(ext.as_str(), "msix" | "appx" | "msixbundle" | "appxbundle") {
+        return Err(anyhow!(
+            "Rust MSIX SIP digest applies only to `.msix` / `.appx` / `.msixbundle` / `.appxbundle` files"
+        ));
+    }
+
+    let tail = parse_zip_tail(buf)?;
+    let mut layout_archive = ZipArchive::new(Cursor::new(buf))?;
+    validate_zip_file_layout(buf, &mut layout_archive, &tail)?;
+    let mut archive = ZipArchive::new(Cursor::new(buf))?;
+    let inventory = validate_package_part_inventory(&archive, &ext)?;
+
+    let block_map_bytes = read_zip_entry_raw(&mut archive, std::str::from_utf8(BLOCK_MAP)?)?;
+    let (kind, block_map_files) = parse_block_map_xml(&block_map_bytes)?;
+    let ct_raw = read_zip_entry_raw(&mut archive, std::str::from_utf8(CONTENT_TYPES)?)?;
+    let content_types = validate_content_types_xml(&ct_raw)?;
+    validate_reserved_content_types(&content_types, inventory, &ext)?;
+
+    let ci_raw = if inventory.has_code_integrity {
+        Some(read_zip_entry_raw(
+            &mut archive,
+            std::str::from_utf8(CODE_INTEGRITY)?,
+        )?)
+    } else {
+        None
+    };
+
+    let ct_hash = hash_bytes(kind, &ct_raw);
+    let bm_hash = hash_bytes(kind, &block_map_bytes);
+    let ci_hash = ci_raw.as_ref().map(|data| hash_bytes(kind, data));
+
+    let mut archive2 = ZipArchive::new(Cursor::new(buf))?;
+    let (data_hash, cd_off_virt) = hash_zip_file_data(buf, &mut archive2, &tail, kind)?;
+    let mut archive3 = ZipArchive::new(Cursor::new(buf))?;
+    let cd_hash = hash_cd_and_eocd(buf, &mut archive3, &tail, kind, cd_off_virt)?;
+
+    validate_block_map_file_hashes(buf, kind, &block_map_files)?;
+    if matches!(ext.as_str(), "msixbundle" | "appxbundle") {
+        verify_bundle_child_packages(buf)?;
+    }
+
+    let mut blob = Vec::with_capacity(
+        4 + (4 + kind.digest_output_len()) * (4 + usize::from(ci_hash.is_some())),
+    );
+    blob.extend_from_slice(SIG_APPX);
+    for (tag, digest) in [
+        (TAG_AXPC, data_hash.as_slice()),
+        (TAG_AXCD, cd_hash.as_slice()),
+        (TAG_AXCT, ct_hash.as_slice()),
+        (TAG_AXBM, bm_hash.as_slice()),
+    ] {
+        blob.extend_from_slice(tag);
+        blob.extend_from_slice(digest);
+    }
+    if let Some(ci_hash) = ci_hash {
+        blob.extend_from_slice(TAG_AXCI);
+        blob.extend_from_slice(&ci_hash);
+    }
+
+    Ok((kind, blob))
+}
+
 fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<()> {
     let tail = parse_zip_tail(buf)?;
     let mut layout_archive = ZipArchive::new(Cursor::new(buf))?;

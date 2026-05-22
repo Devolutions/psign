@@ -2040,6 +2040,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "authenticode",
+ "base64",
  "cab",
  "cms",
  "der 0.7.10",
@@ -2117,6 +2118,35 @@ dependencies = [
  "anyhow",
  "sha2 0.10.9",
  "zip",
+]
+
+[[package]]
+name = "psign-portable-core"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "picky",
+ "psign-authenticode-trust",
+ "psign-sip-digest",
+ "reqwest",
+ "rsa 0.9.10",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "x509-cert",
+ "zip",
+]
+
+[[package]]
+name = "psign-portable-ffi"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "psign-portable-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
