@@ -3540,37 +3540,6 @@ fn artifact_signing_params_for_digest(
 }
 
 #[cfg(feature = "artifact-signing-rest")]
-fn parse_artifact_signing_certificates(bytes: &[u8]) -> Result<(x509_cert::Certificate, Vec<x509_cert::Certificate>)> {
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && text.contains("-----BEGIN CERTIFICATE-----")
-    {
-        let mut certs = Vec::new();
-        let mut rest = text;
-        while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
-            rest = &rest[start..];
-            let Some(end) = rest.find("-----END CERTIFICATE-----") else {
-                return Err(anyhow!("unterminated PEM certificate in Artifact Signing signingCertificate"));
-            };
-            let end = end + "-----END CERTIFICATE-----".len();
-            certs.push(
-                rdp::parse_certificate(&rest.as_bytes()[..end])
-                    .context("parse Artifact Signing PEM certificate")?,
-            );
-            rest = &rest[end..];
-        }
-        let mut iter = certs.into_iter();
-        let signer = iter
-            .next()
-            .ok_or_else(|| anyhow!("Artifact Signing signingCertificate did not contain a certificate"))?;
-        return Ok((signer, iter.collect()));
-    }
-    Ok((
-        rdp::parse_certificate(bytes).context("parse Artifact Signing DER signing certificate")?,
-        Vec::new(),
-    ))
-}
-
-#[cfg(feature = "artifact-signing-rest")]
 fn create_pe_authenticode_pkcs7_der_artifact_signing(
     pe: &[u8],
     digest: PortableSignDigest,
@@ -3593,7 +3562,8 @@ fn create_pe_authenticode_pkcs7_der_artifact_signing(
             eprintln!("[debug] {msg}");
         }
     })?;
-    let (signer_cert, mut chain) = parse_artifact_signing_certificates(&signed.signing_certificate)?;
+    let (signer_cert, mut chain) =
+        pkcs7::parse_artifact_signing_certificates(&signed.signing_certificate)?;
     for chain_cert in chain_certs {
         let bytes =
             std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;

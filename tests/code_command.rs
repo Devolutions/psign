@@ -1727,10 +1727,8 @@ fn code_signs_nupkg_with_rfc3161_timestamp() {
     inspect
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "microsoft_nested_rfc3161_attribute",
-        ))
-        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+        .stdout(predicate::str::contains("id_aa_time_stamp_token"))
+        .stdout(predicate::str::contains("1.2.840.113549.1.9.16.2.14"));
 }
 
 #[test]

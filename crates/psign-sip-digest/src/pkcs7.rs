@@ -11,6 +11,7 @@
 
 use anyhow::{Context as _, Result, anyhow};
 use authenticode::{DigestInfo, SpcAttributeTypeAndOptionalValue, SpcIndirectDataContent};
+use base64::Engine as _;
 use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
 use cms::cert::CertificateChoices;
 use cms::cert::IssuerAndSerialNumber;
@@ -26,7 +27,7 @@ use rsa::RsaPrivateKey;
 use sha2::{Sha256, Sha384, Sha512};
 use x509_cert::Certificate;
 use x509_cert::attr::Attribute;
-use x509_cert::ext::pkix::SubjectKeyIdentifier;
+use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, SubjectKeyIdentifier};
 use x509_cert::spki::AlgorithmIdentifierOwned;
 
 /// CMS **`signedData`** content type OID (`id-signedData`).
@@ -87,6 +88,9 @@ pub const PKCS9_CONTENT_TYPE_OID: ObjectIdentifier =
 /// Microsoft Authenticode RFC3161 timestamp-token unsigned attribute.
 pub const MS_RFC3161_TIMESTAMP_TOKEN_OID: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.4.1.311.3.3.1");
+/// CMS/PKCS#9 RFC3161 timestamp-token unsigned attribute (`id-aa-timeStampToken`).
+pub const PKCS9_RFC3161_TIMESTAMP_TOKEN_OID: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.14");
 
 /// CMS **`data`** content type OID (`id-data`).
 pub const PKCS7_ID_DATA_OID: &str = "1.2.840.113549.1.7.1";
@@ -554,6 +558,35 @@ pub fn signed_data_add_rfc3161_timestamp_token(
     signer_index: usize,
     timestamp_token_der: &[u8],
 ) -> Result<SignedData> {
+    signed_data_add_rfc3161_timestamp_token_with_oid(
+        sd,
+        signer_index,
+        timestamp_token_der,
+        MS_RFC3161_TIMESTAMP_TOKEN_OID,
+    )
+}
+
+/// Attach a raw RFC3161 `timeStampToken` `ContentInfo` as a CMS/PKCS#9 unsigned attribute.
+pub fn signed_data_add_pkcs9_rfc3161_timestamp_token(
+    sd: &SignedData,
+    signer_index: usize,
+    timestamp_token_der: &[u8],
+) -> Result<SignedData> {
+    signed_data_add_rfc3161_timestamp_token_with_oid(
+        sd,
+        signer_index,
+        timestamp_token_der,
+        PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+    )
+}
+
+/// Attach a raw RFC3161 `timeStampToken` `ContentInfo` as an unsigned attribute with the supplied OID.
+pub fn signed_data_add_rfc3161_timestamp_token_with_oid(
+    sd: &SignedData,
+    signer_index: usize,
+    timestamp_token_der: &[u8],
+    timestamp_attr_oid: ObjectIdentifier,
+) -> Result<SignedData> {
     let signers = sd.signer_infos.0.as_slice();
     let si = signers.get(signer_index).ok_or_else(|| {
         anyhow!(
@@ -575,7 +608,7 @@ pub fn signed_data_add_rfc3161_timestamp_token(
         .insert(token_any)
         .map_err(|e| anyhow!("timestamp AttributeValue SET: {e}"))?;
     let timestamp_attr = Attribute {
-        oid: MS_RFC3161_TIMESTAMP_TOKEN_OID,
+        oid: timestamp_attr_oid,
         values,
     };
     let mut attrs: Vec<Attribute> = si
@@ -583,7 +616,7 @@ pub fn signed_data_add_rfc3161_timestamp_token(
         .as_ref()
         .map(|attrs| attrs.iter().cloned().collect())
         .unwrap_or_default();
-    attrs.retain(|attr| attr.oid != MS_RFC3161_TIMESTAMP_TOKEN_OID);
+    attrs.retain(|attr| attr.oid != timestamp_attr_oid);
     attrs.push(timestamp_attr);
     let mut stamped = si.clone();
     stamped.unsigned_attrs = Some(
@@ -765,6 +798,12 @@ pub fn parse_pkcs7_signed_data_der(pkcs7_der: &[u8]) -> Result<SignedData> {
 
 /// **id-ce-subjectKeyIdentifier** (RFC 5280).
 const SUBJECT_KEY_IDENTIFIER_EXT_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
+/// **id-ce-basicConstraints** (RFC 5280).
+const BASIC_CONSTRAINTS_EXT_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
+/// **id-ce-extKeyUsage** (RFC 5280).
+const EXTENDED_KEY_USAGE_EXT_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
+/// **id-kp-codeSigning** (RFC 5280).
+const CODE_SIGNING_EKU_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.3");
 
 /// Locate the embedded **`Certificate`** matching **`SignerInfo.sid`** (**`IssuerAndSerialNumber`** or **`SubjectKeyIdentifier`**).
 pub fn signed_data_certificate_for_signer_identifier<'a>(
@@ -806,6 +845,212 @@ pub fn signed_data_certificate_for_signer_identifier<'a>(
         }
     }
     Err(anyhow!("no embedded certificate matches SignerIdentifier"))
+}
+
+fn same_certificate_identity(a: &Certificate, b: &Certificate) -> bool {
+    a.tbs_certificate.issuer == b.tbs_certificate.issuer
+        && a.tbs_certificate.serial_number == b.tbs_certificate.serial_number
+}
+
+// Certificate-bag signer selection uses issuer topology first. Treat optional extension parse
+// failures as "not asserted" so nonstandard CA/EKU values don't reject otherwise unambiguous bags.
+fn x509_cert_is_ca(cert: &Certificate) -> bool {
+    let Some(exts) = &cert.tbs_certificate.extensions else {
+        return false;
+    };
+    for ext in exts
+        .iter()
+        .filter(|e| e.extn_id == BASIC_CONSTRAINTS_EXT_OID)
+    {
+        if let Ok(basic) = BasicConstraints::from_der(ext.extn_value.as_bytes())
+            && basic.ca
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn x509_cert_has_code_signing_eku(cert: &Certificate) -> bool {
+    let Some(exts) = &cert.tbs_certificate.extensions else {
+        return false;
+    };
+    for ext in exts
+        .iter()
+        .filter(|e| e.extn_id == EXTENDED_KEY_USAGE_EXT_OID)
+    {
+        if let Ok(eku) = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
+            && eku.0.contains(&CODE_SIGNING_EKU_OID)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn cert_issues_another_cert(candidate: &Certificate, certs: &[Certificate]) -> bool {
+    certs.iter().any(|other| {
+        !same_certificate_identity(candidate, other)
+            && other.tbs_certificate.issuer == candidate.tbs_certificate.subject
+    })
+}
+
+fn only_candidate(candidates: Vec<&Certificate>) -> Option<Certificate> {
+    if candidates.len() == 1 {
+        Some(candidates[0].clone())
+    } else {
+        None
+    }
+}
+
+fn select_certificate_bag_signer(certs: &[Certificate]) -> Result<Certificate> {
+    if certs.is_empty() {
+        return Err(anyhow!("SignedData has no X.509 certificates"));
+    }
+    if certs.len() == 1 {
+        return Ok(certs[0].clone());
+    }
+
+    let leaf_candidates = certs
+        .iter()
+        .filter(|cert| !cert_issues_another_cert(cert, certs))
+        .collect::<Vec<_>>();
+    let mut code_signing_leaf_candidates = Vec::new();
+    for cert in &leaf_candidates {
+        if x509_cert_has_code_signing_eku(cert) {
+            code_signing_leaf_candidates.push(*cert);
+        }
+    }
+    if let Some(cert) = only_candidate(code_signing_leaf_candidates) {
+        return Ok(cert);
+    }
+    if let Some(cert) = only_candidate(leaf_candidates) {
+        return Ok(cert);
+    }
+
+    let mut non_ca_code_signing_candidates = Vec::new();
+    for cert in certs {
+        if !x509_cert_is_ca(cert) && x509_cert_has_code_signing_eku(cert) {
+            non_ca_code_signing_candidates.push(cert);
+        }
+    }
+    if let Some(cert) = only_candidate(non_ca_code_signing_candidates) {
+        return Ok(cert);
+    }
+
+    Err(anyhow!(
+        "PKCS#7 certificate bag has no SignerInfo and signer certificate is ambiguous"
+    ))
+}
+
+/// Decode PKCS#7 DER and return the primary signer certificate plus any additional certificates.
+///
+/// The primary signer is resolved from the first **`SignerInfo.sid`** rather than by certificate-set order.
+pub fn parse_pkcs7_signer_and_chain_certificates(
+    pkcs7_der: &[u8],
+) -> Result<(Certificate, Vec<Certificate>)> {
+    let sd = parse_pkcs7_signed_data_der(pkcs7_der)?;
+    let certs = sd
+        .certificates
+        .as_ref()
+        .ok_or_else(|| anyhow!("SignedData has no certificates"))?
+        .0
+        .iter()
+        .filter_map(|choice| match choice {
+            CertificateChoices::Certificate(cert) => Some(cert.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(signer_info) = sd.signer_infos.0.as_slice().first() {
+        let signer = signed_data_certificate_for_signer_identifier(&sd, &signer_info.sid)
+            .context("resolve signer certificate from SignedData")?
+            .clone();
+        let chain = certs
+            .into_iter()
+            .filter(|cert| {
+                cert.tbs_certificate.issuer != signer.tbs_certificate.issuer
+                    || cert.tbs_certificate.serial_number != signer.tbs_certificate.serial_number
+            })
+            .collect();
+        return Ok((signer, chain));
+    }
+    let signer = select_certificate_bag_signer(&certs)?;
+    let chain = certs
+        .into_iter()
+        .filter(|cert| !same_certificate_identity(cert, &signer))
+        .collect();
+    Ok((signer, chain))
+}
+
+const ARTIFACT_SIGNING_CERTIFICATE_MAX_BASE64_DEPTH: usize = 4;
+
+/// Decode Azure Artifact Signing `signingCertificate` bytes into the signer certificate and chain.
+///
+/// The service may return a PEM/DER certificate, a PKCS#7 certificate bag, or base64 text wrapping
+/// either representation.
+pub fn parse_artifact_signing_certificates(
+    bytes: &[u8],
+) -> Result<(Certificate, Vec<Certificate>)> {
+    parse_artifact_signing_certificates_inner(bytes, 0)
+}
+
+fn parse_artifact_signing_certificates_inner(
+    bytes: &[u8],
+    base64_depth: usize,
+) -> Result<(Certificate, Vec<Certificate>)> {
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && text.contains("-----BEGIN CERTIFICATE-----")
+    {
+        let mut certs = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
+            rest = &rest[start..];
+            let Some(end) = rest.find("-----END CERTIFICATE-----") else {
+                return Err(anyhow!(
+                    "unterminated PEM certificate in Artifact Signing signingCertificate"
+                ));
+            };
+            let end = end + "-----END CERTIFICATE-----".len();
+            certs.push(
+                crate::rdp::parse_certificate(&rest.as_bytes()[..end])
+                    .context("parse Artifact Signing PEM certificate")?,
+            );
+            rest = &rest[end..];
+        }
+        let mut iter = certs.into_iter();
+        let signer = iter.next().ok_or_else(|| {
+            anyhow!("Artifact Signing signingCertificate did not contain a certificate")
+        })?;
+        return Ok((signer, iter.collect()));
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        if !compact.is_empty()
+            && compact
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(compact.as_bytes())
+                .context("decode nested base64 Artifact Signing signingCertificate")?;
+            if base64_depth >= ARTIFACT_SIGNING_CERTIFICATE_MAX_BASE64_DEPTH {
+                return Err(anyhow!(
+                    "Artifact Signing signingCertificate has too many nested base64 layers"
+                ));
+            }
+            return parse_artifact_signing_certificates_inner(&decoded, base64_depth + 1);
+        }
+    }
+
+    let der_err = match crate::rdp::parse_certificate(bytes) {
+        Ok(cert) => return Ok((cert, Vec::new())),
+        Err(err) => err.context("parse Artifact Signing DER signing certificate"),
+    };
+    let pkcs7_err = match parse_pkcs7_signer_and_chain_certificates(bytes) {
+        Ok(certs) => return Ok(certs),
+        Err(err) => err.context("parse Artifact Signing PKCS#7 signingCertificate bundle"),
+    };
+    Err(anyhow!("{der_err:#}; {pkcs7_err:#}"))
 }
 
 /// PKCS#9 **`messageDigest`** match + **RSA PKCS#1 v1.5** verify over authenticated **`signedAttrs`**
@@ -1686,14 +1931,92 @@ mod tests {
         encode_spc_indirect_data_der(&patched).expect("encode patched");
     }
 
+    #[test]
+    fn parse_artifact_signing_certificates_accepts_pkcs7_bundle() {
+        let pkcs7_der = crate::verify_pe::pe_nth_pkcs7_signed_data_der(
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"),
+            0,
+        )
+        .expect("pkcs7");
+        let expected =
+            parse_pkcs7_signer_and_chain_certificates(&pkcs7_der).expect("expected signer");
+        let actual = parse_artifact_signing_certificates(&pkcs7_der).expect("actual signer");
+
+        assert_eq!(
+            actual.0.tbs_certificate.subject,
+            expected.0.tbs_certificate.subject
+        );
+        assert_eq!(
+            actual.0.tbs_certificate.serial_number,
+            expected.0.tbs_certificate.serial_number
+        );
+        assert_eq!(actual.1.len(), expected.1.len());
+    }
+
+    #[test]
+    fn parse_artifact_signing_certificates_accepts_base64_wrapped_pkcs7_bundle() {
+        let pkcs7_der = crate::verify_pe::pe_nth_pkcs7_signed_data_der(
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"),
+            0,
+        )
+        .expect("pkcs7");
+        let wrapped = base64::engine::general_purpose::STANDARD.encode(&pkcs7_der);
+        let expected =
+            parse_pkcs7_signer_and_chain_certificates(&pkcs7_der).expect("expected signer");
+        let actual =
+            parse_artifact_signing_certificates(wrapped.as_bytes()).expect("actual signer");
+
+        assert_eq!(
+            actual.0.tbs_certificate.subject,
+            expected.0.tbs_certificate.subject
+        );
+        assert_eq!(
+            actual.0.tbs_certificate.serial_number,
+            expected.0.tbs_certificate.serial_number
+        );
+        assert_eq!(actual.1.len(), expected.1.len());
+    }
+
+    #[test]
+    fn parse_artifact_signing_certificates_accepts_nested_base64_wrapped_pkcs7_bundle() {
+        let pkcs7_der = crate::verify_pe::pe_nth_pkcs7_signed_data_der(
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"),
+            0,
+        )
+        .expect("pkcs7");
+        let wrapped_once = base64::engine::general_purpose::STANDARD.encode(&pkcs7_der);
+        let wrapped_twice = base64::engine::general_purpose::STANDARD.encode(wrapped_once);
+        let expected =
+            parse_pkcs7_signer_and_chain_certificates(&pkcs7_der).expect("expected signer");
+        let actual =
+            parse_artifact_signing_certificates(wrapped_twice.as_bytes()).expect("actual signer");
+
+        assert_eq!(
+            actual.0.tbs_certificate.subject,
+            expected.0.tbs_certificate.subject
+        );
+        assert_eq!(
+            actual.0.tbs_certificate.serial_number,
+            expected.0.tbs_certificate.serial_number
+        );
+        assert_eq!(actual.1.len(), expected.1.len());
+    }
+
     /// PKCS#1 v1.5 **RS256** prehash parity: [`super::signer_info_sha256_digest_over_signed_attrs`] matches
     /// **`SignerInfo.signature`** when verified with the embedded **RSA** signer certificate (same contract as Azure KV **`keys/sign`** digest input).
     mod rsa_pkcs1v15_signed_attrs_verify {
+        use super::CertificateChoices;
+        use super::SignerInfos;
+        use super::encode_pkcs7_content_info_signed_data_der;
         use super::parse_pkcs7_signed_data_der;
+        use super::parse_pkcs7_signer_and_chain_certificates;
+        use super::signed_data_certificate_for_signer_identifier;
         use super::signed_data_spc_indirect_message_digest_octets;
         use super::verify_signed_data_authenticode_indirect_digest_and_rsa_sha256_pkcs1v15_signature;
         use crate::verify_pe::pe_nth_pkcs7_signed_data_der;
+        use der::Decode;
         use der::asn1::ObjectIdentifier;
+        use der::asn1::SetOfVec;
 
         const SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 
@@ -1726,6 +2049,96 @@ mod tests {
             assert_rs256_prehash_verifies_on_fixture(include_bytes!(
                 "../../../tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi"
             ));
+        }
+
+        #[test]
+        fn parse_pkcs7_signer_and_chain_certificates_finds_primary_signer_from_bundle() {
+            let pe_bytes = include_bytes!(
+                "../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"
+            );
+            let pkcs7 = crate::verify_pe::pe_nth_pkcs7_signed_data_der(pe_bytes, 0).expect("pkcs7");
+            let sd = parse_pkcs7_signed_data_der(&pkcs7).expect("SignedData");
+            let signer_info = sd.signer_infos.0.as_slice().first().expect("SignerInfo");
+            let expected = signed_data_certificate_for_signer_identifier(&sd, &signer_info.sid)
+                .expect("signer cert");
+
+            let (signer, chain) =
+                parse_pkcs7_signer_and_chain_certificates(&pkcs7).expect("signer and chain");
+
+            assert_eq!(
+                signer.tbs_certificate.subject,
+                expected.tbs_certificate.subject
+            );
+            assert_eq!(
+                signer.tbs_certificate.serial_number,
+                expected.tbs_certificate.serial_number
+            );
+            assert!(
+                chain.iter().all(|cert| {
+                    cert.tbs_certificate.issuer != signer.tbs_certificate.issuer
+                        || cert.tbs_certificate.serial_number
+                            != signer.tbs_certificate.serial_number
+                }),
+                "chain must not include the primary signer certificate"
+            );
+        }
+
+        #[test]
+        fn parse_pkcs7_signer_and_chain_certificates_accepts_certificate_bag_without_signer_info() {
+            let pe_bytes =
+                include_bytes!("../../../tests/fixtures/generated-signed/pe/tiny32-pe-alias.dll");
+            let pkcs7 = crate::verify_pe::pe_nth_pkcs7_signed_data_der(pe_bytes, 0).expect("pkcs7");
+            let mut sd = parse_pkcs7_signed_data_der(&pkcs7).expect("SignedData");
+            let signer_info = sd.signer_infos.0.as_slice().first().expect("SignerInfo");
+            let expected_signer =
+                signed_data_certificate_for_signer_identifier(&sd, &signer_info.sid)
+                    .expect("signer cert")
+                    .clone();
+            let ca = x509_cert::Certificate::from_der(include_bytes!(
+                "../../../tests/fixtures/devolutions-authenticode/authenticode-test-ca.crt"
+            ))
+            .expect("CA cert");
+            let signer_cert = sd
+                .certificates
+                .as_ref()
+                .expect("certificates")
+                .0
+                .iter()
+                .find_map(|choice| match choice {
+                    CertificateChoices::Certificate(cert) => Some(cert.clone()),
+                    _ => None,
+                })
+                .expect("signer certificate");
+            let certs = vec![
+                CertificateChoices::Certificate(ca),
+                CertificateChoices::Certificate(signer_cert),
+            ];
+            sd.certificates = Some(super::CertificateSet(
+                SetOfVec::try_from(certs).expect("CertificateSet"),
+            ));
+            sd.signer_infos = SignerInfos(SetOfVec::new());
+            let bag_der =
+                encode_pkcs7_content_info_signed_data_der(&sd).expect("encode certificate bag");
+
+            let (signer, chain) =
+                parse_pkcs7_signer_and_chain_certificates(&bag_der).expect("signer and chain");
+
+            assert_eq!(
+                signer.tbs_certificate.subject,
+                expected_signer.tbs_certificate.subject
+            );
+            assert_eq!(
+                signer.tbs_certificate.serial_number,
+                expected_signer.tbs_certificate.serial_number
+            );
+            assert!(
+                chain.iter().all(|cert| {
+                    cert.tbs_certificate.issuer != signer.tbs_certificate.issuer
+                        || cert.tbs_certificate.serial_number
+                            != signer.tbs_certificate.serial_number
+                }),
+                "fallback chain must not repeat the selected signer certificate"
+            );
         }
     }
 }
