@@ -14,7 +14,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 - `timestamp`: Rust mssign32 core (`SignerTimeStampEx3`/`SignerTimeStampEx2`) plus AppX restrictions.
 - `rdp`: Rust port of **`rdpsign.exe`** for `.rdp` files (`SignScope` / `Signature` records, detached PKCS#7 over the secure-settings blob).
 - `cert-store`: Portable file-backed certificate store under `~/.psign/cert-store` by default, with Windows-style store/thumbprint selection.
-- `code`: dotnet/sign-style orchestration entry point. It supports `--dry-run` / `--plan-json` planning over inputs, file lists, globs, and nested ZIP/OPC containers, plus guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, MSIX/AppX unsigned-package prepare, encrypted MSIX/AppX OS-only diagnostics, PE-like ClickOnce `.deploy` payloads, App Installer publisher updates + companion signatures, `--continue-on-error`, `--skip-signed`, `--overwrite`, and inside-out VSIX/ZIP -> NuGet/VSIX -> PE signing.
+- `code`: dotnet/sign-style orchestration entry point. It supports `--dry-run` / `--plan-json` planning over inputs, file lists, globs, and nested ZIP/OPC containers, plus guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, MSIX/AppX unsigned-package prepare, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer publisher updates + companion signatures, `--continue-on-error`, `--skip-signed`, `--overwrite`, and inside-out VSIX/ZIP -> NuGet/VSIX -> PE/ClickOnce-manifest signing.
 - `portable ...`: Cross-platform digest, verification, trust, signing, package, RFC3161, and remote-hash helpers that avoid Win32 APIs, including PE/WinMD signing through Azure Artifact Signing REST without Microsoft client DLLs.
 
 ## MSIX parity notes
@@ -144,6 +144,7 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.zip package-bundle.zip
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output prepared.msix app.msix
+# psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.manifest app.exe.manifest
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.signed.exe.deploy app.exe.deploy
 # psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output updated.appinstaller.p7 app.appinstaller
 # Optional portable REST helpers (Linux/macOS):

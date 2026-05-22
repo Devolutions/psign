@@ -461,6 +461,41 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 "`psign-tool code` recognized {} as an encrypted MSIX/AppX package; encrypted .eappx/.emsix packages require Windows AppxSip OS delegation and are not supported by the portable package prepare path",
                 node.path
             )),
+            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest => {
+                let output = output_path_for_node(node)?;
+                ensure_parent_dir(&output)?;
+                let input_bytes =
+                    std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
+                if args.skip_signed && clickonce_manifest_has_signature(&input_bytes) {
+                    std::fs::write(&output, input_bytes).with_context(|| {
+                        format!("write skipped ClickOnce manifest {}", output.display())
+                    })?;
+                    Ok(format!(
+                        "skipped {} -> {} (already signed)",
+                        node.path,
+                        display_path(&output)
+                    ))
+                } else {
+                    let signed = sign_clickonce_manifest_bytes(
+                        &input_bytes,
+                        &node.path,
+                        cert,
+                        key,
+                        vsix_digest,
+                        args.timestamp_url.as_deref(),
+                        args.timestamp_digest,
+                    )
+                    .with_context(|| format!("sign ClickOnce manifest {}", input.display()))?;
+                    std::fs::write(&output, signed).with_context(|| {
+                        format!("write signed ClickOnce manifest {}", output.display())
+                    })?;
+                    Ok(format!(
+                        "signed {} -> {} (ClickOnce manifest XMLDSig)",
+                        node.path,
+                        display_path(&output)
+                    ))
+                }
+            }
             CodeFormat::Deploy => {
                 let output = output_path_for_node(node)?;
                 ensure_parent_dir(&output)?;
@@ -488,7 +523,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 node.path
             )),
             _ => Err(anyhow!(
-                "`psign-tool code` signing execution currently supports top-level PE/WinMD, NuGet/SNuGet, VSIX, ZIP, MSIX/AppX prepare, ClickOnce .deploy PE payloads, and App Installer descriptors only ({} is {:?})",
+                "`psign-tool code` signing execution currently supports top-level PE/WinMD, NuGet/SNuGet, VSIX, ZIP, MSIX/AppX prepare, ClickOnce manifests, ClickOnce .deploy PE payloads, and App Installer descriptors only ({} is {:?})",
                 node.path,
                 node.format
             )),
@@ -651,6 +686,117 @@ fn sign_vsix_bytes(
     Ok(out.into_inner())
 }
 
+fn sign_clickonce_manifest_bytes(
+    input_bytes: &[u8],
+    label: &str,
+    cert: &Path,
+    key: &Path,
+    digest: vsix::VsixHashAlgorithm,
+    timestamp_url: Option<&str>,
+    timestamp_digest: Option<DigestAlgorithm>,
+) -> Result<Vec<u8>> {
+    if timestamp_url.is_some() || timestamp_digest.is_some() {
+        return Err(anyhow!(
+            "ClickOnce manifest XMLDSig timestamping is not implemented in `psign-tool code` yet"
+        ));
+    }
+    let text = std::str::from_utf8(input_bytes)
+        .with_context(|| format!("read ClickOnce manifest {label} as UTF-8 XML"))?;
+    let unsigned = unsigned_clickonce_manifest_text(text)?;
+    let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+    let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
+    let private_key = rdp::parse_rsa_private_key(&key_bytes)
+        .with_context(|| format!("parse RSA private key {}", key.display()))?;
+    let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
+    let signature = sign_xml_signed_info(digest, private_key, &signed_info);
+    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
+    Ok(insert_clickonce_signature_xml(&unsigned, &signature_xml)?.into_bytes())
+}
+
+fn clickonce_manifest_has_signature(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| {
+        find_xml_element_span_by_local_name(text, "Signature", 0).is_ok_and(|span| span.is_some())
+    })
+}
+
+fn unsigned_clickonce_manifest_text(text: &str) -> Result<String> {
+    let Some((start, end)) = find_xml_element_span_by_local_name(text, "Signature", 0)? else {
+        return Ok(text.to_owned());
+    };
+    let mut out = String::with_capacity(text.len() - (end - start));
+    out.push_str(&text[..start]);
+    out.push_str(&text[end..]);
+    Ok(out)
+}
+
+fn clickonce_manifest_signed_info_xml(
+    unsigned_manifest_text: &str,
+    digest: vsix::VsixHashAlgorithm,
+) -> Vec<u8> {
+    let manifest_digest =
+        clickonce_signature_digest_bytes(digest, unsigned_manifest_text.as_bytes());
+    let digest_b64 = BASE64_STANDARD.encode(manifest_digest);
+    format!(
+        r#"<SignedInfo><CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><SignatureMethod Algorithm="{}"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></Transforms><DigestMethod Algorithm="{}"/><DigestValue>{digest_b64}</DigestValue></Reference></SignedInfo>"#,
+        clickonce_signature_algorithm_uri(digest),
+        clickonce_signature_digest_uri(digest),
+    )
+    .into_bytes()
+}
+
+fn clickonce_manifest_signature_xml(
+    signed_info: &[u8],
+    signature: &[u8],
+    cert_der: &[u8],
+) -> String {
+    let signed_info = String::from_utf8_lossy(signed_info);
+    format!(
+        r#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">{signed_info}<SignatureValue>{}</SignatureValue><KeyInfo><X509Data><X509Certificate>{}</X509Certificate></X509Data></KeyInfo></Signature>"#,
+        BASE64_STANDARD.encode(signature),
+        BASE64_STANDARD.encode(cert_der)
+    )
+}
+
+fn insert_clickonce_signature_xml(
+    unsigned_manifest_text: &str,
+    signature_xml: &str,
+) -> Result<String> {
+    let root = find_xml_root_start_tag(unsigned_manifest_text)?;
+    let close = format!("</{}>", root.name);
+    let close_start = unsigned_manifest_text
+        .rfind(&close)
+        .ok_or_else(|| anyhow!("ClickOnce manifest root </{}> tag is not closed", root.name))?;
+    let mut out = String::with_capacity(unsigned_manifest_text.len() + signature_xml.len());
+    out.push_str(&unsigned_manifest_text[..close_start]);
+    out.push_str(signature_xml);
+    out.push_str(&unsigned_manifest_text[close_start..]);
+    Ok(out)
+}
+
+fn clickonce_signature_algorithm_uri(digest: vsix::VsixHashAlgorithm) -> &'static str {
+    match digest {
+        vsix::VsixHashAlgorithm::Sha256 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+        vsix::VsixHashAlgorithm::Sha384 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384",
+        vsix::VsixHashAlgorithm::Sha512 => "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512",
+    }
+}
+
+fn clickonce_signature_digest_uri(digest: vsix::VsixHashAlgorithm) -> &'static str {
+    match digest {
+        vsix::VsixHashAlgorithm::Sha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
+        vsix::VsixHashAlgorithm::Sha384 => "http://www.w3.org/2001/04/xmldsig-more#sha384",
+        vsix::VsixHashAlgorithm::Sha512 => "http://www.w3.org/2001/04/xmlenc#sha512",
+    }
+}
+
+fn clickonce_signature_digest_bytes(digest: vsix::VsixHashAlgorithm, bytes: &[u8]) -> Vec<u8> {
+    match digest {
+        vsix::VsixHashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
+        vsix::VsixHashAlgorithm::Sha384 => sha2::Sha384::digest(bytes).to_vec(),
+        vsix::VsixHashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sign_zip_container_bytes(
     input_bytes: &[u8],
@@ -751,6 +897,21 @@ fn sign_nested_package_entries(
                 timestamp_url,
                 timestamp_digest,
             )?),
+            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest => {
+                if skip_signed && clickonce_manifest_has_signature(&bytes) {
+                    None
+                } else {
+                    Some(sign_clickonce_manifest_bytes(
+                        &bytes,
+                        &nested_label,
+                        cert,
+                        key,
+                        vsix_digest,
+                        timestamp_url,
+                        timestamp_digest,
+                    )?)
+                }
+            }
             CodeFormat::Deploy => Some(sign_clickonce_deploy_bytes(
                 &bytes,
                 &nested_label,
@@ -1133,6 +1294,111 @@ fn xml_escape_attr(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[derive(Debug)]
+struct XmlStartTagSpan {
+    start: usize,
+    end: usize,
+    name: String,
+}
+
+fn find_xml_start_tag_by_local_name(
+    text: &str,
+    local_name: &str,
+    from: usize,
+) -> Result<Option<XmlStartTagSpan>> {
+    let mut cursor = from;
+    while let Some(rel) = text[cursor..].find('<') {
+        let start = cursor + rel;
+        let Some(first) = text[start + 1..].chars().next() else {
+            return Ok(None);
+        };
+        if matches!(first, '/' | '!' | '?') {
+            cursor = start + 1;
+            continue;
+        }
+        let end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("ClickOnce XML tag is not closed"))?;
+        let name_start = start + 1;
+        let name_end = text[name_start..=end]
+            .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .map(|offset| name_start + offset)
+            .unwrap_or(end);
+        let name = &text[name_start..name_end];
+        let name_local = name
+            .rsplit_once(':')
+            .map(|(_, local)| local)
+            .unwrap_or(name);
+        if name_local == local_name {
+            return Ok(Some(XmlStartTagSpan {
+                start,
+                end,
+                name: name.to_owned(),
+            }));
+        }
+        cursor = end + 1;
+    }
+    Ok(None)
+}
+
+fn find_xml_element_span_by_local_name(
+    text: &str,
+    local_name: &str,
+    from: usize,
+) -> Result<Option<(usize, usize)>> {
+    let Some(start_tag) = find_xml_start_tag_by_local_name(text, local_name, from)? else {
+        return Ok(None);
+    };
+    let close = format!("</{}>", start_tag.name);
+    let content_start = start_tag.end + 1;
+    let close_start = text[content_start..]
+        .find(&close)
+        .map(|offset| content_start + offset)
+        .ok_or_else(|| anyhow!("ClickOnce XML </{}> tag is not closed", start_tag.name))?;
+    Ok(Some((start_tag.start, close_start + close.len())))
+}
+
+fn find_xml_root_start_tag(text: &str) -> Result<XmlStartTagSpan> {
+    let mut cursor = 0usize;
+    while let Some(rel) = text[cursor..].find('<') {
+        let start = cursor + rel;
+        let Some(first) = text[start + 1..].chars().next() else {
+            break;
+        };
+        if matches!(first, '?' | '!') {
+            let end = text[start..]
+                .find('>')
+                .map(|offset| start + offset)
+                .ok_or_else(|| anyhow!("ClickOnce XML declaration/comment is not closed"))?;
+            cursor = end + 1;
+            continue;
+        }
+        if first == '/' {
+            return Err(anyhow!(
+                "ClickOnce XML starts with an unexpected closing tag"
+            ));
+        }
+        let end = text[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .ok_or_else(|| anyhow!("ClickOnce XML root tag is not closed"))?;
+        let name_start = start + 1;
+        let name_end = text[name_start..=end]
+            .find(|ch: char| ch.is_whitespace() || ch == '>' || ch == '/')
+            .map(|offset| name_start + offset)
+            .unwrap_or(end);
+        return Ok(XmlStartTagSpan {
+            start,
+            end,
+            name: text[name_start..name_end].to_owned(),
+        });
+    }
+    Err(anyhow!(
+        "ClickOnce manifest does not contain a root XML element"
+    ))
 }
 
 fn pe_has_signature(bytes: &[u8]) -> bool {

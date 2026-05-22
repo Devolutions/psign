@@ -89,7 +89,7 @@ This path builds Authenticode CMS locally, sends the CMS authenticated-attribute
 
 ## 1.4 Package-native helper workflows
 
-`dotnet/sign`-style package orchestration is being added through `psign-tool code` and package-native helpers. The command can plan nested graphs and has guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, unsigned MSIX/AppX prepare, encrypted MSIX/AppX OS-only diagnostics, PE-like ClickOnce `.deploy` payloads, App Installer inputs, `--continue-on-error`, `--skip-signed`, `--overwrite`, and package-native VSIX/ZIP/MSIX -> NuGet -> PE nesting:
+`dotnet/sign`-style package orchestration is being added through `psign-tool code` and package-native helpers. The command can plan nested graphs and has guarded local cert/key execution for PE/WinMD, NuGet/SNuGet, VSIX, generic ZIP nested package entries, unsigned MSIX/AppX prepare, encrypted MSIX/AppX OS-only diagnostics, ClickOnce `.manifest` / `.application` / `.vsto` XMLDSig signing, PE-like ClickOnce `.deploy` payloads, App Installer inputs, `--continue-on-error`, `--skip-signed`, `--overwrite`, and package-native VSIX/ZIP/MSIX -> NuGet -> PE/ClickOnce-manifest nesting:
 
 ```bash
 psign-tool code --dry-run --plan-json --base-directory . --file-list files.txt
@@ -99,6 +99,7 @@ psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output
 psign-tool code --base-directory . --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.zip bundle.zip
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output prepared.msix app.msix
+psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output signed.manifest app.exe.manifest
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.signed.exe.deploy app.exe.deploy
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --output app.appinstaller.p7 app.appinstaller
 psign-tool code --base-directory . --cert signer.der --key signer.pkcs8 --publisher-name "CN=Publisher" --output updated.appinstaller.p7 app.appinstaller
@@ -141,7 +142,7 @@ psign-tool portable clickonce-sign-manifest-from-signature updated.manifest --ce
 psign-tool portable clickonce-verify-manifest-signature signed.manifest --trusted-ca signer.der
 ```
 
-These commands do not yet replace `dotnet/sign` for production recursive package signing. They cover deterministic package hashing/reference generation, local PE/WinMD Authenticode signing, local and external-signer NuGet/App Installer CMS signing, NuGet external-signer CMS assembly via `nupkg-signature-pkcs7-prehash` + `nupkg-signature-pkcs7-from-signature`, local and external-signer VSIX XMLDSig signing with optional explicit-anchor signer chain verification, unsigned MSIX/AppX publisher/block-map prepare, encrypted MSIX/AppX OS-only diagnostics, App Installer publisher update before companion signing, marker embedding, package-native nested VSIX/ZIP/MSIX -> NuGet -> PE signing, PE-like ClickOnce `.deploy` payload signing, ClickOnce manifest file hash update/verification plus local/external deterministic portable structural XMLDSig signing, nested exclude filters, and metadata inspection/update while final MSIX signing and full manifest/policy checks are being completed.
+These commands do not yet replace `dotnet/sign` for production recursive package signing. They cover deterministic package hashing/reference generation, local PE/WinMD Authenticode signing, local and external-signer NuGet/App Installer CMS signing, NuGet external-signer CMS assembly via `nupkg-signature-pkcs7-prehash` + `nupkg-signature-pkcs7-from-signature`, local and external-signer VSIX XMLDSig signing with optional explicit-anchor signer chain verification, unsigned MSIX/AppX publisher/block-map prepare, encrypted MSIX/AppX OS-only diagnostics, App Installer publisher update before companion signing, marker embedding, package-native nested VSIX/ZIP/MSIX -> NuGet -> PE/ClickOnce-manifest signing, PE-like ClickOnce `.deploy` payload signing, ClickOnce manifest file hash update/verification plus local/external deterministic portable structural XMLDSig signing, nested exclude filters, and metadata inspection/update while final MSIX signing and full manifest/policy checks are being completed.
 
 ## 1.5 RFC 3161 TSA query/reply (DER only; no embed)
 

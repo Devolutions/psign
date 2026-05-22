@@ -486,6 +486,126 @@ fn code_signs_clickonce_deploy_pe_payload_with_local_cert_key() {
 }
 
 #[test]
+fn code_signs_clickonce_manifest_with_local_cert_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.exe.manifest");
+    let output = base.join("app.signed.exe.manifest");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::write(&input, sample_clickonce_manifest()).unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("app.exe.manifest");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("ClickOnce manifest XMLDSig"));
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "clickonce-verify-manifest-signature"])
+        .arg(&output)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "clickonce-verify-manifest-signature: ok",
+        ))
+        .stdout(predicate::str::contains("signer_trust_chain=yes"));
+}
+
+#[test]
+fn code_signs_nested_clickonce_manifest_inside_generic_zip() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("bundle.zip");
+    let output = base.join("signed.zip");
+    let nested_manifest = base.join("nested.signed.manifest");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    write_zip(
+        &input,
+        &[
+            ("readme.txt", b"ClickOnce manifest bundle".as_slice()),
+            (
+                "publish/app.exe.manifest",
+                sample_clickonce_manifest().as_bytes(),
+            ),
+        ],
+    );
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("bundle.zip");
+    cmd.assert().success();
+
+    extract_zip_entry(&output, "publish/app.exe.manifest", &nested_manifest);
+    let mut verify = psign();
+    verify
+        .args(["portable", "clickonce-verify-manifest-signature"])
+        .arg(&nested_manifest)
+        .arg("--trusted-ca")
+        .arg(&cert)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("signature_value_match=yes"));
+}
+
+#[test]
+fn code_rejects_clickonce_manifest_timestamping_explicitly() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.application");
+    let output = base.join("app.signed.application");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::write(&input, sample_clickonce_manifest()).unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--timestamp-url",
+            "http://127.0.0.1:9/tsa",
+            "--timestamp-digest",
+            "sha256",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("app.application");
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "ClickOnce manifest XMLDSig timestamping is not implemented",
+    ));
+}
+
+#[test]
 fn code_prepares_msix_with_nested_pe_and_publisher_update() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
@@ -1487,6 +1607,22 @@ fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         writer.write_all(bytes).unwrap();
     }
     writer.finish().unwrap();
+}
+
+fn extract_zip_entry(zip_path: &Path, entry_name: &str, output: &Path) {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(zip_path).unwrap()).unwrap();
+    let mut entry = archive.by_name(entry_name).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    std::fs::write(output, bytes).unwrap();
+}
+
+fn sample_clickonce_manifest() -> &'static str {
+    r#"<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity name="ClickOnce.Sample" version="1.0.0.0" />
+  <description asmv2:publisher="Example" xmlns:asmv2="urn:schemas-microsoft-com:asm.v2" />
+</assembly>"#
 }
 
 #[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
