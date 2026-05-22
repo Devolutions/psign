@@ -1,6 +1,6 @@
 @{
     RootModule = 'Devolutions.Psign.psm1'
-    ModuleVersion = '0.2.0'
+    ModuleVersion = '0.3.0'
     GUID = 'e6e50e4b-bf25-4ed6-a343-49f904e79f8f'
     Author = 'Devolutions'
     CompanyName = 'Devolutions'

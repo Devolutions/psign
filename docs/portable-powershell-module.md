@@ -7,7 +7,7 @@
 - `Set-PortableSignature`
 - `Get-PortableSignature`
 
-Both cmdlets accept `-FilePath` and `-LiteralPath`. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes `.ps1`, `.psm1`, `.psd1`, and `.ps1xml` files.
+Both cmdlets accept `-FilePath` and `-LiteralPath`. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes PowerShell files plus newly supported portable signing neighbors such as `.dll`, `.exe`, `.nupkg`, `.snupkg`, `.vsix`, `.manifest`, `.application`, `.vsto`, and `.appinstaller`.
 
 Both cmdlets also support the built-in Authenticode content parameter shape:
 
@@ -50,17 +50,21 @@ Trust verification is offline by default. `-OnlineAia` enables issuer retrieval,
 
 ## Supported portable formats
 
-The current module tests cover signing and validation through the PowerShell surface for:
+The current PowerShell test suite covers signing and validation through the module surface for:
 
 - PE files
 - CAB archives
 - MSI/MSP installers
 - Devolutions ZIP Authenticode packages
+- NuGet and symbol NuGet packages (`.nupkg`, `.snupkg`)
+- VSIX packages
+- ClickOnce manifests (`.manifest`, `.application`, `.vsto`)
+- App Installer descriptors with detached `.p7` companions
 - PowerShell scripts, including `.ps1xml` XML marker signatures
 - PowerShell module directories
 - MSIX/AppX packages
 
-Signature inspection validates portable digest binding and signature structure. Explicit trust verification is currently implemented for PE, CAB, MSI/MSP, Devolutions ZIP Authenticode, and PowerShell script signatures.
+The suite now runs under **Pester 5**, while preserving the existing end-to-end smoke coverage. Signature inspection validates portable digest binding and signature structure. Explicit trust verification is currently implemented for PE, CAB, MSI/MSP, Devolutions ZIP Authenticode, and PowerShell script signatures.
 
 ## Build, test, and package
 

@@ -1,6 +1,6 @@
 [package]
 name = "psign-digest-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Linux/macOS-friendly CLI over portable Authenticode SIP digests (psign-sip-digest)"
 license.workspace = true
