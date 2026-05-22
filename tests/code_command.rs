@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use psign_opc_sign::nuget;
+use psign_sip_digest::pkcs7;
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -173,6 +174,8 @@ fn code_signs_top_level_nupkg_with_local_cert_key() {
         .success()
         .stdout(predicate::str::contains("signed=yes"))
         .stdout(predicate::str::contains("signature_stored=yes"));
+
+    assert_nupkg_signature_has_nuget_author_attrs(&output);
 }
 
 #[test]
@@ -313,7 +316,7 @@ fn code_signs_nupkg_with_artifact_signing_identity() {
     )
     .unwrap();
 
-    let (mut guard, endpoint) = spawn_artifact_signing_server(2);
+    let (mut guard, endpoint) = spawn_artifact_signing_server(4);
     let mut cmd = psign();
     cmd.args(["code", "--base-directory"])
         .arg(base)
@@ -2222,6 +2225,46 @@ fn extract_zip_entry(zip_path: &Path, entry_name: &str, output: &Path) {
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes).unwrap();
     std::fs::write(output, bytes).unwrap();
+}
+
+fn assert_nupkg_signature_has_nuget_author_attrs(path: &Path) {
+    let signature_der = nuget::extract_signature_path(path).expect("extract NuGet signature");
+    let signed_data =
+        pkcs7::parse_pkcs7_signed_data_der(&signature_der).expect("parse NuGet signature");
+    let signer_infos = signed_data.signer_infos.0.as_slice();
+    let signer_info = signer_infos.first().expect("NuGet signature signer info");
+    let signed_attrs = signer_info
+        .signed_attrs
+        .as_ref()
+        .expect("NuGet signature signed attributes");
+    let commitment_attr = signed_attrs
+        .iter()
+        .find(|attr| attr.oid == pkcs7::PKCS9_COMMITMENT_TYPE_INDICATION_OID)
+        .expect("NuGet author commitment-type signed attribute");
+    let commitment_values = commitment_attr.values.as_slice();
+    assert_eq!(commitment_values.len(), 1);
+
+    let proof_of_origin_oid = pkcs7::COMMITMENT_TYPE_IDENTIFIER_PROOF_OF_ORIGIN_OID
+        .to_der()
+        .expect("proofOfOrigin OID DER");
+    let mut expected_value = vec![0x30, proof_of_origin_oid.len() as u8];
+    expected_value.extend_from_slice(&proof_of_origin_oid);
+    assert_eq!(
+        commitment_values[0].to_der().expect("commitment value DER"),
+        expected_value
+    );
+
+    assert!(
+        signed_attrs
+            .iter()
+            .any(|attr| attr.oid == pkcs7::PKCS9_SIGNING_TIME_OID),
+        "NuGet author signing-time signed attribute"
+    );
+    let signing_certificate_v2 = signed_attrs
+        .iter()
+        .find(|attr| attr.oid == pkcs7::PKCS9_SIGNING_CERTIFICATE_V2_OID)
+        .expect("NuGet author signing-certificate-v2 signed attribute");
+    assert_eq!(signing_certificate_v2.values.as_slice().len(), 1);
 }
 
 fn sample_clickonce_manifest() -> &'static str {
