@@ -499,6 +499,62 @@ fn code_updates_prefixed_appinstaller_main_bundle_before_signing() {
 }
 
 #[test]
+fn code_signs_nested_appinstaller_inside_generic_zip() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("bundle.zip");
+    let output = base.join("signed-bundle.zip");
+    let descriptor = base.join("nested.appinstaller");
+    let signature = base.join("nested.appinstaller.p7");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    write_zip(
+        &input,
+        &[
+            ("readme.txt", b"App Installer bundle".as_slice()),
+            (
+                "descriptors/app.appinstaller",
+                br#"<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2021" Version="1.0.0.0" Uri="https://example.invalid/app.appinstaller"><MainPackage Name="Example.App" Publisher="CN=Old" Version="1.0.0.0" ProcessorArchitecture="x64" Uri="https://example.invalid/app.msix"/></AppInstaller>"#.as_slice(),
+            ),
+        ],
+    );
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--publisher-name",
+            "CN=Nested App Installer Publisher",
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("bundle.zip");
+    cmd.assert().success();
+
+    extract_zip_entry(&output, "descriptors/app.appinstaller", &descriptor);
+    extract_zip_entry(&output, "descriptors/app.appinstaller.p7", &signature);
+    let mut verify = psign();
+    verify
+        .args(["portable", "appinstaller-verify-companion"])
+        .arg(&descriptor)
+        .args(["--signature"])
+        .arg(&signature)
+        .args(["--trusted-ca"])
+        .arg(&cert)
+        .args(["--allow-loose-signing-cert"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "appinstaller-verify-companion: ok",
+        ));
+}
+
+#[test]
 fn code_signs_clickonce_deploy_pe_payload_with_local_cert_key() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();

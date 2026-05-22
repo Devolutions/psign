@@ -883,104 +883,160 @@ fn sign_nested_package_entries(
         }) {
             continue;
         }
-        let signed = match &format {
-            CodeFormat::Nuget | CodeFormat::Snupkg => Some(sign_nuget_bytes(
-                &bytes,
-                &nested_label,
-                digest,
-                signing_digest,
-                cert,
-                key,
-                chain_certs.clone(),
-                nested_excludes,
-                skip_signed,
-                overwrite,
-                None,
-                timestamp_url,
-                timestamp_digest,
-            )?),
-            CodeFormat::Vsix => Some(sign_vsix_bytes(
-                &bytes,
-                &nested_label,
-                digest,
-                signing_digest,
-                vsix_digest,
-                cert,
-                key,
-                chain_certs.clone(),
-                nested_excludes,
-                skip_signed,
-                overwrite,
-                None,
-                timestamp_url,
-                timestamp_digest,
-            )?),
+        let mut entry_updates = Vec::new();
+        match &format {
+            CodeFormat::Nuget | CodeFormat::Snupkg => entry_updates.push(ZipEntryUpdate {
+                name,
+                bytes: sign_nuget_bytes(
+                    &bytes,
+                    &nested_label,
+                    digest,
+                    signing_digest,
+                    cert,
+                    key,
+                    chain_certs.clone(),
+                    nested_excludes,
+                    skip_signed,
+                    overwrite,
+                    None,
+                    timestamp_url,
+                    timestamp_digest,
+                )?,
+                compression,
+            }),
+            CodeFormat::Vsix => entry_updates.push(ZipEntryUpdate {
+                name,
+                bytes: sign_vsix_bytes(
+                    &bytes,
+                    &nested_label,
+                    digest,
+                    signing_digest,
+                    vsix_digest,
+                    cert,
+                    key,
+                    chain_certs.clone(),
+                    nested_excludes,
+                    skip_signed,
+                    overwrite,
+                    None,
+                    timestamp_url,
+                    timestamp_digest,
+                )?,
+                compression,
+            }),
+            CodeFormat::AppInstaller => {
+                validate_appinstaller_descriptor(&bytes)
+                    .with_context(|| format!("validate nested App Installer {nested_label}"))?;
+                let mut descriptor = bytes;
+                if let Some(publisher) = publisher {
+                    descriptor = update_appinstaller_publisher_bytes(&descriptor, publisher)
+                        .with_context(|| {
+                            format!("update nested App Installer publisher for {nested_label}")
+                        })?;
+                    entry_updates.push(ZipEntryUpdate {
+                        name: name.clone(),
+                        bytes: descriptor.clone(),
+                        compression,
+                    });
+                }
+                let companion_name = format!("{name}.p7");
+                if !overwrite && zip_contains_entry(input_bytes, &companion_name)? {
+                    return Err(anyhow!(
+                        "{nested_label} already has companion signature {companion_name}; use --overwrite to replace it"
+                    ));
+                }
+                let pkcs7 = sign_pkcs7_id_data(
+                    &descriptor,
+                    cert,
+                    key,
+                    chain_certs.clone(),
+                    signing_digest,
+                    timestamp_url,
+                    timestamp_digest,
+                )
+                .with_context(|| {
+                    format!("create nested App Installer companion signature for {nested_label}")
+                })?;
+                entry_updates.push(ZipEntryUpdate {
+                    name: companion_name,
+                    bytes: pkcs7,
+                    compression: zip::CompressionMethod::Stored,
+                });
+            }
             CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest => {
-                if skip_signed && clickonce_manifest_has_signature(&bytes) {
-                    None
-                } else {
-                    Some(sign_clickonce_manifest_bytes(
-                        &bytes,
-                        &nested_label,
-                        cert,
-                        key,
-                        vsix_digest,
-                        timestamp_url,
-                        timestamp_digest,
-                    )?)
+                if !(skip_signed && clickonce_manifest_has_signature(&bytes)) {
+                    entry_updates.push(ZipEntryUpdate {
+                        name,
+                        bytes: sign_clickonce_manifest_bytes(
+                            &bytes,
+                            &nested_label,
+                            cert,
+                            key,
+                            vsix_digest,
+                            timestamp_url,
+                            timestamp_digest,
+                        )?,
+                        compression,
+                    });
                 }
             }
-            CodeFormat::Deploy => Some(sign_clickonce_deploy_bytes(
-                &bytes,
-                &nested_label,
-                cert,
-                key,
-                signing_digest,
-            )?),
-            CodeFormat::Pe | CodeFormat::Winmd => Some(sign_pe_bytes(
-                &bytes,
-                &nested_label,
-                cert,
-                key,
-                signing_digest,
-                skip_signed,
-            )?),
+            CodeFormat::Deploy => entry_updates.push(ZipEntryUpdate {
+                name,
+                bytes: sign_clickonce_deploy_bytes(
+                    &bytes,
+                    &nested_label,
+                    cert,
+                    key,
+                    signing_digest,
+                )?,
+                compression,
+            }),
+            CodeFormat::Pe | CodeFormat::Winmd => entry_updates.push(ZipEntryUpdate {
+                name,
+                bytes: sign_pe_bytes(
+                    &bytes,
+                    &nested_label,
+                    cert,
+                    key,
+                    signing_digest,
+                    skip_signed,
+                )?,
+                compression,
+            }),
             CodeFormat::Msix
             | CodeFormat::Appx
             | CodeFormat::MsixBundle
             | CodeFormat::AppxBundle
             | CodeFormat::AppxUpload
-            | CodeFormat::MsixUpload => Some(prepare_msix_family_bytes(
-                &bytes,
-                &nested_label,
-                digest,
-                signing_digest,
-                vsix_digest,
-                cert,
-                key,
-                chain_certs.clone(),
-                nested_excludes,
-                skip_signed,
-                overwrite,
-                format.clone(),
-                publisher,
-                timestamp_url,
-                timestamp_digest,
-            )?),
+            | CodeFormat::MsixUpload => entry_updates.push(ZipEntryUpdate {
+                name,
+                bytes: prepare_msix_family_bytes(
+                    &bytes,
+                    &nested_label,
+                    digest,
+                    signing_digest,
+                    vsix_digest,
+                    cert,
+                    key,
+                    chain_certs.clone(),
+                    nested_excludes,
+                    skip_signed,
+                    overwrite,
+                    format.clone(),
+                    publisher,
+                    timestamp_url,
+                    timestamp_digest,
+                )?,
+                compression,
+            }),
             _ if is_unsupported_nested_signable(&format) => {
                 return Err(anyhow!(
                     "`psign-tool code` nested execution cannot sign {nested_label} yet ({format:?})"
                 ));
             }
-            _ => None,
-        };
-        if let Some(bytes) = signed {
-            updates.push(ZipEntryUpdate {
-                name,
-                bytes,
-                compression,
-            });
+            _ => {}
         }
+        updates.extend(entry_updates);
     }
     drop(archive);
 
