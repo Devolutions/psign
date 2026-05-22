@@ -384,6 +384,88 @@ fn code_signs_top_level_pe_with_local_cert_key() {
         .success();
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn code_signs_pe_with_azure_key_vault_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.exe");
+    let output = base.join("app.signed-kv.exe");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi"),
+        &input,
+    )
+    .unwrap();
+
+    let (mut guard, url, certificate) = spawn_azure_key_vault_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .args(["--azure-key-vault-accesstoken", "test-token", "--output"])
+        .arg(&output)
+        .arg("app.exe");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Authenticode PE/WinMD"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "verify-pe"])
+        .arg(&output)
+        .assert()
+        .success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn code_signs_pe_with_artifact_signing_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.exe");
+    let output = base.join("app.signed-artifact.exe");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi"),
+        &input,
+    )
+    .unwrap();
+
+    let (mut guard, endpoint) = spawn_artifact_signing_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--artifact-signing-endpoint")
+        .arg(&endpoint)
+        .args([
+            "--artifact-signing-account-name",
+            "acct",
+            "--artifact-signing-profile-name",
+            "profile",
+            "--artifact-signing-access-token",
+            "test-token",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("app.exe");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Authenticode PE/WinMD"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "verify-pe"])
+        .arg(&output)
+        .assert()
+        .success();
+}
+
 #[test]
 fn code_skip_signed_copies_already_signed_pe() {
     let temp = tempfile::tempdir().unwrap();
@@ -666,6 +748,33 @@ fn code_updates_prefixed_appinstaller_main_bundle_before_signing() {
         ));
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn code_signs_appinstaller_with_azure_key_vault_identity() {
+    let repo = repo_root();
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("sample.appinstaller.p7");
+
+    let (mut guard, url, certificate) = spawn_azure_key_vault_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(&repo)
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .args(["--azure-key-vault-accesstoken", "test-token", "--output"])
+        .arg(&output)
+        .arg("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("detached PKCS#7 companion"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    assert!(output.exists(), "companion .p7 not created");
+}
+
 #[test]
 fn code_signs_nested_appinstaller_inside_generic_zip() {
     let temp = tempfile::tempdir().unwrap();
@@ -800,6 +909,43 @@ fn code_signs_clickonce_manifest_with_local_cert_key() {
             "clickonce-verify-manifest-signature: ok",
         ))
         .stdout(predicate::str::contains("signer_trust_chain=yes"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn code_signs_clickonce_manifest_with_azure_key_vault_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.exe.manifest");
+    let output = base.join("app.signed.exe.manifest");
+    std::fs::write(&input, sample_clickonce_manifest()).unwrap();
+
+    let (mut guard, url, certificate) = spawn_azure_key_vault_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .args(["--azure-key-vault-accesstoken", "test-token", "--output"])
+        .arg(&output)
+        .arg("app.exe.manifest");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("ClickOnce manifest XMLDSig"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "clickonce-verify-manifest-signature"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "clickonce-verify-manifest-signature: ok",
+        ));
 }
 
 #[test]
@@ -1178,6 +1324,78 @@ fn code_signs_top_level_vsix_with_local_cert_key() {
         .assert()
         .success()
         .stdout(predicate::str::contains("signature_value_match=yes"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn code_signs_vsix_with_azure_key_vault_identity() {
+    let repo = repo_root();
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("signed-kv.vsix");
+
+    let (mut guard, url, certificate) = spawn_azure_key_vault_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(&repo)
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .args(["--azure-key-vault-accesstoken", "test-token", "--output"])
+        .arg(&output)
+        .arg("tests/fixtures/package-signing/unsigned/sample.vsix");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("psign-signature.psdsxs"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "vsix-verify-signature"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vsix-verify-signature: ok"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn code_signs_vsix_with_artifact_signing_identity() {
+    let repo = repo_root();
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("signed-artifact.vsix");
+
+    let (mut guard, endpoint) = spawn_artifact_signing_server(2);
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(&repo)
+        .arg("--artifact-signing-endpoint")
+        .arg(&endpoint)
+        .args([
+            "--artifact-signing-account-name",
+            "acct",
+            "--artifact-signing-profile-name",
+            "profile",
+            "--artifact-signing-access-token",
+            "test-token",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("tests/fixtures/package-signing/unsigned/sample.vsix");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("psign-signature.psdsxs"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "vsix-verify-signature"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vsix-verify-signature: ok"));
 }
 
 #[test]
