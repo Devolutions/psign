@@ -933,21 +933,21 @@ fn sign_nested_package_entries(
                     compression: zip::CompressionMethod::Stored,
                 });
             }
-            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest => {
-                if !(skip_signed && clickonce_manifest_has_signature(&bytes)) {
-                    entry_updates.push(ZipEntryUpdate {
-                        name,
-                        bytes: sign_clickonce_manifest_bytes(
-                            &bytes,
-                            &nested_label,
-                            signer,
-                            vsix_digest,
-                            timestamp_url,
-                            timestamp_digest,
-                        )?,
-                        compression,
-                    });
-                }
+            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest
+                if !(skip_signed && clickonce_manifest_has_signature(&bytes)) =>
+            {
+                entry_updates.push(ZipEntryUpdate {
+                    name,
+                    bytes: sign_clickonce_manifest_bytes(
+                        &bytes,
+                        &nested_label,
+                        signer,
+                        vsix_digest,
+                        timestamp_url,
+                        timestamp_digest,
+                    )?,
+                    compression,
+                });
             }
             CodeFormat::Deploy => entry_updates.push(ZipEntryUpdate {
                 name,
@@ -1654,9 +1654,9 @@ struct CodeSigner {
 enum CodeSignerBackend {
     Local(CodeSignerPaths),
     #[cfg(feature = "azure-kv-sign")]
-    AzureKeyVault(CodeAzureKeyVaultSigner),
+    AzureKeyVault(Box<CodeAzureKeyVaultSigner>),
     #[cfg(feature = "artifact-signing-rest")]
-    ArtifactSigning(CodeArtifactSigningSigner),
+    ArtifactSigning(Box<CodeArtifactSigningSigner>),
 }
 
 struct CodeSignerPaths {
@@ -2136,12 +2136,12 @@ fn resolve_code_signer_azure_key_vault(args: &CodeArgs) -> Result<CodeSigner> {
         ));
     }
     Ok(CodeSigner {
-        backend: CodeSignerBackend::AzureKeyVault(CodeAzureKeyVaultSigner {
+        backend: CodeSignerBackend::AzureKeyVault(Box::new(CodeAzureKeyVaultSigner {
             http,
             token,
             certificate,
             cert_der,
-        }),
+        })),
     })
 }
 
@@ -2163,7 +2163,7 @@ fn resolve_code_signer_artifact_signing(args: &CodeArgs) -> Result<CodeSigner> {
         ));
     }
     Ok(CodeSigner {
-        backend: CodeSignerBackend::ArtifactSigning(CodeArtifactSigningSigner {
+        backend: CodeSignerBackend::ArtifactSigning(Box::new(CodeArtifactSigningSigner {
             metadata: args.artifact_signing_metadata.clone(),
             region: args.artifact_signing_region.clone(),
             endpoint: args.artifact_signing_endpoint.clone(),
@@ -2183,7 +2183,7 @@ fn resolve_code_signer_artifact_signing(args: &CodeArgs) -> Result<CodeSigner> {
             client_secret: args.artifact_signing_client_secret.clone(),
             authority: args.artifact_signing_authority.clone(),
             endpoint_base_url: args.artifact_signing_endpoint_base_url.clone(),
-        }),
+        })),
     })
 }
 
