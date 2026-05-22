@@ -5,10 +5,12 @@
 
 use anyhow::{Result, anyhow};
 use authenticode::AuthenticodeSignature;
+use base64::Engine as _;
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerInfo};
 use der::asn1::ObjectIdentifier;
-use der::{Decode, SliceReader};
+use der::{Decode, Encode, SliceReader};
+use psign_sip_digest::pkcs7::signed_data_certificate_for_signer_identifier;
 use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use psign_sip_digest::verify_pe::for_each_pe_pkcs7_signed_data;
 use serde::Serialize;
@@ -37,6 +39,8 @@ pub struct InspectPkcs7Report {
     pub certificate_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authenticode_digest: Option<InspectAuthenticodeDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_signing_time: Option<String>,
     pub signers: Vec<InspectSigner>,
     /// PKCS#7 blobs found under OID `1.3.6.1.4.1.311.2.4.1` (Microsoft nested signature).
     pub nested_signatures: Vec<InspectPkcs7Report>,
@@ -53,6 +57,10 @@ pub struct InspectAuthenticodeDigest {
 pub struct InspectSigner {
     pub signer_index: usize,
     pub digest_algorithm_oid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signer_certificate_der_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_signer_certificate_der_base64: Option<String>,
     pub signed_attribute_oids: Vec<String>,
     pub unsigned_attribute_oids: Vec<String>,
     pub timestamp_hints: Vec<TimestampHint>,
@@ -123,7 +131,17 @@ fn inspect_pkcs7_recursive(
         }
     });
 
-    inspect_signed_data(&sd, authenticode_digest, depth, max_depth)
+    let timestamp_signing_time =
+        crate::rfc3161_extract::utc_date_from_authenticode_timestamp_token(slice)
+            .map(|d| format!("{:04}-{:02}-{:02}T00:00:00Z", d.year(), d.month(), d.day()));
+
+    inspect_signed_data(
+        &sd,
+        authenticode_digest,
+        timestamp_signing_time,
+        depth,
+        max_depth,
+    )
 }
 
 fn decode_signed_data(pkcs7_der: &[u8]) -> Result<SignedData> {
@@ -143,6 +161,7 @@ fn decode_signed_data(pkcs7_der: &[u8]) -> Result<SignedData> {
 fn inspect_signed_data(
     sd: &SignedData,
     authenticode_digest: Option<InspectAuthenticodeDigest>,
+    timestamp_signing_time: Option<String>,
     depth: usize,
     max_depth: usize,
 ) -> Result<InspectPkcs7Report> {
@@ -153,7 +172,7 @@ fn inspect_signed_data(
     let mut nested_signatures = Vec::new();
 
     for (signer_index, si) in sd.signer_infos.0.iter().enumerate() {
-        signers.push(inspect_signer(signer_index, si));
+        signers.push(inspect_signer(sd, signer_index, si));
 
         let Some(attrs) = si.unsigned_attrs.as_ref() else {
             continue;
@@ -181,6 +200,7 @@ fn inspect_signed_data(
         encap_content_type_oid,
         certificate_count,
         authenticode_digest,
+        timestamp_signing_time,
         signers,
         nested_signatures,
     })
@@ -206,8 +226,23 @@ fn peel_octet_string_outer(bytes: &[u8]) -> Option<&[u8]> {
     Some(o.as_bytes())
 }
 
-fn inspect_signer(signer_index: usize, si: &SignerInfo) -> InspectSigner {
+fn certificate_der_base64_for_signer(sd: &SignedData, si: &SignerInfo) -> Option<String> {
+    signed_data_certificate_for_signer_identifier(sd, &si.sid)
+        .ok()
+        .and_then(|cert| cert.to_der().ok())
+        .map(|der| base64::engine::general_purpose::STANDARD.encode(der))
+}
+
+fn timestamp_signer_cert_der_base64(payload: &[u8]) -> Option<String> {
+    let der = decode_nested_pkcs7_payload(payload).ok()?;
+    let sd = decode_signed_data(&der).ok()?;
+    let si = sd.signer_infos.0.as_slice().first()?;
+    certificate_der_base64_for_signer(&sd, si)
+}
+
+fn inspect_signer(sd: &SignedData, signer_index: usize, si: &SignerInfo) -> InspectSigner {
     let digest_algorithm_oid = si.digest_alg.oid.to_string();
+    let signer_certificate_der_base64 = certificate_der_base64_for_signer(sd, si);
     let signed_attribute_oids = si
         .signed_attrs
         .as_ref()
@@ -220,6 +255,7 @@ fn inspect_signer(signer_index: usize, si: &SignerInfo) -> InspectSigner {
         .unwrap_or_default();
 
     let mut timestamp_hints = Vec::new();
+    let mut timestamp_signer_certificate_der_base64 = None;
     if let Some(attrs) = si.signed_attrs.as_ref() {
         for attr in attrs.iter() {
             if attr.oid == OID_PKCS9_SIGNING_TIME {
@@ -237,11 +273,25 @@ fn inspect_signer(signer_index: usize, si: &SignerInfo) -> InspectSigner {
                     kind: "id_aa_time_stamp_token",
                     attribute_oid: attr.oid.to_string(),
                 });
+                if timestamp_signer_certificate_der_base64.is_none() {
+                    timestamp_signer_certificate_der_base64 = attr
+                        .values
+                        .iter()
+                        .filter_map(|val| val.to_der().ok())
+                        .find_map(|der| timestamp_signer_cert_der_base64(&der));
+                }
             } else if attr.oid == OID_MS_TIMESTAMP_TOKEN {
                 timestamp_hints.push(TimestampHint {
                     kind: "microsoft_nested_rfc3161_attribute",
                     attribute_oid: attr.oid.to_string(),
                 });
+                if timestamp_signer_certificate_der_base64.is_none() {
+                    timestamp_signer_certificate_der_base64 = attr
+                        .values
+                        .iter()
+                        .filter_map(|val| val.to_der().ok())
+                        .find_map(|der| timestamp_signer_cert_der_base64(&der));
+                }
             }
         }
     }
@@ -249,6 +299,8 @@ fn inspect_signer(signer_index: usize, si: &SignerInfo) -> InspectSigner {
     InspectSigner {
         signer_index,
         digest_algorithm_oid,
+        signer_certificate_der_base64,
+        timestamp_signer_certificate_der_base64,
         signed_attribute_oids,
         unsigned_attribute_oids,
         timestamp_hints,

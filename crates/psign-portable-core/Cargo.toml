@@ -11,9 +11,12 @@ anyhow = "1"
 base64 = "0.22"
 psign-authenticode-trust = { path = "../psign-authenticode-trust" }
 psign-sip-digest = { path = "../psign-sip-digest" }
+picky = { version = "7.0.0-rc.23", default-features = false }
 rsa = "0.9.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha1 = { version = "0.10", default-features = false }
 sha2 = "0.10"
 x509-cert = { version = "0.2.5", default-features = false, features = ["pem"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

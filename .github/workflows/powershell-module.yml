@@ -48,9 +48,20 @@ jobs:
         shell: pwsh
         run: ./PowerShell/tests/Invoke-PortableSignatureTests.ps1 -Configuration Release
 
+      - name: Package PowerShell module for current RID
+        shell: pwsh
+        run: ./PowerShell/package.ps1 -Configuration Release
+
       - name: Upload staged module
         uses: actions/upload-artifact@v7
         with:
           name: Devolutions.Psign-${{ matrix.name }}
           path: PowerShell/Devolutions.Psign
+          if-no-files-found: error
+
+      - name: Upload module package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Devolutions.Psign-package-${{ matrix.name }}
+          path: artifacts/powershell/*.nupkg
           if-no-files-found: error

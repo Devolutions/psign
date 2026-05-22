@@ -5,12 +5,17 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
-use psign_authenticode_trust::inspect_authenticode_pkcs7_der;
-use psign_authenticode_trust::inspect_pe_authenticode;
+use picky::x509::date::UtcDate;
+use psign_authenticode_trust::policy::{OnlineTrustOptions, RevocationMode};
+use psign_authenticode_trust::{
+    AuthenticodeTrustPolicy, TrustVerifyPeOptions, inspect_authenticode_pkcs7_der,
+    inspect_pe_authenticode, trust_verify_cab_bytes, trust_verify_msi_bytes, trust_verify_pe_bytes,
+    trust_verify_script_bytes, trust_verify_zip_bytes,
+};
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
 use psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency;
 use psign_sip_digest::{
-    cab_digest, msi_digest, msix_digest, pe_embed, pkcs7, ps_script, rdp,
+    cab_digest, msi_digest, msix_digest, pe_embed, pkcs7, ps_script, rdp, timestamp,
     verify_script_digest_consistency, zip_authenticode,
 };
 use serde::{Deserialize, Serialize};
@@ -55,6 +60,35 @@ pub enum PortableDigestAlgorithm {
     Sha512,
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PortableTimestampDigestAlgorithm {
+    Sha1,
+    #[default]
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PortableRevocationMode {
+    #[default]
+    Off,
+    BestEffort,
+    Require,
+}
+
+impl From<PortableRevocationMode> for RevocationMode {
+    fn from(value: PortableRevocationMode) -> Self {
+        match value {
+            PortableRevocationMode::Off => Self::Off,
+            PortableRevocationMode::BestEffort => Self::BestEffort,
+            PortableRevocationMode::Require => Self::Require,
+        }
+    }
+}
+
 impl From<PortableDigestAlgorithm> for AuthenticodeSigningDigest {
     fn from(value: PortableDigestAlgorithm) -> Self {
         match value {
@@ -68,6 +102,44 @@ impl From<PortableDigestAlgorithm> for AuthenticodeSigningDigest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableGetSignatureRequest {
     pub path: PathBuf,
+    #[serde(default)]
+    pub trusted_certificate_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub trusted_certificates_der_base64: Vec<String>,
+    #[serde(default)]
+    pub anchor_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub authroot_cab: Option<PathBuf>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub prefer_timestamp_signing_time: bool,
+    #[serde(default)]
+    pub require_valid_timestamp: bool,
+    #[serde(default)]
+    pub online_aia: bool,
+    #[serde(default)]
+    pub online_ocsp: bool,
+    #[serde(default)]
+    pub revocation_mode: PortableRevocationMode,
+}
+
+impl PortableGetSignatureRequest {
+    pub fn path_only(path: PathBuf) -> Self {
+        Self {
+            path,
+            trusted_certificate_paths: Vec::new(),
+            trusted_certificates_der_base64: Vec::new(),
+            anchor_directory: None,
+            authroot_cab: None,
+            as_of: None,
+            prefer_timestamp_signing_time: false,
+            require_valid_timestamp: false,
+            online_aia: false,
+            online_ocsp: false,
+            revocation_mode: PortableRevocationMode::Off,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +161,10 @@ pub struct PortableSignRequest {
     pub chain_certificate_paths: Vec<PathBuf>,
     #[serde(default)]
     pub chain_certificates_der_base64: Vec<String>,
+    #[serde(default)]
+    pub timestamp_server: Option<String>,
+    #[serde(default)]
+    pub timestamp_hash_algorithm: Option<PortableTimestampDigestAlgorithm>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,13 +174,29 @@ pub struct PortableSignatureResponse {
     pub format: PortableFileFormat,
     pub status: PortableSignatureStatus,
     pub status_message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_status: Option<PortableSignatureStatus>,
     pub signature_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_certificate_der_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamper_certificate_der_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub embedded_certificate_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub digest_algorithm: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timestamp_kinds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_signing_time: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,9 +267,8 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         }
     }?;
 
-    let signature = portable_get_signature(PortableGetSignatureRequest {
-        path: output_path.clone(),
-    })?;
+    let signature =
+        portable_get_signature(PortableGetSignatureRequest::path_only(output_path.clone()))?;
 
     Ok(PortableSignResponse {
         schema_version: SCHEMA_VERSION,
@@ -195,7 +286,7 @@ pub fn portable_get_signature(
     let data =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
 
-    let response = match format {
+    let mut response = match format {
         PortableFileFormat::Pe => inspect_pe(&request.path, &data),
         PortableFileFormat::Cab => inspect_cab(&request.path),
         PortableFileFormat::Msi => inspect_msi(&request.path),
@@ -206,12 +297,14 @@ pub fn portable_get_signature(
         }
         PortableFileFormat::Catalog => inspect_pkcs7_file(&request.path, format),
         PortableFileFormat::Unknown => Ok(base_response(
-            request.path,
+            request.path.clone(),
             format,
             PortableSignatureStatus::NotSupportedFileFormat,
             "Unsupported file format for portable Authenticode inspection.",
         )),
     }?;
+
+    apply_trust_if_requested(&request, format, &data, &mut response)?;
 
     Ok(response)
 }
@@ -263,6 +356,8 @@ fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))?;
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
@@ -285,6 +380,8 @@ fn sign_cab(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     let signed = cab_digest::cab_append_authenticode_pkcs7_signature(&cab, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))?;
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
@@ -307,6 +404,8 @@ fn sign_msi(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     msi_digest::msi_embed_authenticode_pkcs7_signature(&request.path, output_path, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))
 }
@@ -341,6 +440,8 @@ fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut p7x = b"PKCX".to_vec();
     p7x.extend_from_slice(&pkcs7);
     let signed = replace_msix_signature_part(&staged, &p7x)
@@ -372,6 +473,8 @@ fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     let line = zip_authenticode::signature_comment_line_from_pkcs7_der(&digest, &pkcs7)?;
     let signed =
         zip_authenticode::embed_signature_comment_line(&zip, &line).with_context(|| {
@@ -410,6 +513,8 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
             request.path.display()
         )
     })?;
+    let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
+        .with_context(|| format!("timestamp {}", request.path.display()))?;
     let block = format_powershell_signature_block(&pkcs7);
     let mut signed = script;
     signed.extend_from_slice(block.as_bytes());
@@ -475,11 +580,261 @@ fn load_signing_material(
     Ok((signer_cert, private_key, chain))
 }
 
+fn maybe_timestamp_pkcs7(request: &PortableSignRequest, pkcs7_der: Vec<u8>) -> Result<Vec<u8>> {
+    let Some(timestamp_server) = request.timestamp_server.as_deref() else {
+        if request.timestamp_hash_algorithm.is_some() {
+            bail!("timestamp_hash_algorithm requires timestamp_server");
+        }
+        return Ok(pkcs7_der);
+    };
+    let alg = request.timestamp_hash_algorithm.unwrap_or_default();
+    timestamp_pkcs7_der_rfc3161(&pkcs7_der, timestamp_server, alg)
+}
+
+fn timestamp_pkcs7_der_rfc3161(
+    pkcs7_der: &[u8],
+    timestamp_server: &str,
+    timestamp_digest: PortableTimestampDigestAlgorithm,
+) -> Result<Vec<u8>> {
+    let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der).context("parse PKCS#7 SignedData")?;
+    let signer = sd
+        .signer_infos
+        .0
+        .as_slice()
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("PKCS#7 SignedData has no SignerInfo to timestamp"))?;
+    let imprint = digest_bytes_for_timestamp_alg(timestamp_digest, signer.signature.as_bytes());
+    let request = timestamp::build_timestamp_request_bytes(
+        &timestamp::Rfc3161TimestampRequestPlan {
+            digest_alg_oid: timestamp_digest_oid(timestamp_digest),
+            nonce: None,
+            cert_req: true,
+        },
+        &imprint,
+    )
+    .ok_or_else(|| anyhow::anyhow!("build RFC3161 TimeStampReq"))?;
+    let response = reqwest::blocking::Client::new()
+        .post(timestamp_server)
+        .header("Content-Type", "application/timestamp-query")
+        .header("Accept", "application/timestamp-reply")
+        .body(request)
+        .send()
+        .with_context(|| format!("POST TimeStampReq to {timestamp_server}"))?
+        .error_for_status()
+        .with_context(|| format!("TSA returned an HTTP error from {timestamp_server}"))?
+        .bytes()
+        .context("read TSA TimeStampResp body")?;
+    let parsed = timestamp::parse_time_stamp_resp_der(&response)
+        .ok_or_else(|| anyhow::anyhow!("could not parse TimeStampResp DER from TSA response"))?;
+    if !parsed.pki_status.granted() {
+        bail!(
+            "TimeStampResp status is not granted (status={})",
+            parsed.pki_status.as_raw_integer()
+        );
+    }
+    let token = parsed
+        .time_stamp_token
+        .ok_or_else(|| anyhow::anyhow!("TimeStampResp has no timeStampToken"))?;
+    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
+        .context("attach RFC3161 timestamp token")?;
+    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
+fn timestamp_digest_oid(alg: PortableTimestampDigestAlgorithm) -> &'static str {
+    match alg {
+        PortableTimestampDigestAlgorithm::Sha1 => "1.3.14.3.2.26",
+        PortableTimestampDigestAlgorithm::Sha256 => "2.16.840.1.101.3.4.2.1",
+        PortableTimestampDigestAlgorithm::Sha384 => "2.16.840.1.101.3.4.2.2",
+        PortableTimestampDigestAlgorithm::Sha512 => "2.16.840.1.101.3.4.2.3",
+    }
+}
+
+fn digest_bytes_for_timestamp_alg(alg: PortableTimestampDigestAlgorithm, input: &[u8]) -> Vec<u8> {
+    match alg {
+        PortableTimestampDigestAlgorithm::Sha1 => sha1::Sha1::digest(input).to_vec(),
+        PortableTimestampDigestAlgorithm::Sha256 => sha2::Sha256::digest(input).to_vec(),
+        PortableTimestampDigestAlgorithm::Sha384 => sha2::Sha384::digest(input).to_vec(),
+        PortableTimestampDigestAlgorithm::Sha512 => sha2::Sha512::digest(input).to_vec(),
+    }
+}
+
+fn apply_trust_if_requested(
+    request: &PortableGetSignatureRequest,
+    format: PortableFileFormat,
+    data: &[u8],
+    response: &mut PortableSignatureResponse,
+) -> Result<()> {
+    if !trust_requested(request) || response.status != PortableSignatureStatus::Valid {
+        return Ok(());
+    }
+
+    let (opts, temp_dir) = trust_options(request)?;
+    let trust_result = match format {
+        PortableFileFormat::Pe => trust_verify_pe_bytes(data, &opts).map(|r| {
+            format!(
+                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                r.pkcs7_entries_verified, r.anchor_thumbprints
+            )
+        }),
+        PortableFileFormat::Cab => trust_verify_cab_bytes(data, &opts).map(|r| {
+            format!(
+                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                r.pkcs7_entries_verified, r.anchor_thumbprints
+            )
+        }),
+        PortableFileFormat::Msi => trust_verify_msi_bytes(data, &opts).map(|r| {
+            format!(
+                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                r.pkcs7_entries_verified, r.anchor_thumbprints
+            )
+        }),
+        PortableFileFormat::Zip => trust_verify_zip_bytes(data, &opts).map(|r| {
+            format!(
+                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                r.pkcs7_entries_verified, r.anchor_thumbprints
+            )
+        }),
+        PortableFileFormat::PowerShellScript => {
+            let extension = request
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("ps1");
+            trust_verify_script_bytes(data, extension, &opts).map(|r| {
+                format!(
+                    "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                    r.pkcs7_entries_verified, r.anchor_thumbprints
+                )
+            })
+        }
+        _ => Err(anyhow::anyhow!(
+            "explicit trust verification is not implemented for format {:?}",
+            format
+        )),
+    };
+    if let Some(dir) = temp_dir {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    match trust_result {
+        Ok(diagnostic) => {
+            response.status_message =
+                "Portable digest binding and explicit trust verification are valid.".to_string();
+            response.trust_status = Some(PortableSignatureStatus::Valid);
+            response.diagnostics.push(diagnostic);
+        }
+        Err(error) => {
+            response.status = PortableSignatureStatus::NotTrusted;
+            response.trust_status = Some(PortableSignatureStatus::NotTrusted);
+            response.status_message = error.to_string();
+            response
+                .diagnostics
+                .push("explicit_trust=failed".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn trust_requested(request: &PortableGetSignatureRequest) -> bool {
+    !request.trusted_certificate_paths.is_empty()
+        || !request.trusted_certificates_der_base64.is_empty()
+        || request.anchor_directory.is_some()
+        || request.authroot_cab.is_some()
+}
+
+fn trust_options(
+    request: &PortableGetSignatureRequest,
+) -> Result<(TrustVerifyPeOptions, Option<PathBuf>)> {
+    let mut trusted_ca_files = request.trusted_certificate_paths.clone();
+    let mut temp_dir = None;
+    if !request.trusted_certificates_der_base64.is_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "psign-portable-trust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create temporary trust directory {}", dir.display()))?;
+        for (index, cert) in request.trusted_certificates_der_base64.iter().enumerate() {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(cert)
+                .with_context(|| format!("decode trusted_certificates_der_base64[{index}]"))?;
+            let path = dir.join(format!("trusted-{index}.cer"));
+            std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+            trusted_ca_files.push(path);
+        }
+        temp_dir = Some(dir);
+    }
+
+    Ok((
+        TrustVerifyPeOptions {
+            anchor_dir: request.anchor_directory.clone(),
+            trusted_ca_files,
+            authroot_cab: request.authroot_cab.clone(),
+            expect_authroot_cab_sha256: None,
+            verification_instant_override: request
+                .as_of
+                .as_deref()
+                .map(parse_utc_date)
+                .transpose()?,
+            verbose_chain: false,
+            online: OnlineTrustOptions {
+                enable_aia: request.online_aia,
+                enable_ocsp: request.online_ocsp,
+                revocation_mode: request.revocation_mode.into(),
+                ..OnlineTrustOptions::default()
+            },
+            policy: AuthenticodeTrustPolicy {
+                strict_code_signing_eku: false,
+                prefer_timestamp_signing_time: request.prefer_timestamp_signing_time
+                    || request.require_valid_timestamp,
+                require_valid_timestamp: request.require_valid_timestamp,
+            },
+        },
+        temp_dir,
+    ))
+}
+
+fn parse_utc_date(input: &str) -> Result<UtcDate> {
+    let date = input
+        .split_once('T')
+        .map(|(date, _)| date)
+        .unwrap_or(input)
+        .trim();
+    let mut parts = date.split('-');
+    let year = parts
+        .next()
+        .context("missing year in as_of date")?
+        .parse::<u16>()
+        .with_context(|| format!("invalid year in as_of date '{input}'"))?;
+    let month = parts
+        .next()
+        .context("missing month in as_of date")?
+        .parse::<u8>()
+        .with_context(|| format!("invalid month in as_of date '{input}'"))?;
+    let day = parts
+        .next()
+        .context("missing day in as_of date")?
+        .parse::<u8>()
+        .with_context(|| format!("invalid day in as_of date '{input}'"))?;
+    if parts.next().is_some() {
+        bail!("invalid as_of date '{input}': expected yyyy-MM-dd");
+    }
+
+    UtcDate::ymd(year, month, day).ok_or_else(|| {
+        anyhow::anyhow!("invalid as_of date '{input}': expected a valid yyyy-MM-dd date")
+    })
+}
+
 fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
     let inspect = inspect_pe_authenticode(data);
     match verify_pe_authenticode_digest_consistency(data) {
         Ok(result) => {
-            let (digest_algorithm, timestamp_kinds) = inspect
+            let summary = inspect
                 .ok()
                 .map(|r| summarize_pkcs7_reports(r.entries.into_iter().map(|e| e.pkcs7)))
                 .unwrap_or_default();
@@ -490,9 +845,15 @@ fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
                 status: PortableSignatureStatus::Valid,
                 status_message: "Portable digest binding is valid; trust was not evaluated."
                     .to_string(),
+                trust_status: None,
                 signature_count: result.pkcs7_authenticode_entries,
-                digest_algorithm,
-                timestamp_kinds,
+                signer_index: summary.signer_index,
+                signer_certificate_der_base64: summary.signer_certificate_der_base64,
+                timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+                embedded_certificate_count: summary.embedded_certificate_count,
+                digest_algorithm: summary.digest_algorithm,
+                timestamp_kinds: summary.timestamp_kinds,
+                timestamp_signing_time: summary.timestamp_signing_time,
                 diagnostics: vec![format!(
                     "matched_attribute_certificate_index={}",
                     result.matched_attribute_certificate_index
@@ -505,36 +866,60 @@ fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
 
 fn inspect_cab(path: &Path) -> Result<PortableSignatureResponse> {
     match cab_digest::verify_cab_digest_consistency(path) {
-        Ok(()) => Ok(base_response(
-            path.to_path_buf(),
-            PortableFileFormat::Cab,
-            PortableSignatureStatus::Valid,
-            "Portable digest binding is valid; trust was not evaluated.",
-        )),
+        Ok(()) => {
+            let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let summary = cab_digest::cab_signature_pkcs7_der(&data)
+                .ok()
+                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(pkcs7).ok())
+                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .unwrap_or_default();
+            Ok(valid_response(
+                path.to_path_buf(),
+                PortableFileFormat::Cab,
+                "Portable digest binding is valid; trust was not evaluated.",
+                summary,
+            ))
+        }
         Err(error) => Ok(map_digest_error(path, PortableFileFormat::Cab, error)),
     }
 }
 
 fn inspect_msi(path: &Path) -> Result<PortableSignatureResponse> {
     match msi_digest::verify_msi_digest_consistency(path) {
-        Ok(()) => Ok(base_response(
-            path.to_path_buf(),
-            PortableFileFormat::Msi,
-            PortableSignatureStatus::Valid,
-            "Portable digest binding is valid; trust was not evaluated.",
-        )),
+        Ok(()) => {
+            let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let summary = msi_digest::msi_digital_signature_pkcs7_der(&data)
+                .ok()
+                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(&pkcs7).ok())
+                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .unwrap_or_default();
+            Ok(valid_response(
+                path.to_path_buf(),
+                PortableFileFormat::Msi,
+                "Portable digest binding is valid; trust was not evaluated.",
+                summary,
+            ))
+        }
         Err(error) => Ok(map_digest_error(path, PortableFileFormat::Msi, error)),
     }
 }
 
 fn inspect_msix(path: &Path) -> Result<PortableSignatureResponse> {
     match msix_digest::verify_msix_digest_consistency(path) {
-        Ok(()) => Ok(base_response(
-            path.to_path_buf(),
-            PortableFileFormat::Msix,
-            PortableSignatureStatus::Valid,
-            "Portable MSIX digest binding is valid; trust was not evaluated.",
-        )),
+        Ok(()) => {
+            let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let summary = msix_signature_pkcs7_der(&data)
+                .ok()
+                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(&pkcs7).ok())
+                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .unwrap_or_default();
+            Ok(valid_response(
+                path.to_path_buf(),
+                PortableFileFormat::Msix,
+                "Portable MSIX digest binding is valid; trust was not evaluated.",
+                summary,
+            ))
+        }
         Err(error) => Ok(map_digest_error(path, PortableFileFormat::Msix, error)),
     }
 }
@@ -550,7 +935,7 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
     }
     let pkcs7 = zip_authenticode::signature_pkcs7_der(&sig)?;
     let report = inspect_authenticode_pkcs7_der(&pkcs7).ok();
-    let (digest_algorithm, timestamp_kinds) = report
+    let summary = report
         .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
         .unwrap_or_default();
     Ok(PortableSignatureResponse {
@@ -560,9 +945,15 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
         status: PortableSignatureStatus::Valid,
         status_message: "Portable ZIP digest binding is valid; trust was not evaluated."
             .to_string(),
+        trust_status: None,
         signature_count: 1,
-        digest_algorithm,
-        timestamp_kinds,
+        signer_index: summary.signer_index,
+        signer_certificate_der_base64: summary.signer_certificate_der_base64,
+        timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+        embedded_certificate_count: summary.embedded_certificate_count,
+        digest_algorithm: summary.digest_algorithm,
+        timestamp_kinds: summary.timestamp_kinds,
+        timestamp_signing_time: summary.timestamp_signing_time,
         diagnostics: Vec::new(),
     })
 }
@@ -578,7 +969,7 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
                     .ok()
                     .and_then(|r| inspect_authenticode_pkcs7_der(&r.pkcs7_der).ok())
             };
-            let (digest_algorithm, timestamp_kinds) = report
+            let summary = report
                 .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
                 .unwrap_or_default();
             Ok(PortableSignatureResponse {
@@ -588,9 +979,15 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
                 status: PortableSignatureStatus::Valid,
                 status_message: "Portable script digest binding is valid; trust was not evaluated."
                     .to_string(),
+                trust_status: None,
                 signature_count: 1,
-                digest_algorithm,
-                timestamp_kinds,
+                signer_index: summary.signer_index,
+                signer_certificate_der_base64: summary.signer_certificate_der_base64,
+                timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+                embedded_certificate_count: summary.embedded_certificate_count,
+                digest_algorithm: summary.digest_algorithm,
+                timestamp_kinds: summary.timestamp_kinds,
+                timestamp_signing_time: summary.timestamp_signing_time,
                 diagnostics: Vec::new(),
             })
         }
@@ -605,8 +1002,7 @@ fn inspect_pkcs7_file(
     let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     match inspect_authenticode_pkcs7_der(&data) {
         Ok(report) => {
-            let (digest_algorithm, timestamp_kinds) =
-                summarize_pkcs7_reports(std::iter::once(report));
+            let summary = summarize_pkcs7_reports(std::iter::once(report));
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,
                 path: path.to_path_buf(),
@@ -615,9 +1011,15 @@ fn inspect_pkcs7_file(
                 status_message:
                     "PKCS#7 structure is valid; detached content and trust were not evaluated."
                         .to_string(),
+                trust_status: None,
                 signature_count: 1,
-                digest_algorithm,
-                timestamp_kinds,
+                signer_index: summary.signer_index,
+                signer_certificate_der_base64: summary.signer_certificate_der_base64,
+                timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+                embedded_certificate_count: summary.embedded_certificate_count,
+                digest_algorithm: summary.digest_algorithm,
+                timestamp_kinds: summary.timestamp_kinds,
+                timestamp_signing_time: summary.timestamp_signing_time,
                 diagnostics: Vec::new(),
             })
         }
@@ -625,37 +1027,85 @@ fn inspect_pkcs7_file(
     }
 }
 
+#[derive(Default)]
+struct Pkcs7Summary {
+    digest_algorithm: Option<String>,
+    timestamp_kinds: Vec<String>,
+    timestamp_signing_time: Option<String>,
+    signer_index: Option<usize>,
+    signer_certificate_der_base64: Option<String>,
+    timestamper_certificate_der_base64: Option<String>,
+    embedded_certificate_count: usize,
+}
+
 fn summarize_pkcs7_reports(
     reports: impl IntoIterator<Item = psign_authenticode_trust::inspect::InspectPkcs7Report>,
-) -> (Option<String>, Vec<String>) {
-    let mut digest_algorithm = None;
-    let mut timestamp_kinds = Vec::new();
+) -> Pkcs7Summary {
+    let mut summary = Pkcs7Summary::default();
     for report in reports {
-        collect_pkcs7_summary(&report, &mut digest_algorithm, &mut timestamp_kinds);
+        collect_pkcs7_summary(&report, &mut summary);
     }
-    (digest_algorithm, timestamp_kinds)
+    summary
 }
 
 fn collect_pkcs7_summary(
     report: &psign_authenticode_trust::inspect::InspectPkcs7Report,
-    digest_algorithm: &mut Option<String>,
-    timestamp_kinds: &mut Vec<String>,
+    summary: &mut Pkcs7Summary,
 ) {
-    if digest_algorithm.is_none()
+    summary.embedded_certificate_count += report.certificate_count;
+    if summary.timestamp_signing_time.is_none() {
+        summary.timestamp_signing_time = report.timestamp_signing_time.clone();
+    }
+    if summary.digest_algorithm.is_none()
         && let Some(digest) = &report.authenticode_digest
     {
-        *digest_algorithm = Some(digest.digest_algorithm_oid.clone());
+        summary.digest_algorithm = Some(digest.digest_algorithm_oid.clone());
     }
     for signer in &report.signers {
+        if summary.signer_index.is_none() {
+            summary.signer_index = Some(signer.signer_index);
+        }
+        if summary.signer_certificate_der_base64.is_none() {
+            summary.signer_certificate_der_base64 = signer.signer_certificate_der_base64.clone();
+        }
+        if summary.timestamper_certificate_der_base64.is_none() {
+            summary.timestamper_certificate_der_base64 =
+                signer.timestamp_signer_certificate_der_base64.clone();
+        }
         for hint in &signer.timestamp_hints {
             let kind = hint.kind.to_string();
-            if !timestamp_kinds.contains(&kind) {
-                timestamp_kinds.push(kind);
+            if !summary.timestamp_kinds.contains(&kind) {
+                summary.timestamp_kinds.push(kind);
             }
         }
     }
     for nested in &report.nested_signatures {
-        collect_pkcs7_summary(nested, digest_algorithm, timestamp_kinds);
+        collect_pkcs7_summary(nested, summary);
+    }
+}
+
+fn valid_response(
+    path: PathBuf,
+    format: PortableFileFormat,
+    message: impl Into<String>,
+    summary: Pkcs7Summary,
+) -> PortableSignatureResponse {
+    PortableSignatureResponse {
+        schema_version: SCHEMA_VERSION,
+        path,
+        format,
+        status: PortableSignatureStatus::Valid,
+        status_message: message.into(),
+        trust_status: None,
+        signature_count: 1,
+        signer_index: summary.signer_index,
+        signer_certificate_der_base64: summary.signer_certificate_der_base64,
+        timestamper_certificate_der_base64: summary.timestamper_certificate_der_base64,
+        embedded_certificate_count: summary.embedded_certificate_count,
+        digest_algorithm: summary.digest_algorithm,
+        timestamp_kinds: summary.timestamp_kinds,
+        timestamp_signing_time: summary.timestamp_signing_time,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -671,9 +1121,15 @@ fn base_response(
         format,
         status,
         status_message: message.into(),
+        trust_status: None,
         signature_count: usize::from(status == PortableSignatureStatus::Valid),
+        signer_index: None,
+        signer_certificate_der_base64: None,
+        timestamper_certificate_der_base64: None,
+        embedded_certificate_count: 0,
         digest_algorithm: None,
         timestamp_kinds: Vec::new(),
+        timestamp_signing_time: None,
         diagnostics: Vec::new(),
     }
 }
@@ -699,9 +1155,15 @@ fn map_digest_error(
         format,
         status,
         status_message: message,
+        trust_status: None,
         signature_count: 0,
+        signer_index: None,
+        signer_certificate_der_base64: None,
+        timestamper_certificate_der_base64: None,
+        embedded_certificate_count: 0,
         digest_algorithm: None,
         timestamp_kinds: Vec::new(),
+        timestamp_signing_time: None,
         diagnostics: Vec::new(),
     }
 }
@@ -801,6 +1263,19 @@ fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
         writer.finish()?;
     }
     Ok(out.into_inner())
+}
+
+fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
+    let mut archive = ZipArchive::new(Cursor::new(package)).context("open MSIX ZIP")?;
+    let mut entry = archive
+        .by_name("AppxSignature.p7x")
+        .context("read AppxSignature.p7x")?;
+    let mut p7x = Vec::new();
+    entry.read_to_end(&mut p7x)?;
+    let pkcs7 = p7x
+        .strip_prefix(b"PKCX")
+        .ok_or_else(|| anyhow::anyhow!("AppxSignature.p7x missing PKCX prefix"))?;
+    Ok(pkcs7.to_vec())
 }
 
 fn add_msix_signature_content_type(xml: &str) -> Result<String> {
@@ -906,16 +1381,16 @@ mod tests {
     #[test]
     fn reports_unsigned_pe_without_error() {
         let path = PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.efi");
-        let response =
-            portable_get_signature(PortableGetSignatureRequest { path }).expect("inspect PE");
+        let response = portable_get_signature(PortableGetSignatureRequest::path_only(path))
+            .expect("inspect PE");
         assert_eq!(response.status, PortableSignatureStatus::NotSigned);
     }
 
     #[test]
     fn reports_signed_pe_as_valid_digest_binding() {
         let path = PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi");
-        let response =
-            portable_get_signature(PortableGetSignatureRequest { path }).expect("inspect PE");
+        let response = portable_get_signature(PortableGetSignatureRequest::path_only(path))
+            .expect("inspect PE");
         assert_eq!(response.status, PortableSignatureStatus::Valid);
         assert!(response.signature_count > 0);
     }
