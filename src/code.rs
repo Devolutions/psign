@@ -16,7 +16,7 @@ use psign_codesigning_rest::{
 use psign_opc_sign::{nuget, opc, vsix};
 use psign_sip_digest::timestamp::{build_timestamp_request_bytes, parse_time_stamp_resp_der};
 use psign_sip_digest::{pe_digest, pe_embed, pkcs7, rdp};
-use rsa::signature::{SignatureEncoding as _, Signer as _};
+use rsa::signature::{SignatureEncoding as _, Signer as _, hazmat::PrehashSigner as _};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::collections::{BTreeMap, BTreeSet};
@@ -326,6 +326,7 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                     args.timestamp_digest,
                     true,
                     Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                    pkcs7::Pkcs7SignedAttributeProfile::Basic,
                 )
                 .with_context(|| {
                     format!(
@@ -627,6 +628,7 @@ fn sign_nuget_bytes(
         timestamp_digest,
         false,
         Rfc3161TimestampAttribute::CmsTimeStampToken,
+        pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
     )?;
     let mut out = Cursor::new(Vec::new());
     nuget::embed_signature(Cursor::new(unsigned), &mut out, &pkcs7, false)
@@ -929,6 +931,7 @@ fn sign_nested_package_entries(
                     timestamp_digest,
                     true,
                     Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                    pkcs7::Pkcs7SignedAttributeProfile::Basic,
                 )
                 .with_context(|| {
                     format!("create nested App Installer companion signature for {nested_label}")
@@ -1512,6 +1515,7 @@ fn sign_pkcs7_id_data(
     timestamp_digest: Option<DigestAlgorithm>,
     detached: bool,
     timestamp_attribute: Rfc3161TimestampAttribute,
+    signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
 ) -> Result<Vec<u8>> {
     let chain = load_chain_certs(chain_certs)?;
     let econtent_der = OctetString::new(content.to_vec())
@@ -1520,7 +1524,14 @@ fn sign_pkcs7_id_data(
         .map_err(|e| anyhow!("encode CMS id-data DER: {e}"))?;
     let id_data = ObjectIdentifier::new(pkcs7::PKCS7_ID_DATA_OID)
         .map_err(|e| anyhow!("parse CMS id-data OID: {e}"))?;
-    let pkcs7 = signer.sign_pkcs7(id_data, &econtent_der, digest, chain, detached)?;
+    let pkcs7 = signer.sign_pkcs7(
+        id_data,
+        &econtent_der,
+        digest,
+        chain,
+        detached,
+        signed_attribute_profile,
+    )?;
     timestamp_pkcs7_if_requested(&pkcs7, timestamp_url, timestamp_digest, timestamp_attribute)
 }
 
@@ -1754,6 +1765,7 @@ impl CodeSigner {
         digest: pkcs7::AuthenticodeSigningDigest,
         chain: Vec<x509_cert::Certificate>,
         detached: bool,
+        signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
     ) -> Result<Vec<u8>> {
         if let Some((cert, key)) = self.local_paths() {
             let cert_bytes =
@@ -1764,37 +1776,114 @@ impl CodeSigner {
                 std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
                 .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let pkcs7 = pkcs7::create_pkcs7_signed_data_der_rsa(
+            let signed_attrs = pkcs7::pkcs7_signed_attrs(
+                econtent_type,
+                econtent_der,
+                digest,
+                signed_attribute_profile,
+                Some(&signer_cert),
+            )?;
+            let prehash = pkcs7::pkcs7_signed_attrs_digest(&signed_attrs, digest)?;
+            let signature = sign_pkcs7_signed_attrs_digest(digest, private_key, &prehash)?;
+            return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
                 econtent_type,
                 econtent_der,
                 digest,
                 signer_cert,
                 chain,
-                private_key,
-            )?;
-            if !detached {
-                return Ok(pkcs7);
-            }
-            let mut detached_pkcs7 = pkcs7::parse_pkcs7_signed_data_der(&pkcs7)
-                .context("parse generated CMS before detaching eContent")?;
-            detached_pkcs7.encap_content_info.econtent = None;
-            return pkcs7::encode_pkcs7_content_info_signed_data_der(&detached_pkcs7);
+                &signature,
+                detached,
+                signed_attrs,
+            );
         }
 
-        let prehash =
-            pkcs7::pkcs7_remote_rsa_signed_attrs_digest(econtent_type, econtent_der, digest)?;
-        let mut remote =
-            self.sign_remote_digest(code_remote_digest_from_pkcs7(digest), &prehash)?;
-        remote.chain.extend(chain);
-        pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+        self.sign_pkcs7_remote(
             econtent_type,
             econtent_der,
             digest,
-            remote.signer_cert,
-            remote.chain,
-            &remote.signature,
+            chain,
             detached,
+            signed_attribute_profile,
         )
+    }
+
+    fn sign_pkcs7_remote(
+        &self,
+        econtent_type: ObjectIdentifier,
+        econtent_der: &[u8],
+        digest: pkcs7::AuthenticodeSigningDigest,
+        chain: Vec<x509_cert::Certificate>,
+        detached: bool,
+        signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
+    ) -> Result<Vec<u8>> {
+        let mut signer_cert_hint =
+            if signed_attribute_profile == pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor {
+                Some(match self.remote_signer_certificate_hint()? {
+                    Some(signer_cert) => signer_cert,
+                    None => self.probe_remote_signer_certificate(digest)?,
+                })
+            } else {
+                None
+            };
+
+        for attempt in 0..2 {
+            let signed_attrs = pkcs7::pkcs7_signed_attrs(
+                econtent_type,
+                econtent_der,
+                digest,
+                signed_attribute_profile,
+                signer_cert_hint.as_ref(),
+            )?;
+            let prehash = pkcs7::pkcs7_signed_attrs_digest(&signed_attrs, digest)?;
+            let mut remote =
+                self.sign_remote_digest(code_remote_digest_from_pkcs7(digest), &prehash)?;
+            if let Some(expected_cert) = signer_cert_hint.as_ref()
+                && !certificates_der_equal(expected_cert, &remote.signer_cert)?
+            {
+                if attempt == 0 {
+                    signer_cert_hint = Some(remote.signer_cert);
+                    continue;
+                }
+                return Err(anyhow!(
+                    "remote signer certificate changed while building NuGet signing-certificate-v2"
+                ));
+            }
+            remote.chain.extend(chain.clone());
+            return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+                econtent_type,
+                econtent_der,
+                digest,
+                remote.signer_cert,
+                remote.chain,
+                &remote.signature,
+                detached,
+                signed_attrs,
+            );
+        }
+
+        unreachable!("remote PKCS#7 signing loop returns or errors")
+    }
+
+    fn probe_remote_signer_certificate(
+        &self,
+        digest: pkcs7::AuthenticodeSigningDigest,
+    ) -> Result<x509_cert::Certificate> {
+        let probe_digest = vec![0u8; digest.pe_hash_kind().digest_output_len()];
+        let remote =
+            self.sign_remote_digest(code_remote_digest_from_pkcs7(digest), &probe_digest)?;
+        Ok(remote.signer_cert)
+    }
+
+    fn remote_signer_certificate_hint(&self) -> Result<Option<x509_cert::Certificate>> {
+        match &self.backend {
+            CodeSignerBackend::Local(_) => Ok(None),
+            #[cfg(feature = "azure-kv-sign")]
+            CodeSignerBackend::AzureKeyVault(signer) => rdp::parse_certificate(&signer.cert_der)
+                .context("parse Azure Key Vault signer certificate")
+                .map(Some),
+            #[cfg(feature = "artifact-signing-rest")]
+            CodeSignerBackend::ArtifactSigning(_) => Ok(None),
+        }
     }
 
     fn sign_xml_signed_info(
@@ -2352,6 +2441,47 @@ fn vsix_hash_algorithm(digest: DigestAlgorithm) -> Result<vsix::VsixHashAlgorith
             "`psign-tool code` package signing supports SHA-256, SHA-384, or SHA-512 file digests"
         )),
     }
+}
+
+fn sign_pkcs7_signed_attrs_digest(
+    digest: pkcs7::AuthenticodeSigningDigest,
+    private_key: rsa::RsaPrivateKey,
+    signed_attrs_digest: &[u8],
+) -> Result<Vec<u8>> {
+    let signature = match digest {
+        pkcs7::AuthenticodeSigningDigest::Sha256 => {
+            let key = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-256 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+        pkcs7::AuthenticodeSigningDigest::Sha384 => {
+            let key = rsa::pkcs1v15::SigningKey::<sha2::Sha384>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-384 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+        pkcs7::AuthenticodeSigningDigest::Sha512 => {
+            let key = rsa::pkcs1v15::SigningKey::<sha2::Sha512>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-512 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+    };
+    Ok(signature)
+}
+
+fn certificates_der_equal(a: &x509_cert::Certificate, b: &x509_cert::Certificate) -> Result<bool> {
+    let a_der = a
+        .to_der()
+        .map_err(|e| anyhow!("encode expected signer certificate DER: {e}"))?;
+    let b_der = b
+        .to_der()
+        .map_err(|e| anyhow!("encode actual signer certificate DER: {e}"))?;
+    Ok(a_der == b_der)
 }
 
 fn sign_xml_signed_info(
