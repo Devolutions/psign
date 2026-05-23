@@ -9,7 +9,7 @@
     CompatiblePSEditions = @('Core')
     PowerShellVersion = '7.4'
     NestedModules = @('lib/net8.0/Devolutions.Psign.PowerShell.dll')
-    CmdletsToExport = @('Get-PortableSignature', 'Set-PortableSignature')
+    CmdletsToExport = @('Get-PortableSignature', 'Set-PortableSignature', 'Test-PsignModule')
     FunctionsToExport = @()
     AliasesToExport = @()
     PrivateData = @{
