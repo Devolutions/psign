@@ -42,6 +42,13 @@ Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignatur
     }
 }
 
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName IncludeChain -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+    @('Signer', 'NotRoot', 'All') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+
 Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName TimestampHashAlgorithm -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Sha1', 'Sha256', 'Sha384', 'Sha512') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {

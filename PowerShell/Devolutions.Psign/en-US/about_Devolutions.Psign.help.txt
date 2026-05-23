@@ -45,7 +45,7 @@ LONG DESCRIPTION
 
     TRUST MODEL
 
-        By default, Get-PortableSignature automatically downloads and caches
+        By default, Get-PsignSignature automatically downloads and caches
         the Microsoft AuthRoot CAB for trust evaluation. To disable:
 
             $env:PSIGN_NO_AUTO_TRUST = '1'
@@ -71,6 +71,8 @@ LONG DESCRIPTION
         - Thumbprint (from the pcert store, shows subject names)
         - StoreName (MY, Root, CA, Trust, Disallowed)
         - HashAlgorithm (Sha256, Sha384, Sha512)
+        - TimestampHashAlgorithm (Sha1, Sha256, Sha384, Sha512)
+        - IncludeChain (Signer, NotRoot, All)
         - RevocationMode (Off, BestEffort, Require)
         - Policy (AllSigned, RemoteSigned)
 
@@ -86,6 +88,19 @@ EXAMPLES
 
     # Sign using the portable cert store
     Set-PsignSignature ./script.ps1 -Thumbprint ABC123...
+
+    # Sign in-memory content and get signed bytes back
+    $bytes = [Text.Encoding]::UTF8.GetBytes('"hello"')
+    $signed = Set-PsignSignature -SourcePathOrExtension '.ps1' -Content $bytes -PfxPath ./cert.pfx
+    $signed.Content  # signed bytes
+
+    # Import a certificate into the portable store via pcert:
+    $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new('./cert.pfx', 'pw')
+    New-Item pcert:\CurrentUser\MY -Value $cert
+
+    # Sign using a cert from the pcert: provider
+    $signer = Get-Item pcert:\CurrentUser\MY\<THUMBPRINT>
+    Set-PsignSignature ./script.ps1 -Thumbprint $signer.Thumbprint
 
     # Check if a module passes AllSigned policy
     Test-PsignModule ./MyModule -Policy AllSigned
