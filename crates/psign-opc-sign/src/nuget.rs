@@ -470,6 +470,69 @@ mod tests {
         out.into_inner()
     }
 
+    fn eocd_offset(bytes: &[u8]) -> usize {
+        bytes
+            .windows(4)
+            .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+            .expect("EOCD")
+    }
+
+    fn central_directory_entries(bytes: &[u8]) -> Vec<(String, u8, u32)> {
+        let eocd = eocd_offset(bytes);
+        let central_dir_size =
+            u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap()) as usize;
+        let central_dir_offset =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let central_dir_end = central_dir_offset + central_dir_size;
+        let mut entries = Vec::new();
+        let mut pos = central_dir_offset;
+        while pos < central_dir_end {
+            assert_eq!(&bytes[pos..pos + 4], &[0x50, 0x4b, 0x01, 0x02]);
+            let host_os = bytes[pos + 5];
+            let external_attrs = u32::from_le_bytes(bytes[pos + 38..pos + 42].try_into().unwrap());
+            let name_len =
+                u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().unwrap()) as usize;
+            let name = std::str::from_utf8(&bytes[pos + 46..pos + 46 + name_len])
+                .expect("entry name")
+                .to_owned();
+            entries.push((name, host_os, external_attrs));
+            pos += 46 + name_len + extra_len + comment_len;
+        }
+        entries
+    }
+
+    fn mark_central_directory_entries_as_unix(bytes: &mut [u8]) {
+        let eocd = eocd_offset(bytes);
+        let central_dir_size =
+            u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap()) as usize;
+        let central_dir_offset =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let central_dir_end = central_dir_offset + central_dir_size;
+        let mut pos = central_dir_offset;
+        while pos < central_dir_end {
+            bytes[pos + 5] = 3;
+            bytes[pos + 38..pos + 42].copy_from_slice(&0xa1ed_0000u32.to_le_bytes());
+            let name_len =
+                u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().unwrap()) as usize;
+            pos += 46 + name_len + extra_len + comment_len;
+        }
+    }
+
+    fn assert_no_unix_central_directory_metadata(bytes: &[u8]) {
+        for (name, host_os, external_attrs) in central_directory_entries(bytes) {
+            assert_eq!(host_os, 0, "{name} host OS");
+            assert_eq!(external_attrs, 0, "{name} external attributes");
+        }
+    }
+
     #[test]
     fn signature_file_name_is_case_sensitive() {
         let zip = zip_with(&[(PACKAGE_SIGNATURE_FILE_NAME, b"cms")]);
@@ -568,6 +631,7 @@ mod tests {
                 .map(|e| e.compression.as_str()),
             Some("Stored")
         );
+        assert_no_unix_central_directory_metadata(&signed);
         let mut archive = zip::ZipArchive::new(Cursor::new(signed)).unwrap();
         assert_eq!(
             archive
@@ -634,6 +698,49 @@ mod tests {
             info.entry("lib/net8.0/a.dll").map(|e| e.uncompressed_size),
             Some(2)
         );
+    }
+
+    #[test]
+    fn embed_signature_clears_unix_central_directory_metadata() {
+        let mut zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        mark_central_directory_entries_as_unix(&mut zip);
+        assert!(
+            central_directory_entries(&zip)
+                .iter()
+                .any(|(_, host_os, attrs)| *host_os == 3 && *attrs != 0)
+        );
+        let mut out = Cursor::new(Vec::new());
+
+        embed_signature(Cursor::new(zip), &mut out, b"cms", false).unwrap();
+        let signed = out.into_inner();
+
+        assert_no_unix_central_directory_metadata(&signed);
+    }
+
+    #[test]
+    fn write_package_without_signature_clears_unix_central_directory_metadata() {
+        let mut zip = zip_with(&[
+            ("lib/net8.0/a.dll", b"pe"),
+            (PACKAGE_SIGNATURE_FILE_NAME, b"cms"),
+        ]);
+        mark_central_directory_entries_as_unix(&mut zip);
+        let mut out = Cursor::new(Vec::new());
+
+        write_package_without_signature(Cursor::new(zip), &mut out).unwrap();
+        let unsigned = out.into_inner();
+
+        assert_no_unix_central_directory_metadata(&unsigned);
+    }
+
+    #[test]
+    fn canonical_unsigned_package_rejects_truncated_central_directory() {
+        let mut zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        let eocd = eocd_offset(&zip);
+        zip[eocd + 12..eocd + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let err = normalize_nuget_zip_metadata(&mut zip).unwrap_err();
+
+        assert!(err.to_string().contains("central directory"));
     }
 
     fn inspect_package_reader_for_test(bytes: Vec<u8>) -> PackageSummary {

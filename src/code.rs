@@ -319,14 +319,16 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 };
                 let pkcs7 = sign_pkcs7_id_data(
                     &bytes,
-                    &signer,
-                    args.chain_certs.clone(),
-                    signing_digest,
-                    args.timestamp_url.as_deref(),
-                    args.timestamp_digest,
-                    true,
-                    Rfc3161TimestampAttribute::MicrosoftAuthenticode,
-                    pkcs7::Pkcs7SignedAttributeProfile::Basic,
+                    SignPkcs7IdDataOptions {
+                        signer: &signer,
+                        chain_certs: args.chain_certs.clone(),
+                        digest: signing_digest,
+                        timestamp_url: args.timestamp_url.as_deref(),
+                        timestamp_digest: args.timestamp_digest,
+                        content_mode: pkcs7::Pkcs7ContentMode::Detached,
+                        timestamp_attribute: Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                        signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile::Basic,
+                    },
                 )
                 .with_context(|| {
                     format!(
@@ -621,14 +623,16 @@ fn sign_nuget_bytes(
     let content = nuget::signature_content_bytes(digest, &digest.hash(&unsigned));
     let pkcs7 = sign_pkcs7_id_data(
         &content,
-        signer,
-        chain_certs,
-        signing_digest,
-        timestamp_url,
-        timestamp_digest,
-        false,
-        Rfc3161TimestampAttribute::CmsTimeStampToken,
-        pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+        SignPkcs7IdDataOptions {
+            signer,
+            chain_certs,
+            digest: signing_digest,
+            timestamp_url,
+            timestamp_digest,
+            content_mode: pkcs7::Pkcs7ContentMode::Attached,
+            timestamp_attribute: Rfc3161TimestampAttribute::CmsTimeStampToken,
+            signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+        },
     )?;
     let mut out = Cursor::new(Vec::new());
     nuget::embed_signature(Cursor::new(unsigned), &mut out, &pkcs7, false)
@@ -924,14 +928,16 @@ fn sign_nested_package_entries(
                 }
                 let pkcs7 = sign_pkcs7_id_data(
                     &descriptor,
-                    signer,
-                    chain_certs.clone(),
-                    signing_digest,
-                    timestamp_url,
-                    timestamp_digest,
-                    true,
-                    Rfc3161TimestampAttribute::MicrosoftAuthenticode,
-                    pkcs7::Pkcs7SignedAttributeProfile::Basic,
+                    SignPkcs7IdDataOptions {
+                        signer,
+                        chain_certs: chain_certs.clone(),
+                        digest: signing_digest,
+                        timestamp_url,
+                        timestamp_digest,
+                        content_mode: pkcs7::Pkcs7ContentMode::Detached,
+                        timestamp_attribute: Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                        signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile::Basic,
+                    },
                 )
                 .with_context(|| {
                     format!("create nested App Installer companion signature for {nested_label}")
@@ -1506,17 +1512,28 @@ fn is_unsupported_nested_signable(format: &CodeFormat) -> bool {
     )
 }
 
-fn sign_pkcs7_id_data(
-    content: &[u8],
-    signer: &CodeSigner,
+struct SignPkcs7IdDataOptions<'a> {
+    signer: &'a CodeSigner,
     chain_certs: Vec<PathBuf>,
     digest: pkcs7::AuthenticodeSigningDigest,
-    timestamp_url: Option<&str>,
+    timestamp_url: Option<&'a str>,
     timestamp_digest: Option<DigestAlgorithm>,
-    detached: bool,
+    content_mode: pkcs7::Pkcs7ContentMode,
     timestamp_attribute: Rfc3161TimestampAttribute,
     signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
-) -> Result<Vec<u8>> {
+}
+
+fn sign_pkcs7_id_data(content: &[u8], options: SignPkcs7IdDataOptions<'_>) -> Result<Vec<u8>> {
+    let SignPkcs7IdDataOptions {
+        signer,
+        chain_certs,
+        digest,
+        timestamp_url,
+        timestamp_digest,
+        content_mode,
+        timestamp_attribute,
+        signed_attribute_profile,
+    } = options;
     let chain = load_chain_certs(chain_certs)?;
     let econtent_der = OctetString::new(content.to_vec())
         .map_err(|e| anyhow!("encode CMS id-data OCTET STRING: {e}"))?
@@ -1529,7 +1546,7 @@ fn sign_pkcs7_id_data(
         &econtent_der,
         digest,
         chain,
-        detached,
+        content_mode,
         signed_attribute_profile,
     )?;
     timestamp_pkcs7_if_requested(&pkcs7, timestamp_url, timestamp_digest, timestamp_attribute)
@@ -1764,7 +1781,7 @@ impl CodeSigner {
         econtent_der: &[u8],
         digest: pkcs7::AuthenticodeSigningDigest,
         chain: Vec<x509_cert::Certificate>,
-        detached: bool,
+        content_mode: pkcs7::Pkcs7ContentMode,
         signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
     ) -> Result<Vec<u8>> {
         if let Some((cert, key)) = self.local_paths() {
@@ -1786,14 +1803,16 @@ impl CodeSigner {
             let prehash = pkcs7::pkcs7_signed_attrs_digest(&signed_attrs, digest)?;
             let signature = sign_pkcs7_signed_attrs_digest(digest, private_key, &prehash)?;
             return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
-                econtent_type,
-                econtent_der,
-                digest,
-                signer_cert,
-                chain,
-                &signature,
-                detached,
-                signed_attrs,
+                pkcs7::Pkcs7SignedDataDerInput {
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm: digest,
+                    signer_cert,
+                    chain_certs: chain,
+                    encrypted_digest: &signature,
+                    content_mode,
+                    signed_attrs,
+                },
             );
         }
 
@@ -1802,7 +1821,7 @@ impl CodeSigner {
             econtent_der,
             digest,
             chain,
-            detached,
+            content_mode,
             signed_attribute_profile,
         )
     }
@@ -1813,7 +1832,7 @@ impl CodeSigner {
         econtent_der: &[u8],
         digest: pkcs7::AuthenticodeSigningDigest,
         chain: Vec<x509_cert::Certificate>,
-        detached: bool,
+        content_mode: pkcs7::Pkcs7ContentMode,
         signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
     ) -> Result<Vec<u8>> {
         let mut signer_cert_hint =
@@ -1850,14 +1869,16 @@ impl CodeSigner {
             }
             remote.chain.extend(chain.clone());
             return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
-                econtent_type,
-                econtent_der,
-                digest,
-                remote.signer_cert,
-                remote.chain,
-                &remote.signature,
-                detached,
-                signed_attrs,
+                pkcs7::Pkcs7SignedDataDerInput {
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm: digest,
+                    signer_cert: remote.signer_cert,
+                    chain_certs: remote.chain,
+                    encrypted_digest: &remote.signature,
+                    content_mode,
+                    signed_attrs,
+                },
             );
         }
 

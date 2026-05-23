@@ -120,6 +120,21 @@ pub enum Pkcs7SignedAttributeProfile {
     NuGetAuthor,
 }
 
+/// Whether CMS `SignedData.encapContentInfo` embeds the signed content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Pkcs7ContentMode {
+    /// Include the encoded `eContent` in `SignedData`.
+    Attached,
+    /// Omit `eContent` while signing the same bytes.
+    Detached,
+}
+
+impl Pkcs7ContentMode {
+    fn embeds_content(self) -> bool {
+        matches!(self, Self::Attached)
+    }
+}
+
 /// Digest algorithms supported by the portable Authenticode CMS producer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthenticodeSigningDigest {
@@ -509,12 +524,29 @@ pub fn pkcs7_remote_rsa_signed_attrs_digest(
     econtent_der: &[u8],
     digest_algorithm: AuthenticodeSigningDigest,
 ) -> Result<Vec<u8>> {
-    let attrs = pkcs7_signed_attrs(
+    pkcs7_remote_rsa_signed_attrs_digest_with_profile(
         econtent_type,
         econtent_der,
         digest_algorithm,
         Pkcs7SignedAttributeProfile::Basic,
         None,
+    )
+}
+
+/// Return the digest a remote RSA signer must sign for a generic CMS `SignedData` profile.
+pub fn pkcs7_remote_rsa_signed_attrs_digest_with_profile(
+    econtent_type: ObjectIdentifier,
+    econtent_der: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+    profile: Pkcs7SignedAttributeProfile,
+    signer_cert: Option<&Certificate>,
+) -> Result<Vec<u8>> {
+    let attrs = pkcs7_signed_attrs(
+        econtent_type,
+        econtent_der,
+        digest_algorithm,
+        profile,
+        signer_cert,
     )?;
     pkcs7_signed_attrs_digest(&attrs, digest_algorithm)
 }
@@ -540,7 +572,7 @@ pub fn create_pkcs7_signed_data_der_with_rsa_signature(
     signer_cert: Certificate,
     chain_certs: Vec<Certificate>,
     encrypted_digest: &[u8],
-    detached: bool,
+    content_mode: Pkcs7ContentMode,
 ) -> Result<Vec<u8>> {
     let attrs = pkcs7_signed_attrs(
         econtent_type,
@@ -549,57 +581,65 @@ pub fn create_pkcs7_signed_data_der_with_rsa_signature(
         Pkcs7SignedAttributeProfile::Basic,
         None,
     )?;
-    create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+    create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(Pkcs7SignedDataDerInput {
         econtent_type,
         econtent_der,
         digest_algorithm,
         signer_cert,
         chain_certs,
         encrypted_digest,
-        detached,
-        attrs,
-    )
+        content_mode,
+        signed_attrs: attrs,
+    })
 }
 
 /// Create generic PKCS#7 `ContentInfo(SignedData)` DER from externally produced RSA signature bytes
 /// and caller-supplied signed attributes. The caller must ensure `encrypted_digest` signs the DER
 /// encoding of `signed_attrs`.
-#[allow(clippy::too_many_arguments)]
+pub struct Pkcs7SignedDataDerInput<'a> {
+    pub econtent_type: ObjectIdentifier,
+    pub econtent_der: &'a [u8],
+    pub digest_algorithm: AuthenticodeSigningDigest,
+    pub signer_cert: Certificate,
+    pub chain_certs: Vec<Certificate>,
+    pub encrypted_digest: &'a [u8],
+    pub content_mode: Pkcs7ContentMode,
+    pub signed_attrs: SignedAttributes,
+}
+
 pub fn create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
-    econtent_type: ObjectIdentifier,
-    econtent_der: &[u8],
-    digest_algorithm: AuthenticodeSigningDigest,
-    signer_cert: Certificate,
-    chain_certs: Vec<Certificate>,
-    encrypted_digest: &[u8],
-    detached: bool,
-    signed_attrs: SignedAttributes,
+    input: Pkcs7SignedDataDerInput<'_>,
 ) -> Result<Vec<u8>> {
     let signer_id = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
-        issuer: signer_cert.tbs_certificate.issuer.clone(),
-        serial_number: signer_cert.tbs_certificate.serial_number.clone(),
+        issuer: input.signer_cert.tbs_certificate.issuer.clone(),
+        serial_number: input.signer_cert.tbs_certificate.serial_number.clone(),
     });
     let signer_info = SignerInfo {
         version: CmsVersion::V1,
         sid: signer_id,
-        digest_alg: digest_algorithm.digest_algorithm(),
-        signed_attrs: Some(signed_attrs),
-        signature_algorithm: digest_algorithm.rsa_signature_algorithm(),
-        signature: SignatureValue::new(encrypted_digest.to_vec())
+        digest_alg: input.digest_algorithm.digest_algorithm(),
+        signed_attrs: Some(input.signed_attrs),
+        signature_algorithm: input.digest_algorithm.rsa_signature_algorithm(),
+        signature: SignatureValue::new(input.encrypted_digest.to_vec())
             .map_err(|e| anyhow!("SignerInfo.signature OCTET STRING: {e}"))?,
         unsigned_attrs: None,
     };
-    let mut rd = SliceReader::new(econtent_der)
+    let mut rd = SliceReader::new(input.econtent_der)
         .map_err(|e| anyhow!("encapsulated content DER reader: {e}"))?;
     let econtent =
         Any::decode(&mut rd).map_err(|e| anyhow!("encapsulated content as CMS Any: {e}"))?;
     rd.finish(())
         .map_err(|e| anyhow!("trailing octets after encapsulated content DER: {e}"))?;
-    let digest_algorithms = SetOfVec::try_from(vec![digest_algorithm.digest_algorithm()])
+    let digest_algorithms = SetOfVec::try_from(vec![input.digest_algorithm.digest_algorithm()])
         .map_err(|e| anyhow!("DigestAlgorithmIdentifiers SET: {e}"))?;
-    let mut certs = Vec::with_capacity(chain_certs.len() + 1);
-    certs.push(CertificateChoices::Certificate(signer_cert));
-    certs.extend(chain_certs.into_iter().map(CertificateChoices::Certificate));
+    let mut certs = Vec::with_capacity(input.chain_certs.len() + 1);
+    certs.push(CertificateChoices::Certificate(input.signer_cert));
+    certs.extend(
+        input
+            .chain_certs
+            .into_iter()
+            .map(CertificateChoices::Certificate),
+    );
     let certificates = Some(CertificateSet(
         SetOfVec::try_from(certs).map_err(|e| anyhow!("CertificateSet SET: {e}"))?,
     ));
@@ -610,8 +650,8 @@ pub fn create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
         version: CmsVersion::V1,
         digest_algorithms,
         encap_content_info: EncapsulatedContentInfo {
-            econtent_type,
-            econtent: (!detached).then_some(econtent),
+            econtent_type: input.econtent_type,
+            econtent: input.content_mode.embeds_content().then_some(econtent),
         },
         certificates,
         crls: None,
@@ -1011,6 +1051,17 @@ fn select_certificate_bag_signer(certs: &[Certificate]) -> Result<Certificate> {
     ))
 }
 
+fn signer_and_chain_from_certificate_bag(
+    certs: Vec<Certificate>,
+) -> Result<(Certificate, Vec<Certificate>)> {
+    let signer = select_certificate_bag_signer(&certs)?;
+    let chain = certs
+        .into_iter()
+        .filter(|cert| !same_certificate_identity(cert, &signer))
+        .collect();
+    Ok((signer, chain))
+}
+
 /// Decode PKCS#7 DER and return the primary signer certificate plus any additional certificates.
 ///
 /// The primary signer is resolved from the first **`SignerInfo.sid`** rather than by certificate-set order.
@@ -1042,12 +1093,7 @@ pub fn parse_pkcs7_signer_and_chain_certificates(
             .collect();
         return Ok((signer, chain));
     }
-    let signer = select_certificate_bag_signer(&certs)?;
-    let chain = certs
-        .into_iter()
-        .filter(|cert| !same_certificate_identity(cert, &signer))
-        .collect();
-    Ok((signer, chain))
+    signer_and_chain_from_certificate_bag(certs)
 }
 
 const ARTIFACT_SIGNING_CERTIFICATE_MAX_BASE64_DEPTH: usize = 4;
@@ -1085,11 +1131,8 @@ fn parse_artifact_signing_certificates_inner(
             );
             rest = &rest[end..];
         }
-        let mut iter = certs.into_iter();
-        let signer = iter.next().ok_or_else(|| {
-            anyhow!("Artifact Signing signingCertificate did not contain a certificate")
-        })?;
-        return Ok((signer, iter.collect()));
+        return signer_and_chain_from_certificate_bag(certs)
+            .context("select signer from Artifact Signing PEM signingCertificate");
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
         let compact: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
@@ -2185,6 +2228,76 @@ mod tests {
             expected.0.tbs_certificate.serial_number
         );
         assert_eq!(actual.1.len(), expected.1.len());
+    }
+
+    fn fixture_pkcs7_signer_cert(pe_bytes: &[u8]) -> Certificate {
+        let pkcs7_der =
+            crate::verify_pe::pe_nth_pkcs7_signed_data_der(pe_bytes, 0).expect("fixture pkcs7");
+        parse_pkcs7_signer_and_chain_certificates(&pkcs7_der)
+            .expect("fixture signer")
+            .0
+    }
+
+    fn cert_to_pem(cert: &Certificate) -> String {
+        use base64::Engine as _;
+
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(cert.to_der().expect("fixture certificate DER").as_slice());
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        pem
+    }
+
+    #[test]
+    fn parse_artifact_signing_certificates_accepts_der_certificate() {
+        let signer = fixture_pkcs7_signer_cert(include_bytes!(
+            "../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"
+        ));
+        let der = signer.to_der().expect("signer DER");
+
+        let (actual, chain) =
+            parse_artifact_signing_certificates(&der).expect("DER signer certificate");
+
+        assert!(same_certificate_identity(&actual, &signer));
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn parse_artifact_signing_certificates_selects_pem_leaf_when_chain_is_ca_first() {
+        let ca = Certificate::from_der(include_bytes!(
+            "../../../tests/fixtures/devolutions-authenticode/authenticode-test-ca.crt"
+        ))
+        .expect("CA cert");
+        let signer = fixture_pkcs7_signer_cert(include_bytes!(
+            "../../../tests/fixtures/generated-signed/pe/tiny32-pe-alias.dll"
+        ));
+        let pem = [cert_to_pem(&ca), cert_to_pem(&signer)].concat();
+
+        let (actual, chain) =
+            parse_artifact_signing_certificates(pem.as_bytes()).expect("PEM chain");
+
+        assert!(same_certificate_identity(&actual, &signer));
+        assert_eq!(chain.len(), 1);
+        assert!(same_certificate_identity(&chain[0], &ca));
+    }
+
+    #[test]
+    fn parse_artifact_signing_certificates_rejects_ambiguous_pem_leaf_bag() {
+        let signer_a = fixture_pkcs7_signer_cert(include_bytes!(
+            "../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"
+        ));
+        let signer_b = fixture_pkcs7_signer_cert(include_bytes!(
+            "../../../tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi"
+        ));
+        let pem = [cert_to_pem(&signer_a), cert_to_pem(&signer_b)].concat();
+
+        let err = parse_artifact_signing_certificates(pem.as_bytes()).unwrap_err();
+
+        assert!(format!("{err:#}").contains("ambiguous"));
     }
 
     /// PKCS#1 v1.5 **RS256** prehash parity: [`super::signer_info_sha256_digest_over_signed_attrs`] matches

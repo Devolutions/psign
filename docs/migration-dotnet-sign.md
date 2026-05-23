@@ -19,7 +19,7 @@
 | Overwrite existing package signatures | Implemented for NuGet/SNuGet and VSIX package-native execution | `psign-tool code --overwrite --cert signer.der --key signer.pkcs8 --output resigned.nupkg signed-package.nupkg` |
 | NuGet `.nupkg` / `.snupkg` signature marker | Implemented structural helpers | `psign-tool portable nupkg-signature-info package.nupkg` |
 | NuGet package hash signature content | Implemented deterministic generation and verification | `nupkg-signature-content`, `nupkg-verify-signature-content` |
-| NuGet local or external CMS signature blob | Implemented split-signing primitives over generated signature-content bytes, with optional RFC3161 timestamping | `nupkg-signature-pkcs7 --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signature.p7s`, `nupkg-signature-pkcs7-prehash --encoding raw --output prehash.bin`, `nupkg-signature-pkcs7-from-signature --cert signer.der --signature remote.sig --output signature.p7s` |
+| NuGet local or external CMS signature blob | Implemented split-signing primitives over generated signature-content bytes, with optional RFC3161 timestamping | `nupkg-signature-pkcs7 --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signature.p7s`, `nupkg-signature-pkcs7-prehash --cert signer.der --encoding raw --output prehash.bin`, `nupkg-signature-pkcs7-from-signature --cert signer.der --signature remote.sig --output signature.p7s` |
 | NuGet `.signature.p7s` embed/overwrite | Implemented split-signing primitive; local cert/key signing can run in one command with optional RFC3161 timestamping | `nupkg-embed-signature --signature signature.p7s --output signed.nupkg`, `nupkg-sign --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg` |
 | NuGet embedded signature verification | Implemented package hash + CMS/trust verification with explicit anchors | `nupkg-verify-signature signed.nupkg --trusted-ca signer.der --allow-loose-signing-cert` |
 | VSIX OPC signature markers | Implemented structural helpers | `vsix-signature-info`, `vsix-embed-signature-xml` |
@@ -78,7 +78,7 @@ Use the package helpers for split-signing experiments and CI assertions:
 
 ```sh
 psign-tool portable nupkg-signature-content package.nupkg --output signature-content.txt
-psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --encoding raw --output prehash.bin
+psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --cert signer.der --encoding raw --output prehash.bin
 psign-tool portable nupkg-signature-pkcs7-from-signature package.nupkg --cert signer.der --signature remote.sig --output signature.p7s
 psign-tool portable nupkg-sign package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signed.nupkg
 psign-tool portable nupkg-verify-signature-content package.nupkg --content signature-content.txt

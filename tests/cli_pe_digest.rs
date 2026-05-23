@@ -348,6 +348,8 @@ fn nupkg_signature_pkcs7_from_external_signature_creates_verifiable_blob() {
     prehash_cmd
         .arg("nupkg-signature-pkcs7-prehash")
         .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
         .arg("--encoding")
         .arg("raw")
         .arg("--output")
@@ -521,10 +523,8 @@ fn nupkg_sign_embeds_rfc3161_timestamp_attribute() {
     inspect
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "microsoft_nested_rfc3161_attribute",
-        ))
-        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+        .stdout(predicate::str::contains("id_aa_time_stamp_token"))
+        .stdout(predicate::str::contains("1.2.840.113549.1.9.16.2.14"));
 
     let mut verify = portable_cmd();
     verify

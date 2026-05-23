@@ -52,7 +52,9 @@ use psign_sip_digest::verify_pe;
 use psign_sip_digest::verify_script_digest_consistency;
 use psign_sip_digest::zip_authenticode;
 use rsa::pkcs8::DecodePublicKey as _;
-use rsa::signature::{SignatureEncoding as _, Signer as _, Verifier as _};
+use rsa::signature::{
+    SignatureEncoding as _, Signer as _, Verifier as _, hazmat::PrehashSigner as _,
+};
 use serde::Deserialize;
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
@@ -1264,21 +1266,35 @@ fn sign_pkcs7_id_data(
     key: &Path,
     chain_certs: Vec<PathBuf>,
     digest: PortableSignDigest,
+    content_mode: pkcs7::Pkcs7ContentMode,
+    signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
 ) -> Result<Vec<u8>> {
     let (signer_cert, chain) = load_cms_signer_material(cert, chain_certs)?;
     let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
     let private_key = rdp::parse_rsa_private_key(&key_bytes)
         .with_context(|| format!("parse RSA private key {}", key.display()))?;
     let econtent_der = id_data_econtent_der(content)?;
-    let pkcs7 = pkcs7::create_pkcs7_signed_data_der_rsa(
+    let signed_attrs = pkcs7::pkcs7_signed_attrs(
         pkcs7_id_data_oid()?,
         &econtent_der,
         digest.into(),
-        signer_cert,
-        chain,
-        private_key,
+        signed_attribute_profile,
+        Some(&signer_cert),
     )?;
-    detach_pkcs7_econtent(&pkcs7)
+    let prehash = pkcs7::pkcs7_signed_attrs_digest(&signed_attrs, digest.into())?;
+    let signature = sign_pkcs7_signed_attrs_digest(digest.into(), private_key, &prehash)?;
+    pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+        pkcs7::Pkcs7SignedDataDerInput {
+            econtent_type: pkcs7_id_data_oid()?,
+            econtent_der: &econtent_der,
+            digest_algorithm: digest.into(),
+            signer_cert,
+            chain_certs: chain,
+            encrypted_digest: &signature,
+            content_mode,
+            signed_attrs,
+        },
+    )
 }
 
 fn load_cms_signer_material(
@@ -1312,9 +1328,51 @@ fn pkcs7_id_data_oid() -> Result<ObjectIdentifier> {
         .map_err(|e| anyhow!("parse CMS id-data OID: {e}"))
 }
 
-fn pkcs7_id_data_remote_prehash(content: &[u8], digest: PortableSignDigest) -> Result<Vec<u8>> {
+fn sign_pkcs7_signed_attrs_digest(
+    digest: pkcs7::AuthenticodeSigningDigest,
+    private_key: rsa::RsaPrivateKey,
+    signed_attrs_digest: &[u8],
+) -> Result<Vec<u8>> {
+    let signature = match digest {
+        pkcs7::AuthenticodeSigningDigest::Sha256 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha256>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-256 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+        pkcs7::AuthenticodeSigningDigest::Sha384 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha384>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-384 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+        pkcs7::AuthenticodeSigningDigest::Sha512 => {
+            let key = rsa::pkcs1v15::SigningKey::<Sha512>::new(private_key);
+            key.sign_prehash(signed_attrs_digest)
+                .map_err(|e| anyhow!("RSA/SHA-512 signed attributes prehash sign: {e}"))?
+                .to_bytes()
+                .to_vec()
+        }
+    };
+    Ok(signature)
+}
+
+fn pkcs7_id_data_remote_prehash(
+    content: &[u8],
+    digest: PortableSignDigest,
+    signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
+    signer_cert: Option<&x509_cert::Certificate>,
+) -> Result<Vec<u8>> {
     let econtent_der = id_data_econtent_der(content)?;
-    pkcs7::pkcs7_remote_rsa_signed_attrs_digest(pkcs7_id_data_oid()?, &econtent_der, digest.into())
+    pkcs7::pkcs7_remote_rsa_signed_attrs_digest_with_profile(
+        pkcs7_id_data_oid()?,
+        &econtent_der,
+        digest.into(),
+        signed_attribute_profile,
+        signer_cert,
+    )
 }
 
 fn sign_pkcs7_id_data_with_external_signature(
@@ -1323,25 +1381,30 @@ fn sign_pkcs7_id_data_with_external_signature(
     chain_certs: Vec<PathBuf>,
     digest: PortableSignDigest,
     signature: &[u8],
+    content_mode: pkcs7::Pkcs7ContentMode,
+    signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
 ) -> Result<Vec<u8>> {
     let (signer_cert, chain) = load_cms_signer_material(cert, chain_certs)?;
     let econtent_der = id_data_econtent_der(content)?;
-    pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+    let signed_attrs = pkcs7::pkcs7_signed_attrs(
         pkcs7_id_data_oid()?,
         &econtent_der,
         digest.into(),
-        signer_cert,
-        chain,
-        signature,
-        true,
+        signed_attribute_profile,
+        Some(&signer_cert),
+    )?;
+    pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+        pkcs7::Pkcs7SignedDataDerInput {
+            econtent_type: pkcs7_id_data_oid()?,
+            econtent_der: &econtent_der,
+            digest_algorithm: digest.into(),
+            signer_cert,
+            chain_certs: chain,
+            encrypted_digest: signature,
+            content_mode,
+            signed_attrs,
+        },
     )
-}
-
-fn detach_pkcs7_econtent(pkcs7_der: &[u8]) -> Result<Vec<u8>> {
-    let mut detached = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der)
-        .context("parse generated CMS before detaching eContent")?;
-    detached.encap_content_info.econtent = None;
-    pkcs7::encode_pkcs7_content_info_signed_data_der(&detached)
 }
 
 fn update_attr_for_tags(text: &str, tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
@@ -1643,6 +1706,7 @@ fn timestamp_pkcs7_der_rfc3161(
     pkcs7_der: &[u8],
     timestamp_url: &str,
     timestamp_digest: HashAlg,
+    timestamp_attribute: Rfc3161TimestampAttribute,
 ) -> Result<Vec<u8>> {
     let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der).context("parse PKCS#7 SignedData")?;
     let signer = sd
@@ -1664,22 +1728,36 @@ fn timestamp_pkcs7_der_rfc3161(
     let token = parsed
         .time_stamp_token
         .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?;
-    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
-        .context("attach RFC3161 timestamp token")?;
+    let stamped = match timestamp_attribute {
+        Rfc3161TimestampAttribute::MicrosoftAuthenticode => {
+            pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
+        }
+        Rfc3161TimestampAttribute::CmsTimeStampToken => {
+            pkcs7::signed_data_add_pkcs9_rfc3161_timestamp_token(&sd, 0, token)
+        }
+    }
+    .context("attach RFC3161 timestamp token")?;
     pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rfc3161TimestampAttribute {
+    MicrosoftAuthenticode,
+    CmsTimeStampToken,
 }
 
 fn timestamp_pkcs7_if_requested(
     pkcs7_der: &[u8],
     timestamp_url: Option<String>,
     timestamp_digest: Option<HashAlg>,
+    timestamp_attribute: Rfc3161TimestampAttribute,
     context: &str,
 ) -> Result<Vec<u8>> {
     match (timestamp_url, timestamp_digest) {
         (Some(url), Some(timestamp_digest)) => {
             #[cfg(feature = "timestamp-http")]
             {
-                timestamp_pkcs7_der_rfc3161(pkcs7_der, &url, timestamp_digest)
+                timestamp_pkcs7_der_rfc3161(pkcs7_der, &url, timestamp_digest, timestamp_attribute)
                     .with_context(|| format!("RFC3161 timestamp {context}"))
             }
             #[cfg(not(feature = "timestamp-http"))]
@@ -2362,6 +2440,9 @@ enum Command {
         /// Package hash and CMS signer digest algorithm.
         #[arg(long, value_enum, default_value_t = NugetHashAlg::Sha256)]
         algorithm: NugetHashAlg,
+        /// Signer certificate as DER or PEM. Required because NuGet author signatures sign ESSCertIDv2.
+        #[arg(long, value_name = "PATH")]
+        cert: PathBuf,
         #[arg(long, value_enum, default_value_t = DigestEncoding::Hex)]
         encoding: DigestEncoding,
         #[arg(long, value_name = "PATH")]
@@ -4193,14 +4274,18 @@ where
                 (Some(url), Some(timestamp_digest)) => {
                     #[cfg(feature = "timestamp-http")]
                     {
-                        timestamp_pkcs7_der_rfc3161(&pkcs7, &url, timestamp_digest).with_context(
-                            || {
+                        timestamp_pkcs7_der_rfc3161(
+                            &pkcs7,
+                            &url,
+                            timestamp_digest,
+                            Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                        )
+                        .with_context(|| {
                                 format!(
                                     "RFC3161 timestamp portable Authenticode signature for {}",
                                     path.display()
                                 )
-                            },
-                        )?
+                            })?
                     }
                     #[cfg(not(feature = "timestamp-http"))]
                     {
@@ -4904,18 +4989,26 @@ where
         } => {
             let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
                 .with_context(|| format!("nupkg-signature-pkcs7 {}", path.display()))?;
-            let pkcs7 =
-                sign_pkcs7_id_data(&content, &cert, &key, chain_certs, algorithm.into())
-                    .with_context(|| {
-                        format!(
-                            "nupkg-signature-pkcs7 create CMS for {}",
-                            path.display()
-                        )
-                    })?;
+            let pkcs7 = sign_pkcs7_id_data(
+                &content,
+                &cert,
+                &key,
+                chain_certs,
+                algorithm.into(),
+                pkcs7::Pkcs7ContentMode::Attached,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+            )
+            .with_context(|| {
+                format!(
+                    "nupkg-signature-pkcs7 create CMS for {}",
+                    path.display()
+                )
+            })?;
             let pkcs7 = timestamp_pkcs7_if_requested(
                 &pkcs7,
                 timestamp_url,
                 timestamp_digest,
+                Rfc3161TimestampAttribute::CmsTimeStampToken,
                 "nupkg-signature-pkcs7",
             )?;
             std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
@@ -4926,6 +5019,7 @@ where
         Command::NupkgSignaturePkcs7Prehash {
             path,
             algorithm,
+            cert,
             encoding,
             output,
         } => {
@@ -4933,7 +5027,16 @@ where
                 .with_context(|| {
                     format!("nupkg-signature-pkcs7-prehash {}", path.display())
                 })?;
-            let prehash = pkcs7_id_data_remote_prehash(&content, algorithm.into())?;
+            let cert_bytes =
+                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let prehash = pkcs7_id_data_remote_prehash(
+                &content,
+                algorithm.into(),
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+                Some(&signer_cert),
+            )?;
             write_digest_output(encoding, &prehash, output.as_deref())?;
         }
         Command::NupkgSignaturePkcs7FromSignature {
@@ -4961,6 +5064,8 @@ where
                 chain_certs,
                 algorithm.into(),
                 &signature_bytes,
+                pkcs7::Pkcs7ContentMode::Attached,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
             )
             .with_context(|| {
                 format!(
@@ -4972,6 +5077,7 @@ where
                 &pkcs7,
                 timestamp_url,
                 timestamp_digest,
+                Rfc3161TimestampAttribute::CmsTimeStampToken,
                 "nupkg-signature-pkcs7-from-signature",
             )?;
             std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
@@ -4992,15 +5098,21 @@ where
         } => {
             let content = nuget::unsigned_package_signature_content_path(&path, algorithm.into())
                 .with_context(|| format!("nupkg-sign {}", path.display()))?;
-            let pkcs7 =
-                sign_pkcs7_id_data(&content, &cert, &key, chain_certs, algorithm.into())
-                    .with_context(|| {
-                        format!("nupkg-sign create CMS for {}", path.display())
-                    })?;
+            let pkcs7 = sign_pkcs7_id_data(
+                &content,
+                &cert,
+                &key,
+                chain_certs,
+                algorithm.into(),
+                pkcs7::Pkcs7ContentMode::Attached,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+            )
+            .with_context(|| format!("nupkg-sign create CMS for {}", path.display()))?;
             let pkcs7 = timestamp_pkcs7_if_requested(
                 &pkcs7,
                 timestamp_url,
                 timestamp_digest,
+                Rfc3161TimestampAttribute::CmsTimeStampToken,
                 "nupkg-sign",
             )?;
             nuget::embed_signature_path(&path, &output, &pkcs7, overwrite)
@@ -5363,17 +5475,26 @@ where
                 std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             parse_appinstaller_descriptor(&text)
                 .with_context(|| format!("appinstaller-sign-companion {}", path.display()))?;
-            let pkcs7 = sign_pkcs7_id_data(text.as_bytes(), &cert, &key, chain_certs, digest)
-                .with_context(|| {
-                    format!(
-                        "appinstaller-sign-companion create detached PKCS#7 for {}",
-                        path.display()
-                    )
-                })?;
+            let pkcs7 = sign_pkcs7_id_data(
+                text.as_bytes(),
+                &cert,
+                &key,
+                chain_certs,
+                digest,
+                pkcs7::Pkcs7ContentMode::Detached,
+                pkcs7::Pkcs7SignedAttributeProfile::Basic,
+            )
+            .with_context(|| {
+                format!(
+                    "appinstaller-sign-companion create detached PKCS#7 for {}",
+                    path.display()
+                )
+            })?;
             let pkcs7 = timestamp_pkcs7_if_requested(
                 &pkcs7,
                 timestamp_url,
                 timestamp_digest,
+                Rfc3161TimestampAttribute::MicrosoftAuthenticode,
                 "appinstaller-sign-companion",
             )?;
             std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
@@ -5391,7 +5512,12 @@ where
                 std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             parse_appinstaller_descriptor(&text)
                 .with_context(|| format!("appinstaller-sign-companion-prehash {}", path.display()))?;
-            let prehash = pkcs7_id_data_remote_prehash(text.as_bytes(), digest)?;
+            let prehash = pkcs7_id_data_remote_prehash(
+                text.as_bytes(),
+                digest,
+                pkcs7::Pkcs7SignedAttributeProfile::Basic,
+                None,
+            )?;
             write_digest_output(encoding, &prehash, output.as_deref())?;
         }
         Command::AppinstallerSignCompanionFromSignature {
@@ -5420,6 +5546,8 @@ where
                 chain_certs,
                 digest,
                 &signature_bytes,
+                pkcs7::Pkcs7ContentMode::Detached,
+                pkcs7::Pkcs7SignedAttributeProfile::Basic,
             )
             .with_context(|| {
                 format!(
@@ -5431,6 +5559,7 @@ where
                 &pkcs7,
                 timestamp_url,
                 timestamp_digest,
+                Rfc3161TimestampAttribute::MicrosoftAuthenticode,
                 "appinstaller-sign-companion-from-signature",
             )?;
             std::fs::write(&output, &pkcs7).with_context(|| format!("write {}", output.display()))?;
