@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $env:PSIGN_NO_AUTO_TRUST = '1'
 
 function script:Ensure-PortableSignatureModule {
-    if (-not (Get-Command Set-PortableSignature -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command Set-PsignSignature -ErrorAction SilentlyContinue)) {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         $modulePath = Join-Path (Join-Path $repoRoot 'PowerShell\Devolutions.Psign') 'Devolutions.Psign.psd1'
         Import-Module $modulePath -Force
@@ -121,24 +121,24 @@ Describe 'Portable PowerShell package-native coverage' {
         }
     }
 
-    Context 'Set-PortableSignature validation' {
+    Context 'Set-PsignSignature validation' {
     It 'requires -AzureKeyVaultCertificate when -AzureKeyVaultUrl is used' {
         $errorRecord = $null
         try {
-            Set-PortableSignature -LiteralPath 'placeholder.exe' -AzureKeyVaultUrl 'https://vault.example' -ErrorAction Stop | Out-Null
+            Set-PsignSignature -LiteralPath 'placeholder.exe' -AzureKeyVaultUrl 'https://vault.example' -ErrorAction Stop | Out-Null
         }
         catch {
             $errorRecord = $_
         }
 
         $errorRecord | Should -Not -BeNullOrEmpty
-        $errorRecord.FullyQualifiedErrorId | Should -Be 'PortableSignatureAkvCertificateRequired,Devolutions.Psign.PowerShell.Cmdlets.SetPortableSignatureCommand'
+        $errorRecord.FullyQualifiedErrorId | Should -Be 'PsignSignatureAkvCertificateRequired,Devolutions.Psign.PowerShell.Cmdlets.SetPsignSignatureCommand'
     }
 
     It 'rejects mixed local and Azure Key Vault signing sources' {
         $errorRecord = $null
         try {
-            Set-PortableSignature -LiteralPath 'placeholder.exe' `
+            Set-PsignSignature -LiteralPath 'placeholder.exe' `
                 -CertificatePath 'signer.cer' `
                 -PrivateKeyPath 'signer.key' `
                 -AzureKeyVaultUrl 'https://vault.example' `
@@ -150,13 +150,13 @@ Describe 'Portable PowerShell package-native coverage' {
         }
 
         $errorRecord | Should -Not -BeNullOrEmpty
-        $errorRecord.FullyQualifiedErrorId | Should -Be 'PortableSignatureSigningMaterialRequired,Devolutions.Psign.PowerShell.Cmdlets.SetPortableSignatureCommand'
+        $errorRecord.FullyQualifiedErrorId | Should -Be 'PsignSignatureSigningMaterialRequired,Devolutions.Psign.PowerShell.Cmdlets.SetPsignSignatureCommand'
     }
 
     It 'rejects -OutputPath with -Content' {
         $errorRecord = $null
         try {
-            Set-PortableSignature -SourcePathOrExtension '.ps1' `
+            Set-PsignSignature -SourcePathOrExtension '.ps1' `
                 -Content ([System.Text.Encoding]::UTF8.GetBytes('"hello"')) `
                 -CertificatePath $script:Signing.CertificatePath `
                 -PrivateKeyPath $script:Signing.PrivateKeyPath `
@@ -168,21 +168,21 @@ Describe 'Portable PowerShell package-native coverage' {
         }
 
         $errorRecord | Should -Not -BeNullOrEmpty
-        $errorRecord.FullyQualifiedErrorId | Should -Be 'PortableSignatureContentOutputPathUnsupported,Devolutions.Psign.PowerShell.Cmdlets.SetPortableSignatureCommand'
+        $errorRecord.FullyQualifiedErrorId | Should -Be 'PsignSignatureContentOutputPathUnsupported,Devolutions.Psign.PowerShell.Cmdlets.SetPsignSignatureCommand'
     }
     }
 
-    Context 'Set-PortableSignature package-native formats' {
+    Context 'Set-PsignSignature package-native formats' {
     It 'signs and inspects NuGet packages' {
         $work = Join-Path $script:TempRoot 'sample.nupkg'
         Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests\fixtures\package-signing\unsigned\sample.nupkg') -Destination $work -Force
 
-        $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
+        $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
         $signed.Format | Should -Be 'NuGet'
         $signed.Status | Should -Be 'Valid'
         (Get-ZipEntryNames -Path $work) | Should -Contain '.signature.p7s'
 
-        $inspected = Get-PortableSignature -LiteralPath $work
+        $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'NuGet'
         $inspected.Status | Should -Be 'Valid'
     }
@@ -191,7 +191,7 @@ Describe 'Portable PowerShell package-native coverage' {
         $work = Join-Path $script:TempRoot 'sample.snupkg'
         Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests\fixtures\package-signing\unsigned\sample.snupkg') -Destination $work -Force
 
-        $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
+        $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
         $signed.Format | Should -Be 'NuGet'
         $signed.Status | Should -Be 'Valid'
         (Get-ZipEntryNames -Path $work) | Should -Contain '.signature.p7s'
@@ -201,12 +201,12 @@ Describe 'Portable PowerShell package-native coverage' {
         $work = Join-Path $script:TempRoot 'sample.vsix'
         Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests\fixtures\package-signing\unsigned\sample.vsix') -Destination $work -Force
 
-        $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
+        $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
         $signed.Format | Should -Be 'Vsix'
         $signed.Status | Should -Be 'Valid'
         @(Get-ZipEntryNames -Path $work | Where-Object { $_ -like 'package/services/digital-signature/*' }).Count | Should -BeGreaterThan 0
 
-        $inspected = Get-PortableSignature -LiteralPath $work
+        $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'Vsix'
         $inspected.Status | Should -Be 'Valid'
     }
@@ -221,12 +221,12 @@ Describe 'Portable PowerShell package-native coverage' {
         $work = Join-Path $script:TempRoot $FileName
         New-ClickOnceDocument -Path $work -RootName $RootName
 
-        $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
+        $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
         $signed.Format | Should -Be 'ClickOnceManifest'
         $signed.Status | Should -Be 'Valid'
         (Get-Content -LiteralPath $work -Raw) | Should -Match '<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">'
 
-        $inspected = Get-PortableSignature -LiteralPath $work
+        $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'ClickOnceManifest'
         $inspected.Status | Should -Be 'Valid'
     }
@@ -235,14 +235,14 @@ Describe 'Portable PowerShell package-native coverage' {
         $work = Join-Path $script:TempRoot 'sample.appinstaller'
         Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests\fixtures\generated-unsigned\appinstaller\sample.appinstaller') -Destination $work -Force
 
-        $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
+        $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath
         $signed.Format | Should -Be 'AppInstaller'
         $signed.Status | Should -Be 'Valid'
 
         $companion = "$work.p7"
         Test-Path -LiteralPath $companion | Should -BeTrue
 
-        $inspected = Get-PortableSignature -LiteralPath $work
+        $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'AppInstaller'
         $inspected.Status | Should -Be 'Valid'
     }
@@ -265,7 +265,7 @@ Describe 'Portable PowerShell package-native coverage' {
         New-ClickOnceDocument -Path (Join-Path $privateRoot 'sample.vsto') -RootName 'deployment'
         Set-Content -LiteralPath (Join-Path $moduleRoot 'ignored.txt') -Value 'ignore me' -Encoding UTF8
 
-        $signed = @(Set-PortableSignature -LiteralPath $moduleRoot -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath)
+        $signed = @(Set-PsignSignature -LiteralPath $moduleRoot -CertificatePath $script:Signing.CertificatePath -PrivateKeyPath $script:Signing.PrivateKeyPath)
         $formats = @($signed | ForEach-Object Format)
         $formats | Should -Contain 'PowerShellScript'
         $formats | Should -Contain 'NuGet'
@@ -277,7 +277,7 @@ Describe 'Portable PowerShell package-native coverage' {
         $signedPaths | Should -Not -Contain (Join-Path $moduleRoot 'ignored.txt')
         Test-Path -LiteralPath (Join-Path $moduleRoot 'sample.appinstaller.p7') | Should -BeTrue
 
-        $validated = @(Get-PortableSignature -LiteralPath $moduleRoot)
+        $validated = @(Get-PsignSignature -LiteralPath $moduleRoot)
         @($validated | Where-Object Status -ne 'Valid').Count | Should -Be 0
         @($validated | ForEach-Object Format) | Should -Contain 'NuGet'
         @($validated | ForEach-Object Format) | Should -Contain 'Vsix'

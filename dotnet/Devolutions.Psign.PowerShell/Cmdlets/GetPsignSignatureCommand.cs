@@ -8,9 +8,10 @@ using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
-[Cmdlet(VerbsCommon.Get, "PortableSignature", DefaultParameterSetName = FilePathParameterSet)]
+[Cmdlet(VerbsCommon.Get, "PsignSignature", DefaultParameterSetName = FilePathParameterSet)]
+[Alias("Get-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
-public sealed class GetPortableSignatureCommand : PSCmdlet
+public sealed class GetPsignSignatureCommand : PSCmdlet
 {
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
@@ -104,7 +105,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "GetPortableSignatureFailed", ErrorCategory.NotSpecified, path));
+            WriteError(new ErrorRecord(ex, "GetPsignSignatureFailed", ErrorCategory.NotSpecified, path));
         }
     }
 
@@ -122,7 +123,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "GetPortableSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
+            WriteError(new ErrorRecord(ex, "GetPsignSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
         }
         finally
         {

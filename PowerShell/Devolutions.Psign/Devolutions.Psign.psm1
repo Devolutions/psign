@@ -2,7 +2,7 @@
 
 # Argument completers for common parameters
 
-Register-ArgumentCompleter -CommandName Set-PortableSignature, Protect-PsignModule -ParameterName Thumbprint -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-PsignSignature, Get-PortableSignature, Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName Thumbprint -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     $baseDir = if ($fakeBoundParameters.ContainsKey('CertStoreDirectory')) {
         $fakeBoundParameters['CertStoreDirectory']
@@ -28,21 +28,21 @@ Register-ArgumentCompleter -CommandName Set-PortableSignature, Protect-PsignModu
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PortableSignature, Protect-PsignModule -ParameterName StoreName -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName StoreName -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('MY', 'Root', 'CA', 'Trust', 'Disallowed') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PortableSignature, Protect-PsignModule -ParameterName HashAlgorithm -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName HashAlgorithm -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Sha256', 'Sha384', 'Sha512') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Get-PortableSignature -ParameterName RevocationMode -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-PsignSignature, Get-PortableSignature -ParameterName RevocationMode -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Off', 'BestEffort', 'Require') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)

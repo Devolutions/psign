@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 function script:Ensure-PortableSignatureModule {
-    if (-not (Get-Command Get-PortableSignature -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command Get-PsignSignature -ErrorAction SilentlyContinue)) {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
         $modulePath = Join-Path (Join-Path $repoRoot 'PowerShell\Devolutions.Psign') 'Devolutions.Psign.psd1'
         Import-Module $modulePath -Force
@@ -22,7 +22,7 @@ Describe 'Portable PowerShell Authenticode compatibility' {
     }
 
     It 'matches built-in content and literal-path binding metadata where portable-safe' {
-        foreach ($commandName in @('Get-PortableSignature', 'Set-PortableSignature')) {
+        foreach ($commandName in @('Get-PsignSignature', 'Set-PsignSignature')) {
             $command = Get-Command $commandName
 
             $command.Parameters['LiteralPath'].Aliases | Should -Contain 'PSPath'
@@ -39,11 +39,16 @@ Describe 'Portable PowerShell Authenticode compatibility' {
         }
     }
 
+    It 'preserves backward-compatible aliases Get-PortableSignature and Set-PortableSignature' {
+        Get-Command Get-PortableSignature -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command Set-PortableSignature -ErrorAction Stop | Should -Not -BeNullOrEmpty
+    }
+
     It 'exposes built-in enum types on compatibility properties' {
         $scriptPath = Join-Path $script:TempRoot 'unsigned.ps1'
         Set-Content -LiteralPath $scriptPath -Value '"unsigned"' -Encoding UTF8
 
-        $signature = Get-PortableSignature -LiteralPath $scriptPath
+        $signature = Get-PsignSignature -LiteralPath $scriptPath
 
         $signature.Status.GetType().FullName | Should -Be 'System.Management.Automation.SignatureStatus'
         $signature.Status | Should -Be ([System.Management.Automation.SignatureStatus]::NotSigned)

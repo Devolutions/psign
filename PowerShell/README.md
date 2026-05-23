@@ -16,8 +16,8 @@ Import-Module ./PowerShell/Devolutions.Psign/Devolutions.Psign.psd1
 
 | Cmdlet | Description |
 |--------|-------------|
-| `Get-PortableSignature` | Inspect Authenticode signatures (PE, scripts, packages) |
-| `Set-PortableSignature` | Sign files using local keys, PFX, cert store, Azure KV, or Trusted Signing |
+| `Get-PsignSignature` | Inspect Authenticode signatures (PE, scripts, packages) |
+| `Set-PsignSignature` | Sign files using local keys, PFX, cert store, Azure KV, or Trusted Signing |
 | `Test-PsignModule` | Validate a module against AllSigned/RemoteSigned execution policy |
 | `Protect-PsignModule` | Batch-sign all policy-checked files in a module |
 | `Unprotect-PsignSignature` | Strip signature blocks from script files |
@@ -27,23 +27,23 @@ Import-Module ./PowerShell/Devolutions.Psign/Devolutions.Psign.psd1
 ### Verify a file
 
 ```powershell
-Get-PortableSignature ./signed-script.ps1
+Get-PsignSignature ./signed-script.ps1
 
 # Detailed output
-Get-PortableSignature ./app.exe | Format-List
+Get-PsignSignature ./app.exe | Format-List
 ```
 
 ### Sign a script
 
 ```powershell
 # With a PFX file
-Set-PortableSignature ./script.ps1 -PfxPath ./cert.pfx -Password (Read-Host -AsSecureString)
+Set-PsignSignature ./script.ps1 -PfxPath ./cert.pfx -Password (Read-Host -AsSecureString)
 
 # With cert + key files
-Set-PortableSignature ./script.ps1 -CertificatePath ./cert.pem -PrivateKeyPath ./key.pem
+Set-PsignSignature ./script.ps1 -CertificatePath ./cert.pem -PrivateKeyPath ./key.pem
 
 # With the portable cert store
-Set-PortableSignature ./script.ps1 -Thumbprint ABC123DEF456...
+Set-PsignSignature ./script.ps1 -Thumbprint ABC123DEF456...
 ```
 
 ### Module compliance
@@ -85,7 +85,7 @@ $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(".
 New-Item pcert:\CurrentUser\MY -Value $cert
 
 # Use for signing
-Set-PortableSignature ./script.ps1 -Thumbprint (Get-ChildItem pcert:\CurrentUser\MY)[0].Thumbprint
+Set-PsignSignature ./script.ps1 -Thumbprint (Get-ChildItem pcert:\CurrentUser\MY)[0].Thumbprint
 
 # Create a custom drive
 New-PSDrive -Name certs -PSProvider PortableCertStore -Root ./project-certs
@@ -93,16 +93,16 @@ New-PSDrive -Name certs -PSProvider PortableCertStore -Root ./project-certs
 
 ## Trust Model
 
-By default, `Get-PortableSignature` automatically downloads and caches the Microsoft AuthRoot CAB (~350KB) for trust evaluation. The cache lives at `~/.psign/authroot/`.
+By default, `Get-PsignSignature` automatically downloads and caches the Microsoft AuthRoot CAB (~350KB) for trust evaluation. The cache lives at `~/.psign/authroot/`.
 
 ```powershell
 # Disable auto-trust
 $env:PSIGN_NO_AUTO_TRUST = '1'
 
 # Explicit trust anchors
-Get-PortableSignature ./app.exe -TrustedCertificatePath ./ca.cer
-Get-PortableSignature ./app.exe -AnchorDirectory ./trusted-roots/
-Get-PortableSignature ./app.exe -AuthRootCab ./authroot.cab
+Get-PsignSignature ./app.exe -TrustedCertificatePath ./ca.cer
+Get-PsignSignature ./app.exe -AnchorDirectory ./trusted-roots/
+Get-PsignSignature ./app.exe -AuthRootCab ./authroot.cab
 ```
 
 ## Signing Sources
@@ -120,8 +120,8 @@ Get-PortableSignature ./app.exe -AuthRootCab ./authroot.cab
 
 ```powershell
 Get-Help about_Devolutions.Psign
-Get-Help Get-PortableSignature -Full
-Get-Help Set-PortableSignature -Full
+Get-Help Get-PsignSignature -Full
+Get-Help Set-PsignSignature -Full
 ```
 
 ## Requirements

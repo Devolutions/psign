@@ -178,7 +178,7 @@ Describe 'Protect-PsignModule' {
         Protect-PsignModule -Path $unsigned -Certificate $script:TestCert -WhatIf
 
         # File should still be unsigned
-        $sig = Get-PortableSignature -FilePath (Join-Path $unsigned 'test.psm1') -SkipTrust
+        $sig = Get-PsignSignature -FilePath (Join-Path $unsigned 'test.psm1') -SkipTrust
         $sig.Status | Should -Be 'NotSigned'
 
         Remove-Item $unsigned -Recurse -Force

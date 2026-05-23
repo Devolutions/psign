@@ -4,44 +4,44 @@
 
 ## Cmdlets
 
-- `Set-PortableSignature`
-- `Get-PortableSignature`
+- `Set-PsignSignature`
+- `Get-PsignSignature`
 
 Both cmdlets accept `-FilePath` and `-LiteralPath`. `-LiteralPath` accepts the same `PSPath` and `LP` aliases as the built-in Authenticode cmdlets. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes PowerShell files plus newly supported portable signing neighbors such as `.dll`, `.exe`, `.nupkg`, `.snupkg`, `.vsix`, `.manifest`, `.application`, `.vsto`, and `.appinstaller`.
 
 Both cmdlets also support the built-in Authenticode content parameter shape:
 
 ```powershell
-$signed = Set-PortableSignature -SourcePathOrExtension '.ps1' -Content $bytes -Certificate $exportableCertificate
-Get-PortableSignature -SourcePathOrExtension '.ps1' -Content $signed.Content
+$signed = Set-PsignSignature -SourcePathOrExtension '.ps1' -Content $bytes -Certificate $exportableCertificate
+Get-PsignSignature -SourcePathOrExtension '.ps1' -Content $signed.Content
 ```
 
 ## Signing inputs
 
-`Set-PortableSignature` supports local exportable RSA key material:
+`Set-PsignSignature` supports local exportable RSA key material:
 
 ```powershell
-Set-PortableSignature -LiteralPath .\tool.exe -CertificatePath .\signer.cer -PrivateKeyPath .\signer.key
-Set-PortableSignature -LiteralPath .\script.ps1 -Certificate $exportableCertificate
-Set-PortableSignature -LiteralPath .\package.msix -PfxPath .\signer.pfx -Password $password
-Set-PortableSignature -LiteralPath .\tool.exe -Thumbprint $sha1 -CertStoreDirectory .\cert-store
+Set-PsignSignature -LiteralPath .\tool.exe -CertificatePath .\signer.cer -PrivateKeyPath .\signer.key
+Set-PsignSignature -LiteralPath .\script.ps1 -Certificate $exportableCertificate
+Set-PsignSignature -LiteralPath .\package.msix -PfxPath .\signer.pfx -Password $password
+Set-PsignSignature -LiteralPath .\tool.exe -Thumbprint $sha1 -CertStoreDirectory .\cert-store
 ```
 
 The P/Invoke ABI also accepts in-memory DER certificate and PKCS#8 private-key material. Non-exportable local keys fail explicitly; use file-backed key material, PFX files with exportable keys, or the portable file-backed cert store.
 
 The portable cert store follows the same layout as `psign-tool cert-store`: `<base>\<scope>\<store>\<SHA1>.der` plus `<SHA1>.key`, where scope is `CurrentUser` or `LocalMachine` and the private key is unencrypted PKCS#8 PEM. `-Thumbprint` has `-Sha1` and `-PortableStoreThumbprint` aliases. If `-CertStoreDirectory` is omitted, the module uses `PSIGN_CERT_STORE` and then `~\.psign\cert-store`.
 
-`Set-PortableSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
+`Set-PsignSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
 
 ## Explicit trust
 
-`Get-PortableSignature` validates digest binding by default and does not claim OS trust. Explicit portable trust can be requested with anchors:
+`Get-PsignSignature` validates digest binding by default and does not claim OS trust. Explicit portable trust can be requested with anchors:
 
 ```powershell
-Get-PortableSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate
-Get-PortableSignature -LiteralPath .\tool.exe -TrustedCertificatePath .\root.cer
-Get-PortableSignature -LiteralPath .\tool.exe -AnchorDirectory .\anchors
-Get-PortableSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate -AsOf (Get-Date) -RevocationMode Off
+Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate
+Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificatePath .\root.cer
+Get-PsignSignature -LiteralPath .\tool.exe -AnchorDirectory .\anchors
+Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate -AsOf (Get-Date) -RevocationMode Off
 ```
 
 The output object is portable-specific, but its compatibility properties mirror the built-in Authenticode shape: `Status` is a `System.Management.Automation.SignatureStatus`, `SignatureType` is a `System.Management.Automation.SignatureType`, and `SignerCertificate`, `TimeStamperCertificate`, `StatusMessage`, `Path`, `IsOSBinary`, and `SubjectAlternativeName` are exposed by the same names. Portable-specific details remain available through `Format`, `PortableStatus`, `TrustStatus`, `PortableTrustStatus`, `TimestampKinds`, `TimestampSigningTime`, `SignatureCount`, and `PortableDiagnostics`.
@@ -88,12 +88,12 @@ The native artifact root should contain directories such as `psign-core-win-x64`
 
 ## Migrating from built-in Authenticode cmdlets
 
-The portable module cmdlets (`Get-PortableSignature`, `Set-PortableSignature`) are designed as near drop-in replacements for `Get-AuthenticodeSignature` and `Set-AuthenticodeSignature`. The following table shows common migration patterns:
+The portable module cmdlets (`Get-PsignSignature`, `Set-PsignSignature`) are designed as near drop-in replacements for `Get-AuthenticodeSignature` and `Set-AuthenticodeSignature`. The following table shows common migration patterns:
 
 | Built-in | Portable equivalent |
 | --- | --- |
-| `Get-AuthenticodeSignature -LiteralPath .\f.exe` | `Get-PortableSignature -LiteralPath .\f.exe` |
-| `Set-AuthenticodeSignature -LiteralPath .\f.exe -Certificate $cert` | `Set-PortableSignature -LiteralPath .\f.exe -Certificate $cert` |
+| `Get-AuthenticodeSignature -LiteralPath .\f.exe` | `Get-PsignSignature -LiteralPath .\f.exe` |
+| `Set-AuthenticodeSignature -LiteralPath .\f.exe -Certificate $cert` | `Set-PsignSignature -LiteralPath .\f.exe -Certificate $cert` |
 | `$sig.Status -eq [SignatureStatus]::Valid` | Same — `Status` is typed as `SignatureStatus` |
 | `$sig.SignatureType -eq [SignatureType]::Authenticode` | Same — `SignatureType` is typed as `SignatureType` |
 | `$sig.SignerCertificate.Thumbprint` | Same |

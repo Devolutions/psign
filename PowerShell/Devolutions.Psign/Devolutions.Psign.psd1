@@ -11,14 +11,17 @@
     NestedModules = @('lib/net8.0/Devolutions.Psign.PowerShell.dll')
     FormatsToProcess = @('Devolutions.Psign.Format.ps1xml')
     CmdletsToExport = @(
-        'Get-PortableSignature',
-        'Set-PortableSignature',
+        'Get-PsignSignature',
+        'Set-PsignSignature',
         'Test-PsignModule',
         'Protect-PsignModule',
         'Unprotect-PsignSignature'
     )
     FunctionsToExport = @()
-    AliasesToExport = @()
+    AliasesToExport = @(
+        'Get-PortableSignature',
+        'Set-PortableSignature'
+    )
     PrivateData = @{
         PSData = @{
             Tags = @('Authenticode', 'CodeSigning', 'Portable', 'psign')

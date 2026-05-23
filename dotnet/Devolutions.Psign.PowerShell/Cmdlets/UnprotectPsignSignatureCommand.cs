@@ -6,7 +6,7 @@ namespace Devolutions.Psign.PowerShell.Cmdlets;
 
 /// <summary>
 /// Removes Authenticode signature blocks from PowerShell script files (.ps1, .psm1, .psd1, .ps1xml, .cdxml).
-/// This is the reverse of Set-PortableSignature for script files.
+/// This is the reverse of Set-PsignSignature for script files.
 /// </summary>
 [Cmdlet(VerbsSecurity.Unprotect, "PsignSignature", SupportsShouldProcess = true)]
 [OutputType(typeof(PsignUnprotectResult))]

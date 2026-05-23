@@ -131,7 +131,7 @@
       </TableControl>
     </View>
 
-    <!-- Get-PortableSignature / Set-PortableSignature table -->
+    <!-- Get-PsignSignature / Set-PsignSignature table -->
     <View>
       <Name>PortableSignature_Table</Name>
       <ViewSelectedBy>
@@ -159,7 +159,7 @@
       </TableControl>
     </View>
 
-    <!-- Get-PortableSignature / Set-PortableSignature detailed list -->
+    <!-- Get-PsignSignature / Set-PsignSignature detailed list -->
     <View>
       <Name>PortableSignature_List</Name>
       <ViewSelectedBy>

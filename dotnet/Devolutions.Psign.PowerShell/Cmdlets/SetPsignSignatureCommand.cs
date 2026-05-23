@@ -10,9 +10,10 @@ using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
-[Cmdlet(VerbsCommon.Set, "PortableSignature", SupportsShouldProcess = true, DefaultParameterSetName = FilePathParameterSet)]
+[Cmdlet(VerbsCommon.Set, "PsignSignature", SupportsShouldProcess = true, DefaultParameterSetName = FilePathParameterSet)]
+[Alias("Set-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
-public sealed class SetPortableSignatureCommand : PSCmdlet
+public sealed class SetPsignSignatureCommand : PSCmdlet
 {
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
@@ -144,7 +145,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-OutputPath cannot be used with -Content. Read the signed bytes from the output object's Content property."),
-                    "PortableSignatureContentOutputPathUnsupported",
+                    "PsignSignatureContentOutputPathUnsupported",
                     ErrorCategory.InvalidArgument,
                     OutputPath));
             }
@@ -161,7 +162,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         {
             ThrowTerminatingError(new ErrorRecord(
                 new PSInvalidOperationException("-OutputPath can only be used with a single input file."),
-                "PortableSignatureOutputPathRequiresSingleInput",
+                "PsignSignatureOutputPathRequiresSingleInput",
                 ErrorCategory.InvalidArgument,
                 OutputPath));
         }
@@ -174,7 +175,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-OutputPath can only be used with a single input file, not module directories or wildcard groups."),
-                    "PortableSignatureOutputPathRequiresSingleInput",
+                    "PsignSignatureOutputPathRequiresSingleInput",
                     ErrorCategory.InvalidArgument,
                     input));
             }
@@ -241,7 +242,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "SetPortableSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
+            WriteError(new ErrorRecord(ex, "SetPsignSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
         }
         finally
         {
@@ -323,7 +324,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "SetPortableSignatureFailed", ErrorCategory.NotSpecified, path));
+            WriteError(new ErrorRecord(ex, "SetPsignSignatureFailed", ErrorCategory.NotSpecified, path));
         }
     }
 
@@ -363,7 +364,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-CertificatePath and -PrivateKeyPath must be supplied together."),
-                    "PortableSignatureIncompleteKeyPair",
+                    "PsignSignatureIncompleteKeyPair",
                     ErrorCategory.InvalidArgument,
                     this));
             }
@@ -383,7 +384,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-AzureKeyVaultCertificate is required when using -AzureKeyVaultUrl."),
-                    "PortableSignatureAkvCertificateRequired",
+                    "PsignSignatureAkvCertificateRequired",
                     ErrorCategory.InvalidArgument,
                     this));
             }
@@ -398,7 +399,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         {
             ThrowTerminatingError(new ErrorRecord(
                 new PSInvalidOperationException("Supply exactly one signing source: -Certificate, -CertificatePath/-PrivateKeyPath, -PfxPath, -Thumbprint, -AzureKeyVaultUrl, or -ArtifactSigningEndpoint/-ArtifactSigningAccountName."),
-                "PortableSignatureSigningMaterialRequired",
+                "PsignSignatureSigningMaterialRequired",
                 ErrorCategory.InvalidArgument,
                 this));
         }

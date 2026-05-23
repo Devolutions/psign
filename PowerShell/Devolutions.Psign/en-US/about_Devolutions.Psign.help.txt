@@ -12,12 +12,12 @@ LONG DESCRIPTION
 
     CORE CMDLETS
 
-        Get-PortableSignature
+        Get-PsignSignature
             Inspect Authenticode signatures on files (PE, scripts, packages).
             Returns a PortableSignature object with Status, SignerCertificate,
             TimestampSigningTime, DigestAlgorithm, and trust diagnostics.
 
-        Set-PortableSignature
+        Set-PsignSignature
             Sign files with a local certificate, PFX, portable cert store
             thumbprint, Azure Key Vault, or Azure Trusted Signing.
 
@@ -76,16 +76,16 @@ LONG DESCRIPTION
 
 EXAMPLES
     # Verify a signed script
-    Get-PortableSignature ./script.ps1
+    Get-PsignSignature ./script.ps1
 
     # Verify with detailed output
-    Get-PortableSignature ./app.exe | Format-List
+    Get-PsignSignature ./app.exe | Format-List
 
     # Sign a script with a PFX
-    Set-PortableSignature ./script.ps1 -PfxPath ./cert.pfx
+    Set-PsignSignature ./script.ps1 -PfxPath ./cert.pfx
 
     # Sign using the portable cert store
-    Set-PortableSignature ./script.ps1 -Thumbprint ABC123...
+    Set-PsignSignature ./script.ps1 -Thumbprint ABC123...
 
     # Check if a module passes AllSigned policy
     Test-PsignModule ./MyModule -Policy AllSigned
@@ -97,8 +97,8 @@ EXAMPLES
     Unprotect-PsignSignature ./script.ps1
 
 SEE ALSO
-    Get-PortableSignature
-    Set-PortableSignature
+    Get-PsignSignature
+    Set-PsignSignature
     Test-PsignModule
     Protect-PsignModule
     Unprotect-PsignSignature

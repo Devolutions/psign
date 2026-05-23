@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 
 $manifestPath = Join-Path $moduleRoot 'Devolutions.Psign.psd1'
 $manifest = Test-ModuleManifest -Path $manifestPath
-$expectedCmdlets = @('Get-PortableSignature', 'Set-PortableSignature')
+$expectedCmdlets = @('Get-PsignSignature', 'Set-PsignSignature')
 foreach ($cmdlet in $expectedCmdlets) {
     if ($manifest.ExportedCmdlets.Keys -notcontains $cmdlet) {
         throw "Module manifest does not export expected cmdlet '$cmdlet'."
@@ -71,7 +71,7 @@ try {
     }
     $nativeProbe = New-TemporaryFile
     try {
-        $null = Get-PortableSignature -LiteralPath $nativeProbe.FullName -ErrorAction Stop
+        $null = Get-PsignSignature -LiteralPath $nativeProbe.FullName -ErrorAction Stop
     }
     finally {
         Remove-Item -LiteralPath $nativeProbe.FullName -Force -ErrorAction SilentlyContinue
