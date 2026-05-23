@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 
 $manifestPath = Join-Path $moduleRoot 'Devolutions.Psign.psd1'
 $manifest = Test-ModuleManifest -Path $manifestPath
-$expectedCmdlets = @('Get-PsignSignature', 'Set-PsignSignature')
+$expectedCmdlets = @('Get-PsignSignature', 'Set-PsignSignature', 'Test-PsignModule', 'Protect-PsignModule', 'Unprotect-PsignSignature')
 foreach ($cmdlet in $expectedCmdlets) {
     if ($manifest.ExportedCmdlets.Keys -notcontains $cmdlet) {
         throw "Module manifest does not export expected cmdlet '$cmdlet'."

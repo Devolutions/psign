@@ -6,6 +6,11 @@ namespace Devolutions.Psign.PowerShell.Models;
 
 public sealed class PortableSignature
 {
+    private X509Certificate2? _signerCertificate;
+    private X509Certificate2? _timeStamperCertificate;
+    private bool _signerCertificateResolved;
+    private bool _timeStamperCertificateResolved;
+
     [JsonPropertyName("schema_version")]
     public int SchemaVersion { get; init; }
 
@@ -54,10 +59,32 @@ public sealed class PortableSignature
     public string[] PortableDiagnostics { get; init; } = [];
 
     [JsonIgnore]
-    public X509Certificate2? SignerCertificate => DecodeCertificate(SignerCertificateDerBase64);
+    public X509Certificate2? SignerCertificate
+    {
+        get
+        {
+            if (!_signerCertificateResolved)
+            {
+                _signerCertificate = DecodeCertificate(SignerCertificateDerBase64);
+                _signerCertificateResolved = true;
+            }
+            return _signerCertificate;
+        }
+    }
 
     [JsonIgnore]
-    public X509Certificate2? TimeStamperCertificate => DecodeCertificate(TimeStamperCertificateDerBase64);
+    public X509Certificate2? TimeStamperCertificate
+    {
+        get
+        {
+            if (!_timeStamperCertificateResolved)
+            {
+                _timeStamperCertificate = DecodeCertificate(TimeStamperCertificateDerBase64);
+                _timeStamperCertificateResolved = true;
+            }
+            return _timeStamperCertificate;
+        }
+    }
 
     [JsonIgnore]
     public SignatureType SignatureType

@@ -187,6 +187,14 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
         }
     }
 
+    protected override void EndProcessing()
+    {
+        pfxCertificate?.Dispose();
+        pfxCertificate = null;
+        storeCertificate?.Dispose();
+        storeCertificate = null;
+    }
+
     private void SignContent(string sourcePathOrExtension)
     {
         string tempDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
@@ -486,21 +494,11 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
 
         string resolved = SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath);
         string? password = Password is null ? null : SecureStringToString(Password);
-        try
-        {
-            pfxCertificate = new X509Certificate2(
-                resolved,
-                password,
-                X509KeyStorageFlags.Exportable);
-            return pfxCertificate;
-        }
-        finally
-        {
-            if (password is not null)
-            {
-                password = null;
-            }
-        }
+        pfxCertificate = new X509Certificate2(
+            resolved,
+            password,
+            X509KeyStorageFlags.Exportable);
+        return pfxCertificate;
     }
 
     private string? GetCertificateDerBase64()
@@ -530,7 +528,12 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
         using RSA? rsa = cert.GetRSAPrivateKey();
         if (rsa is null)
         {
-            throw new PSInvalidOperationException("Portable signing requires an exportable RSA private key.");
+            if (cert.GetECDsaPrivateKey() is not null)
+            {
+                throw new PSInvalidOperationException(
+                    $"Portable signing does not support ECDSA certificates. Use an RSA certificate instead.");
+            }
+            throw new PSInvalidOperationException("Portable signing requires a certificate with an exportable RSA private key.");
         }
         try
         {

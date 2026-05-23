@@ -136,9 +136,21 @@ internal static class CertStorePathHelper
                 rsa.ImportPkcs8PrivateKey(keyDer, out _);
                 cert = certWithKey.CopyWithPrivateKey(rsa);
             }
-            catch
+            catch (CryptographicException)
             {
-                // If key loading fails, return the cert without the private key
+                // RSA import failed — try ECDSA
+                try
+                {
+                    byte[] keyDer = ReadPkcs8PrivateKeyDer(keyPath);
+                    using var certWithKey = cert;
+                    using ECDsa ecdsa = ECDsa.Create();
+                    ecdsa.ImportPkcs8PrivateKey(keyDer, out _);
+                    cert = certWithKey.CopyWithPrivateKey(ecdsa);
+                }
+                catch
+                {
+                    // If both fail, return the cert without the private key
+                }
             }
         }
         return cert;
