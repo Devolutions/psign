@@ -185,4 +185,34 @@ internal static class CertStorePathHelper
 
         return normalized.Split('\\', StringSplitOptions.RemoveEmptyEntries).Length;
     }
+
+    /// <summary>
+    /// Load a certificate and its private key DER bytes from the portable store by thumbprint.
+    /// </summary>
+    internal static (X509Certificate2 Certificate, byte[]? PrivateKeyDer) LoadCertificateAndKey(
+        string? explicitBaseDir, string scope, string storeName, string thumbprint)
+    {
+        string baseDir = ResolveBaseDirectory(explicitBaseDir);
+        string normalizedStore = NormalizeStoreName(storeName);
+        string normalizedThumb = NormalizeThumbprint(thumbprint);
+        string derPath = Path.Combine(baseDir, scope, normalizedStore, normalizedThumb + ".der");
+
+        if (!File.Exists(derPath))
+        {
+            throw new FileNotFoundException(
+                $"Certificate '{normalizedThumb}' not found in {scope}\\{normalizedStore}.", derPath);
+        }
+
+        byte[] certBytes = File.ReadAllBytes(derPath);
+        var cert = new X509Certificate2(certBytes);
+
+        string keyPath = Path.ChangeExtension(derPath, ".key");
+        byte[]? keyDer = null;
+        if (File.Exists(keyPath))
+        {
+            keyDer = ReadPkcs8PrivateKeyDer(keyPath);
+        }
+
+        return (cert, keyDer);
+    }
 }

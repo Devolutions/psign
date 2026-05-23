@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration>
+  <ViewDefinitions>
+
+    <!-- Test-PsignModule result: summary list -->
+    <View>
+      <Name>PsignModuleValidationResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Models.PsignModuleValidationResult</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>ModuleName</PropertyName></ListItem>
+              <ListItem><PropertyName>ModulePath</PropertyName></ListItem>
+              <ListItem><PropertyName>Policy</PropertyName></ListItem>
+              <ListItem><PropertyName>Valid</PropertyName></ListItem>
+              <ListItem><PropertyName>Summary</PropertyName></ListItem>
+              <ListItem><Label>Passed</Label><PropertyName>PassedCount</PropertyName></ListItem>
+              <ListItem><Label>Failed</Label><PropertyName>FailedCount</PropertyName></ListItem>
+              <ListItem><Label>Skipped</Label><PropertyName>SkippedCount</PropertyName></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
+    <!-- Test-PsignModule per-file result table -->
+    <View>
+      <Name>PsignModuleFileResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Models.PsignModuleFileResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>File</Label><Width>40</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Role</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Required</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>12</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Pass</Label><Width>5</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Signer</Label><Width>30</Width></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>RelativePath</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Role</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>RequiredByPolicy</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Passes</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SignerSubject</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <!-- Protect-PsignModule result -->
+    <View>
+      <Name>PsignModuleSigningResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Cmdlets.PsignModuleSigningResult</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>ModuleName</PropertyName></ListItem>
+              <ListItem><PropertyName>ModulePath</PropertyName></ListItem>
+              <ListItem><Label>Total Files</Label><PropertyName>TotalFiles</PropertyName></ListItem>
+              <ListItem><PropertyName>Succeeded</PropertyName></ListItem>
+              <ListItem><PropertyName>Failed</PropertyName></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
+    <!-- Protect-PsignModule per-file sign result -->
+    <View>
+      <Name>PsignModuleFileSignResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Cmdlets.PsignModuleFileSignResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>File</Label><Width>40</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Role</Label><Width>18</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>12</Width></TableColumnHeader>
+          <TableColumnHeader><Label>OK</Label><Width>5</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Error</Label><Width>40</Width></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>RelativePath</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Role</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Success</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>ErrorMessage</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <!-- Unprotect-PsignSignature result -->
+    <View>
+      <Name>PsignUnprotectResult</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Cmdlets.PsignUnprotectResult</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Path</Label><Width>50</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Removed</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Bytes</Label><Width>8</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Message</Label><Width>30</Width></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><PropertyName>Path</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SignatureRemoved</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>BytesRemoved</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>Message</PropertyName></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+  </ViewDefinitions>
+</Configuration>
