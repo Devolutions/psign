@@ -3,6 +3,7 @@ using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
 using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Trust;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -60,6 +61,9 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
     [Parameter]
     [ValidateSet("Off", "BestEffort", "Require")]
     public string RevocationMode { get; set; } = "Off";
+
+    [Parameter]
+    public SwitchParameter SkipTrust { get; set; }
 
     protected override void ProcessRecord()
     {
@@ -128,6 +132,21 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
 
     private PortableGetSignatureRequest CreateRequest(string path)
     {
+        string? resolvedAuthRootCab = AuthRootCab is null
+            ? null
+            : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AuthRootCab);
+
+        // Auto-trust: if no explicit trust params and not opted out, use cached AuthRoot CAB
+        if (!SkipTrust.IsPresent
+            && resolvedAuthRootCab is null
+            && AnchorDirectory is null
+            && TrustedCertificatePath.Length == 0
+            && TrustedCertificate.Length == 0)
+        {
+            resolvedAuthRootCab = AuthRootCache.GetOrDownloadAuthRootCab(
+                msg => WriteVerbose(msg));
+        }
+
         return new PortableGetSignatureRequest
         {
             Path = path,
@@ -140,9 +159,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
             AnchorDirectory = AnchorDirectory is null
                 ? null
                 : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AnchorDirectory),
-            AuthRootCab = AuthRootCab is null
-                ? null
-                : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AuthRootCab),
+            AuthRootCab = resolvedAuthRootCab,
             AsOf = AsOf is null
                 ? null
                 : AsOf.Value.ToUniversalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),

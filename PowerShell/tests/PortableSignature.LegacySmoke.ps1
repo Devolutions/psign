@@ -4,6 +4,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Disable auto-trust during tests — test certificates are self-signed and
+# won't chain to the Microsoft AuthRoot CTL.
+$env:PSIGN_NO_AUTO_TRUST = '1'
+
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildScript = Join-Path (Join-Path $repo 'PowerShell') 'build.ps1'
 if (-not $env:PSIGN_PWSH_TEST_SKIP_BUILD) {

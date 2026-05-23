@@ -1,5 +1,6 @@
 //! Simple issuer walk for PKCS#7 embedded + anchor pools (RFC 5280 subset delegated to picky).
 
+use crate::anchor::{AnchorStore, cert_sha1_thumbprint};
 use anyhow::{Result, anyhow};
 use picky::x509::certificate::Cert;
 
@@ -7,25 +8,54 @@ use picky::x509::certificate::Cert;
 ///
 /// Returns certificates **from the leaf's immediate issuer toward the terminal self-signed root**
 /// (same order picky [`Cert::verifier`](picky::x509::certificate::Cert::verifier) expects).
-pub fn issuer_chain_excluding_leaf<'a>(leaf: &'a Cert, pool: &'a [Cert]) -> Result<Vec<&'a Cert>> {
+///
+/// If `anchors` is provided and an intermediate cert's SHA-1 thumbprint is already in the
+/// anchor store, chain building terminates at that cert even if its issuer isn't available.
+/// This enables "trust at boundary" semantics required for AuthRoot CTL-only verification
+/// (where only thumbprints are available, not full root certificate DER).
+pub fn issuer_chain_excluding_leaf<'a>(
+    leaf: &'a Cert,
+    pool: &'a [Cert],
+    anchors: Option<&AnchorStore>,
+) -> Result<Vec<&'a Cert>> {
     if leaf.subject_name() == leaf.issuer_name() {
         return Ok(Vec::new());
     }
 
-    let mut out = Vec::new();
+    // Check if the leaf itself is already trusted (thumbprint in anchor store)
+    if let Some(store) = anchors
+        && let Ok(thumb) = cert_sha1_thumbprint(leaf)
+        && store.contains_thumbprint(&thumb)
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<&'a Cert> = Vec::new();
     let mut issuer_dn = leaf.issuer_name();
     let mut steps = 0usize;
 
     loop {
-        let parent = pool
-            .iter()
-            .find(|c| c.subject_name() == issuer_dn)
-            .ok_or_else(|| {
-                anyhow!(
+        let parent = pool.iter().find(|c| c.subject_name() == issuer_dn);
+
+        let parent = match parent {
+            Some(p) => p,
+            None => {
+                // Check if the last cert we added has its thumbprint in the anchor store.
+                // This handles the case where the root cert isn't in the pool but we have
+                // enough chain certs to reach a trust boundary.
+                if let Some(store) = anchors
+                    && let Some(&last) = out.last()
+                    && let Ok(thumb) = cert_sha1_thumbprint(last)
+                    && store.contains_thumbprint(&thumb)
+                {
+                    break;
+                }
+                return Err(anyhow!(
                     "could not resolve issuer certificate for subject {:?}",
                     issuer_dn
-                )
-            })?;
+                ));
+            }
+        };
 
         out.push(parent);
         steps += 1;
@@ -36,6 +66,15 @@ pub fn issuer_chain_excluding_leaf<'a>(leaf: &'a Cert, pool: &'a [Cert]) -> Resu
         if parent.subject_name() == parent.issuer_name() {
             break;
         }
+
+        // Check if the parent we just added is already in the anchor store
+        if let Some(store) = anchors
+            && let Ok(thumb) = cert_sha1_thumbprint(parent)
+            && store.contains_thumbprint(&thumb)
+        {
+            break;
+        }
+
         issuer_dn = parent.issuer_name();
     }
 
@@ -45,12 +84,24 @@ pub fn issuer_chain_excluding_leaf<'a>(leaf: &'a Cert, pool: &'a [Cert]) -> Resu
 /// Follow `leaf.issuer_name` through `pool`, fetching missing issuers through explicit online
 /// options when enabled. Returned certificates are owned so fetched intermediates can live for
 /// the duration of the caller's verification step without mutating global state.
+///
+/// If `anchors` is provided and an intermediate cert's SHA-1 thumbprint is already in the
+/// anchor store, chain building terminates at that cert (trust at boundary).
 pub fn issuer_chain_excluding_leaf_online(
     leaf: &Cert,
     pool: &mut Vec<Cert>,
     online: &crate::policy::OnlineTrustOptions,
+    anchors: Option<&AnchorStore>,
 ) -> Result<Vec<Cert>> {
     if leaf.subject_name() == leaf.issuer_name() {
+        return Ok(Vec::new());
+    }
+
+    // Check if the leaf itself is already trusted
+    if let Some(store) = anchors
+        && let Ok(thumb) = cert_sha1_thumbprint(leaf)
+        && store.contains_thumbprint(&thumb)
+    {
         return Ok(Vec::new());
     }
 
@@ -67,6 +118,15 @@ pub fn issuer_chain_excluding_leaf_online(
             }
             let done = parent.subject_name() == parent.issuer_name();
             out.push(parent.clone());
+
+            // Check if the parent is already trusted (trust at boundary)
+            if let Some(store) = anchors
+                && let Ok(thumb) = cert_sha1_thumbprint(&parent)
+                && store.contains_thumbprint(&thumb)
+            {
+                break;
+            }
+
             if done {
                 break;
             }
@@ -74,8 +134,17 @@ pub fn issuer_chain_excluding_leaf_online(
             continue;
         }
 
+        // Try AIA fetch before declaring failure
         let fetched = crate::online::issuer_candidates_from_aia(&current, online)?;
         if fetched.is_empty() {
+            // Check if the last cert we added has its thumbprint in the anchor store
+            if let Some(store) = anchors
+                && let Some(last) = out.last()
+                && let Ok(thumb) = cert_sha1_thumbprint(last)
+                && store.contains_thumbprint(&thumb)
+            {
+                break;
+            }
             return Err(anyhow!(
                 "could not resolve issuer certificate for subject {:?}",
                 issuer_dn
@@ -163,7 +232,7 @@ mod tests {
     fn issuer_chain_single_ca() {
         let (ca, leaf) = synthetic_ca_and_leaf();
         let pool = vec![ca.clone(), leaf.clone()];
-        let chain = issuer_chain_excluding_leaf(&leaf, &pool).expect("chain");
+        let chain = issuer_chain_excluding_leaf(&leaf, &pool, None).expect("chain");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].subject_name(), ca.subject_name());
     }

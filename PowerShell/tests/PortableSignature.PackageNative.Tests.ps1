@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+# Disable auto-trust during tests — test certificates are self-signed.
+$env:PSIGN_NO_AUTO_TRUST = '1'
+
 function script:Ensure-PortableSignatureModule {
     if (-not (Get-Command Set-PortableSignature -ErrorAction SilentlyContinue)) {
         $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
