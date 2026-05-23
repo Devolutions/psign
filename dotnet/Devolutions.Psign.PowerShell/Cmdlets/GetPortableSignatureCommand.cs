@@ -20,13 +20,14 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
     public string[] FilePath { get; set; } = [];
 
     [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
-    [Alias("PSPath")]
+    [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
     public string[] SourcePathOrExtension { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
+    [ValidateNotNullOrEmpty]
     public byte[] Content { get; set; } = [];
 
     [Parameter]

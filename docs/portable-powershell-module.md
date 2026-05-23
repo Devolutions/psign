@@ -7,7 +7,7 @@
 - `Set-PortableSignature`
 - `Get-PortableSignature`
 
-Both cmdlets accept `-FilePath` and `-LiteralPath`. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes PowerShell files plus newly supported portable signing neighbors such as `.dll`, `.exe`, `.nupkg`, `.snupkg`, `.vsix`, `.manifest`, `.application`, `.vsto`, and `.appinstaller`.
+Both cmdlets accept `-FilePath` and `-LiteralPath`. `-LiteralPath` accepts the same `PSPath` and `LP` aliases as the built-in Authenticode cmdlets. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes PowerShell files plus newly supported portable signing neighbors such as `.dll`, `.exe`, `.nupkg`, `.snupkg`, `.vsix`, `.manifest`, `.application`, `.vsto`, and `.appinstaller`.
 
 Both cmdlets also support the built-in Authenticode content parameter shape:
 
@@ -44,13 +44,15 @@ Get-PortableSignature -LiteralPath .\tool.exe -AnchorDirectory .\anchors
 Get-PortableSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate -AsOf (Get-Date) -RevocationMode Off
 ```
 
+The output object is portable-specific, but its compatibility properties mirror the built-in Authenticode shape: `Status` is a `System.Management.Automation.SignatureStatus`, `SignatureType` is a `System.Management.Automation.SignatureType`, and `SignerCertificate`, `TimeStamperCertificate`, `StatusMessage`, `Path`, `IsOSBinary`, and `SubjectAlternativeName` are exposed by the same names. Portable-specific details remain available through `Format`, `PortableStatus`, `TrustStatus`, `PortableTrustStatus`, `TimestampKinds`, `TimestampSigningTime`, `SignatureCount`, and `PortableDiagnostics`.
+
 When trust is requested, the output object's `TrustStatus` is `Valid` or `NotTrusted`, while `Status` continues to report the overall portable signature result. Timestamped signatures expose `TimestampKinds`, `TimeStamperCertificate`, and `TimestampSigningTime` when the portable timestamp parser can extract the signing date.
 
 Trust verification is offline by default. `-OnlineAia` enables issuer retrieval, `-OnlineOcsp` enables OCSP checks, and `-RevocationMode Off|BestEffort|Require` controls revocation enforcement in the portable trust engine.
 
 ## Supported portable formats
 
-The current PowerShell test suite covers signing and validation through the module surface for:
+The current PowerShell test suite covers command metadata compatibility plus signing and validation through the module surface for:
 
 - PE files
 - CAB archives
@@ -83,3 +85,62 @@ pwsh -File .\PowerShell\package.ps1 -Configuration Release -NativeArtifactsRoot 
 ```
 
 The native artifact root should contain directories such as `psign-core-win-x64`, `psign-core-linux-x64`, and `psign-core-osx-arm64`, each containing the packaged native library name for that RID.
+
+## Migrating from built-in Authenticode cmdlets
+
+The portable module cmdlets (`Get-PortableSignature`, `Set-PortableSignature`) are designed as near drop-in replacements for `Get-AuthenticodeSignature` and `Set-AuthenticodeSignature`. The following table shows common migration patterns:
+
+| Built-in | Portable equivalent |
+| --- | --- |
+| `Get-AuthenticodeSignature -LiteralPath .\f.exe` | `Get-PortableSignature -LiteralPath .\f.exe` |
+| `Set-AuthenticodeSignature -LiteralPath .\f.exe -Certificate $cert` | `Set-PortableSignature -LiteralPath .\f.exe -Certificate $cert` |
+| `$sig.Status -eq [SignatureStatus]::Valid` | Same — `Status` is typed as `SignatureStatus` |
+| `$sig.SignatureType -eq [SignatureType]::Authenticode` | Same — `SignatureType` is typed as `SignatureType` |
+| `$sig.SignerCertificate.Thumbprint` | Same |
+| `$sig.TimeStamperCertificate` | Same |
+
+### Output property compatibility
+
+| Property | Type | Notes |
+| --- | --- | --- |
+| `Status` | `System.Management.Automation.SignatureStatus` | Enum-typed; same values as built-in. |
+| `StatusMessage` | `string` | Free-text description of the result. |
+| `SignatureType` | `System.Management.Automation.SignatureType` | `None`, `Authenticode`, or `Catalog`. |
+| `SignerCertificate` | `X509Certificate2?` | Decoded from CMS signer. |
+| `TimeStamperCertificate` | `X509Certificate2?` | Decoded from timestamp CMS counter-signature. |
+| `IsOSBinary` | `bool` | Always `false` — no OS catalog lookup. |
+| `SubjectAlternativeName` | `string[]?` | Extracted from signer certificate SAN extension. |
+| `Path` | `string` | Input file path. |
+
+Scripts that test `$sig.Status -eq 'Valid'` or `$sig.Status -eq [SignatureStatus]::Valid` continue to work because PowerShell coerces between strings and enums.
+
+### Portable-only properties
+
+These additional properties are available on the output object and have no built-in equivalent:
+
+- `Format` — file format string (e.g. `PE`, `Cab`, `Msi`, `Catalog`, `NuGet`).
+- `PortableStatus` / `PortableTrustStatus` — string accessors for raw status values.
+- `TrustStatus` — explicit trust result (`SignatureStatus?`); only populated when trust anchors are supplied.
+- `SignatureCount`, `SignerIndex`, `EmbeddedCertificateCount` — multi-signature detail.
+- `DigestAlgorithm` — OID or name of the Authenticode digest.
+- `TimestampKinds`, `TimestampSigningTime` — timestamp protocol detail.
+- `PortableDiagnostics` — diagnostic messages from the portable verification engine.
+- `Content` — signed content bytes (content-mode signing only).
+
+### Intentional behavioral differences
+
+| Behavior | Built-in | Portable |
+| --- | --- | --- |
+| Trust evaluation | Delegates to `WinVerifyTrust` / OS trust store | Validates digest binding; trust is opt-in via anchors |
+| Directory inputs | Rejected as containers | Recursively processed as PowerShell module trees |
+| Content signing (`Set-`) | Exposes metadata but throws `NotImplementedException` | Fully implemented, returns signed bytes |
+| Non-exportable private keys | Works via CNG provider | Fails; use file-backed keys, PFX, or portable cert store |
+| Catalog member lookup | Reports `SignatureType = Catalog` for catalog-protected files | Reports catalog format only for `.cat` files directly |
+| SHA1 signing | Accepted by Windows CryptoAPI | Not supported; minimum is SHA-256 |
+| `-HashAlgorithm` values | Arbitrary string (resolved by CNG) | `Sha256`, `Sha384`, `Sha512` (validated) |
+
+### Parameter alias compatibility
+
+- `-LiteralPath` accepts aliases `PSPath` and `LP` (matching built-in).
+- `-FilePath` accepts alias `Path` (additive, not present on built-in but commonly piped).
+- `-SourcePathOrExtension` and `-Content` have the same pipeline binding and validation attributes as the built-in content parameter set.

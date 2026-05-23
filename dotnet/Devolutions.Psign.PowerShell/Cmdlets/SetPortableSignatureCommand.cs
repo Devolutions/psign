@@ -25,13 +25,14 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
     public string[] FilePath { get; set; } = [];
 
     [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
-    [Alias("PSPath")]
+    [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
     public string[] SourcePathOrExtension { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
+    [ValidateNotNullOrEmpty]
     public byte[] Content { get; set; } = [];
 
     [Parameter]
@@ -400,6 +401,74 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                 ErrorCategory.InvalidArgument,
                 this));
         }
+
+        ValidateSelectedCertificate();
+    }
+
+    private void ValidateSelectedCertificate()
+    {
+        if (Certificate is not null)
+        {
+            ValidateCodeSigningCertificate(Certificate, requirePrivateKey: true, "-Certificate");
+        }
+        else if (CertificatePath is not null)
+        {
+            string resolved = SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath);
+            using X509Certificate2 certificate = new(resolved);
+            ValidateCodeSigningCertificate(certificate, requirePrivateKey: false, "-CertificatePath");
+        }
+        else if (PfxPath is not null)
+        {
+            ValidateCodeSigningCertificate(LoadPfxCertificate(), requirePrivateKey: true, "-PfxPath");
+        }
+        else if (Thumbprint is not null)
+        {
+            // The portable store loads the private key from a separate .key file,
+            // so the X509Certificate2 from the .der file won't report HasPrivateKey.
+            // LoadStoreCertificate() already validates the .key file exists.
+            ValidateCodeSigningCertificate(LoadStoreCertificate(), requirePrivateKey: false, "-Thumbprint");
+        }
+    }
+
+    private static void ValidateCodeSigningCertificate(X509Certificate2? certificate, bool requirePrivateKey, string source)
+    {
+        if (certificate is null)
+        {
+            throw new PSInvalidOperationException($"{source} did not resolve to a signing certificate.");
+        }
+
+        if (requirePrivateKey && !certificate.HasPrivateKey)
+        {
+            throw new PSInvalidOperationException($"{source} must include an accessible private key.");
+        }
+
+        foreach (X509Extension extension in certificate.Extensions)
+        {
+            if (extension is X509KeyUsageExtension keyUsage
+                && (keyUsage.KeyUsages & X509KeyUsageFlags.DigitalSignature) == 0)
+            {
+                throw new PSInvalidOperationException($"{source} certificate is not valid for digital signatures.");
+            }
+
+            if (extension is X509EnhancedKeyUsageExtension eku
+                && !HasCodeSigningEku(eku))
+            {
+                throw new PSInvalidOperationException($"{source} certificate is not valid for code signing.");
+            }
+        }
+    }
+
+    private static bool HasCodeSigningEku(X509EnhancedKeyUsageExtension eku)
+    {
+        foreach (Oid oid in eku.EnhancedKeyUsages)
+        {
+            if (oid.Value == "1.3.6.1.5.5.7.3.3")
+            {
+                return true;
+            }
+        }
+
+        return eku.EnhancedKeyUsages.Count == 0;
     }
 
     private X509Certificate2? LoadPfxCertificate()
