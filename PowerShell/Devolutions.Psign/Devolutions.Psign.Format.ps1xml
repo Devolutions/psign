@@ -131,5 +131,64 @@
       </TableControl>
     </View>
 
+    <!-- Get-PortableSignature / Set-PortableSignature table -->
+    <View>
+      <Name>PortableSignature_Table</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Models.PortableSignature</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader><Label>Path</Label><Width>40</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Status</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Type</Label><Width>14</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Signer</Label><Width>40</Width></TableColumnHeader>
+          <TableColumnHeader><Label>Timestamp</Label><Width>20</Width></TableColumnHeader>
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem><ScriptBlock>if ($_.SourcePathOrExtension) { $_.SourcePathOrExtension } else { Split-Path $_.Path -Leaf }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><PropertyName>Status</PropertyName></TableColumnItem>
+              <TableColumnItem><PropertyName>SignatureType</PropertyName></TableColumnItem>
+              <TableColumnItem><ScriptBlock>if ($_.SignerCertificate) { $_.SignerCertificate.Subject -replace '^CN=','' -replace ',.*$','' } else { '' }</ScriptBlock></TableColumnItem>
+              <TableColumnItem><ScriptBlock>if ($_.TimestampSigningTime) { $_.TimestampSigningTime.ToString('yyyy-MM-dd HH:mm') } else { '' }</ScriptBlock></TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+
+    <!-- Get-PortableSignature / Set-PortableSignature detailed list -->
+    <View>
+      <Name>PortableSignature_List</Name>
+      <ViewSelectedBy>
+        <TypeName>Devolutions.Psign.PowerShell.Models.PortableSignature</TypeName>
+      </ViewSelectedBy>
+      <ListControl>
+        <ListEntries>
+          <ListEntry>
+            <ListItems>
+              <ListItem><PropertyName>Path</PropertyName></ListItem>
+              <ListItem><PropertyName>Status</PropertyName></ListItem>
+              <ListItem><PropertyName>StatusMessage</PropertyName></ListItem>
+              <ListItem><PropertyName>SignatureType</PropertyName></ListItem>
+              <ListItem><Label>Format</Label><PropertyName>Format</PropertyName></ListItem>
+              <ListItem><Label>SignerCertificate</Label><ScriptBlock>if ($_.SignerCertificate) { "[Subject]`n  $($_.SignerCertificate.Subject)`n[Issuer]`n  $($_.SignerCertificate.Issuer)`n[Thumbprint]`n  $($_.SignerCertificate.Thumbprint)`n[Not Before]`n  $($_.SignerCertificate.NotBefore)`n[Not After]`n  $($_.SignerCertificate.NotAfter)" }</ScriptBlock></ListItem>
+              <ListItem><Label>TimeStamperCertificate</Label><ScriptBlock>if ($_.TimeStamperCertificate) { "[Subject]`n  $($_.TimeStamperCertificate.Subject)" }</ScriptBlock></ListItem>
+              <ListItem><PropertyName>TimestampSigningTime</PropertyName></ListItem>
+              <ListItem><PropertyName>DigestAlgorithm</PropertyName></ListItem>
+              <ListItem><PropertyName>SignatureCount</PropertyName></ListItem>
+              <ListItem><PropertyName>EmbeddedCertificateCount</PropertyName></ListItem>
+              <ListItem><Label>TrustStatus</Label><PropertyName>PortableTrustStatus</PropertyName></ListItem>
+              <ListItem><PropertyName>IsOSBinary</PropertyName></ListItem>
+              <ListItem><PropertyName>SubjectAlternativeName</PropertyName></ListItem>
+              <ListItem><Label>Diagnostics</Label><ScriptBlock>if ($_.PortableDiagnostics.Count -gt 0) { $_.PortableDiagnostics -join "`n" }</ScriptBlock></ListItem>
+            </ListItems>
+          </ListEntry>
+        </ListEntries>
+      </ListControl>
+    </View>
+
   </ViewDefinitions>
 </Configuration>

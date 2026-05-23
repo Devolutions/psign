@@ -21,18 +21,18 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
     private X509Certificate2? storeCertificate;
     private string? storePrivateKeyDerBase64;
 
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to files to sign. Wildcards are supported.")]
     [Alias("Path")]
     public string[] FilePath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to files. No wildcard expansion.")]
     [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "File name or extension hint for the content bytes.")]
     public string[] SourcePathOrExtension { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "Raw file content bytes to sign.")]
     [ValidateNotNullOrEmpty]
     public byte[] Content { get; set; } = [];
 

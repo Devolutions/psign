@@ -18,7 +18,7 @@ namespace Devolutions.Psign.PowerShell.Cmdlets;
 [OutputType(typeof(PsignModuleValidationResult))]
 public sealed class TestPsignModuleCommand : PSCmdlet
 {
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, HelpMessage = "Path to the PowerShell module directory to validate.")]
     [Alias("ModulePath", "PSPath")]
     public string Path { get; set; } = string.Empty;
 

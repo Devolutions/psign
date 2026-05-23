@@ -17,7 +17,7 @@ namespace Devolutions.Psign.PowerShell.Cmdlets;
 [OutputType(typeof(PsignModuleSigningResult))]
 public sealed class ProtectPsignModuleCommand : PSCmdlet
 {
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, HelpMessage = "Path to the PowerShell module directory to sign.")]
     [Alias("ModulePath", "PSPath")]
     public string Path { get; set; } = string.Empty;
 

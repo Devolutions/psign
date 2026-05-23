@@ -15,11 +15,11 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
 
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to script files to strip signatures from.")]
     [Alias("Path")]
     public string[] FilePath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to script files. No wildcard expansion.")]
     [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
