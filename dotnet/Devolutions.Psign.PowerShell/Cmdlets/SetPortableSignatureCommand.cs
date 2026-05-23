@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
 using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Provider;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -648,84 +649,25 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
 
     private string ResolveCertStoreBaseDirectory()
     {
-        if (CertStoreDirectory is not null)
-        {
-            return SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertStoreDirectory);
-        }
-
-        string? envStore = Environment.GetEnvironmentVariable("PSIGN_CERT_STORE");
-        if (!string.IsNullOrWhiteSpace(envStore))
-        {
-            return envStore;
-        }
-
-        string? home = Environment.GetEnvironmentVariable("HOME")
-            ?? Environment.GetEnvironmentVariable("USERPROFILE");
-        if (string.IsNullOrWhiteSpace(home))
-        {
-            throw new PSInvalidOperationException(
-                "Cannot resolve the default portable cert-store path. Set -CertStoreDirectory or PSIGN_CERT_STORE.");
-        }
-
-        return Path.Combine(home, ".psign", "cert-store");
+        string? resolved = CertStoreDirectory is not null
+            ? SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertStoreDirectory)
+            : null;
+        return CertStorePathHelper.ResolveBaseDirectory(resolved);
     }
 
     private static string NormalizeStoreName(string storeName)
     {
-        string trimmed = storeName.Trim();
-        if (trimmed.Length == 0 || trimmed.Contains('/') || trimmed.Contains('\\') || trimmed.Contains('\0'))
-        {
-            throw new PSInvalidOperationException("Portable certificate store name must not be empty or contain path separators.");
-        }
-
-        return trimmed.ToLowerInvariant() switch
-        {
-            "my" => "MY",
-            "root" => "Root",
-            "ca" => "CA",
-            "trust" => "Trust",
-            "disallowed" => "Disallowed",
-            _ => trimmed,
-        };
+        return CertStorePathHelper.NormalizeStoreName(storeName);
     }
 
     private static string NormalizeSha1Thumbprint(string thumbprint)
     {
-        string clean = new(thumbprint.Where(c => c != ':' && !char.IsWhiteSpace(c)).ToArray());
-        if (clean.Length != 40 || clean.Any(c => !Uri.IsHexDigit(c)))
-        {
-            throw new PSInvalidOperationException("SHA1 thumbprint must be 40 hexadecimal characters.");
-        }
-
-        return clean.ToUpperInvariant();
+        return CertStorePathHelper.NormalizeThumbprint(thumbprint);
     }
 
     private static byte[] ReadPkcs8PrivateKeyDer(string keyPath)
     {
-        string text = File.ReadAllText(keyPath);
-        const string begin = "-----BEGIN PRIVATE KEY-----";
-        const string end = "-----END PRIVATE KEY-----";
-        int beginIndex = text.IndexOf(begin, StringComparison.Ordinal);
-        int endIndex = text.IndexOf(end, StringComparison.Ordinal);
-        if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex)
-        {
-            throw new PSInvalidOperationException(
-                $"Portable cert-store key '{keyPath}' must be unencrypted PKCS#8 PEM (BEGIN PRIVATE KEY).");
-        }
-
-        int base64Start = beginIndex + begin.Length;
-        string base64 = text[base64Start..endIndex];
-        string compact = new(base64.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        try
-        {
-            return Convert.FromBase64String(compact);
-        }
-        catch (FormatException ex)
-        {
-            throw new PSInvalidOperationException(
-                $"Portable cert-store key '{keyPath}' contains invalid PKCS#8 PEM base64.",
-                ex);
-        }
+        return CertStorePathHelper.ReadPkcs8PrivateKeyDer(keyPath);
     }
 
     private static string ContentFileName(string sourcePathOrExtension)
