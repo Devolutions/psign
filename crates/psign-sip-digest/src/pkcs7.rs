@@ -564,6 +564,7 @@ pub fn create_pkcs7_signed_data_der_with_rsa_signature(
 /// Create generic PKCS#7 `ContentInfo(SignedData)` DER from externally produced RSA signature bytes
 /// and caller-supplied signed attributes. The caller must ensure `encrypted_digest` signs the DER
 /// encoding of `signed_attrs`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
     econtent_type: ObjectIdentifier,
     econtent_der: &[u8],
