@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use psign_opc_sign::nuget;
+use psign_sip_digest::pkcs7;
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use x509_cert::builder::{Builder, CertificateBuilder, Profile};
-use x509_cert::der::Encode;
+use x509_cert::der::{Encode, asn1::OctetString};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
@@ -173,6 +174,8 @@ fn code_signs_top_level_nupkg_with_local_cert_key() {
         .success()
         .stdout(predicate::str::contains("signed=yes"))
         .stdout(predicate::str::contains("signature_stored=yes"));
+
+    assert_nupkg_signature_has_nuget_author_attrs(&output);
 }
 
 #[test]
@@ -228,6 +231,8 @@ fn code_signs_nupkg_with_portable_cert_store_identity() {
         .success()
         .stdout(predicate::str::contains("signed=yes"))
         .stdout(predicate::str::contains("signature_stored=yes"));
+
+    assert_nupkg_signature_has_nuget_author_attrs(&output);
 }
 
 #[test]
@@ -313,7 +318,7 @@ fn code_signs_nupkg_with_artifact_signing_identity() {
     )
     .unwrap();
 
-    let (mut guard, endpoint) = spawn_artifact_signing_server(2);
+    let (mut guard, endpoint) = spawn_artifact_signing_server(4);
     let mut cmd = psign();
     cmd.args(["code", "--base-directory"])
         .arg(base)
@@ -637,6 +642,45 @@ fn code_signs_appinstaller_companion_with_local_cert_key() {
         .stdout(predicate::str::contains(
             "appinstaller-verify-companion: ok",
         ));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn code_signs_appinstaller_companion_with_authenticode_timestamp() {
+    let repo = repo_root();
+    let temp = tempfile::tempdir().unwrap();
+    let cert = temp.path().join("signer.der");
+    let key = temp.path().join("signer.pkcs8");
+    let output = temp.path().join("sample.appinstaller.p7");
+    write_test_rsa_cert_key(&cert, &key);
+    let (mut guard, timestamp_url) = spawn_timestamp_server();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(&repo)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--timestamp-url",
+            &timestamp_url,
+            "--timestamp-digest",
+            "sha256",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    cmd.assert().success();
+    let status = guard.0.wait().expect("timestamp server exit");
+    assert!(status.success(), "timestamp server failed with {status}");
+
+    let signature_der = std::fs::read(&output).expect("read App Installer companion signature");
+    assert_pkcs7_has_unsigned_attr(
+        &signature_der,
+        pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID,
+        pkcs7::PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+    );
 }
 
 #[test]
@@ -1718,6 +1762,11 @@ fn code_signs_nupkg_with_rfc3161_timestamp() {
     assert!(status.success(), "timestamp server failed with {status}");
 
     let signature_der = nuget::extract_signature_path(&output).expect("extract NuGet signature");
+    assert_pkcs7_has_unsigned_attr(
+        &signature_der,
+        pkcs7::PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+        pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID,
+    );
     std::fs::write(&signature, signature_der).unwrap();
     let mut inspect = psign();
     inspect
@@ -1727,10 +1776,8 @@ fn code_signs_nupkg_with_rfc3161_timestamp() {
     inspect
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "microsoft_nested_rfc3161_attribute",
-        ))
-        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+        .stdout(predicate::str::contains("id_aa_time_stamp_token"))
+        .stdout(predicate::str::contains("1.2.840.113549.1.9.16.2.14"));
 }
 
 #[test]
@@ -2226,6 +2273,90 @@ fn extract_zip_entry(zip_path: &Path, entry_name: &str, output: &Path) {
     std::fs::write(output, bytes).unwrap();
 }
 
+fn assert_nupkg_signature_has_nuget_author_attrs(path: &Path) {
+    let signature_der = nuget::extract_signature_path(path).expect("extract NuGet signature");
+    let signed_data =
+        pkcs7::parse_pkcs7_signed_data_der(&signature_der).expect("parse NuGet signature");
+    assert_eq!(
+        signed_data.encap_content_info.econtent_type.to_string(),
+        pkcs7::PKCS7_ID_DATA_OID
+    );
+    let econtent = signed_data
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .expect("NuGet signature embeds id-data content");
+    let content = econtent
+        .decode_as::<OctetString>()
+        .expect("NuGet id-data content OCTET STRING");
+    let expected_content =
+        nuget::signed_package_signature_content_path(path, nuget::NuGetHashAlgorithm::Sha256)
+            .expect("expected NuGet signature content");
+    assert_eq!(content.as_bytes(), expected_content.as_slice());
+
+    let signer_infos = signed_data.signer_infos.0.as_slice();
+    let signer_info = signer_infos.first().expect("NuGet signature signer info");
+    let signed_attrs = signer_info
+        .signed_attrs
+        .as_ref()
+        .expect("NuGet signature signed attributes");
+    let commitment_attr = signed_attrs
+        .iter()
+        .find(|attr| attr.oid == pkcs7::PKCS9_COMMITMENT_TYPE_INDICATION_OID)
+        .expect("NuGet author commitment-type signed attribute");
+    let commitment_values = commitment_attr.values.as_slice();
+    assert_eq!(commitment_values.len(), 1);
+
+    let proof_of_origin_oid = pkcs7::COMMITMENT_TYPE_IDENTIFIER_PROOF_OF_ORIGIN_OID
+        .to_der()
+        .expect("proofOfOrigin OID DER");
+    let mut expected_value = vec![0x30, proof_of_origin_oid.len() as u8];
+    expected_value.extend_from_slice(&proof_of_origin_oid);
+    assert_eq!(
+        commitment_values[0].to_der().expect("commitment value DER"),
+        expected_value
+    );
+
+    assert!(
+        signed_attrs
+            .iter()
+            .any(|attr| attr.oid == pkcs7::PKCS9_SIGNING_TIME_OID),
+        "NuGet author signing-time signed attribute"
+    );
+    let signing_certificate_v2 = signed_attrs
+        .iter()
+        .find(|attr| attr.oid == pkcs7::PKCS9_SIGNING_CERTIFICATE_V2_OID)
+        .expect("NuGet author signing-certificate-v2 signed attribute");
+    assert_eq!(signing_certificate_v2.values.as_slice().len(), 1);
+}
+
+fn assert_pkcs7_has_unsigned_attr(
+    signature_der: &[u8],
+    expected: x509_cert::der::asn1::ObjectIdentifier,
+    unexpected: x509_cert::der::asn1::ObjectIdentifier,
+) {
+    let signed_data =
+        pkcs7::parse_pkcs7_signed_data_der(signature_der).expect("parse PKCS#7 signature");
+    let signer_info = signed_data
+        .signer_infos
+        .0
+        .as_slice()
+        .first()
+        .expect("PKCS#7 signer info");
+    let unsigned_attrs = signer_info
+        .unsigned_attrs
+        .as_ref()
+        .expect("PKCS#7 unsigned attributes");
+    assert!(
+        unsigned_attrs.iter().any(|attr| attr.oid == expected),
+        "expected unsigned attribute {expected}"
+    );
+    assert!(
+        unsigned_attrs.iter().all(|attr| attr.oid != unexpected),
+        "unexpected unsigned attribute {unexpected}"
+    );
+}
+
 fn sample_clickonce_manifest() -> &'static str {
     r#"<?xml version="1.0" encoding="utf-8"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1">
@@ -2363,7 +2494,7 @@ fn write_test_rsa_pfx(pfx_path: &Path, password: &str) {
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(85u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,
@@ -2402,7 +2533,7 @@ fn write_test_rsa_cert_key_inner(cert_path: &Path, key_path: &Path, pem_path: Op
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(84u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,

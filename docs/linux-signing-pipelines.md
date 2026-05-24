@@ -111,7 +111,7 @@ Portable package helpers are useful for split-signing experiments and CI asserti
 ```bash
 psign-tool portable nupkg-signature-content package.nupkg --output signature-content.txt
 psign-tool portable nupkg-signature-pkcs7 package.nupkg --cert signer.der --key signer.pkcs8 --timestamp-url http://tsa --timestamp-digest sha256 --output signature.p7s
-psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --encoding raw --output prehash.bin
+psign-tool portable nupkg-signature-pkcs7-prehash package.nupkg --cert signer.der --encoding raw --output prehash.bin
 psign-tool portable nupkg-signature-pkcs7-from-signature package.nupkg --cert signer.der --signature remote.sig --output signature.p7s
 psign-tool portable nupkg-verify-signature-content package.nupkg --content signature-content.txt
 psign-tool portable nupkg-embed-signature package.nupkg --signature signature.p7s --output signed.nupkg
@@ -200,7 +200,7 @@ For full portable PE signing, prefer **`portable sign-pe --azure-key-vault-*`** 
 | Subject | Prehash for KV **`RS256`** (`--encoding raw`, 32 bytes) | Same bytes via extract + generic PKCS#7 |
 |---------|------------------------------------------------------------|-------------------------------------------|
 | PE | **`pe-signer-rs256-prehash`** (`--index` = cert-table row, **`--signer-index`** = **`SignerInfo`**) | **`extract-pe-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
-| NuGet package CMS | **`nupkg-signature-pkcs7-prehash`** | **`nupkg-signature-pkcs7-from-signature`** assembles `.signature.p7s` from the remote RSA signature |
+| NuGet package CMS | **`nupkg-signature-pkcs7-prehash --cert signer.der`** | **`nupkg-signature-pkcs7-from-signature`** assembles `.signature.p7s` from the remote RSA signature |
 | CAB | **`cab-signer-rs256-prehash`** | **`extract-cab-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
 | MSI | **`msi-signer-rs256-prehash`** | **`extract-msi-pkcs7`** → **`pkcs7-signer-rs256-prehash`** |
 | Raw PKCS#7 (e.g. **`.cat`**) | **`catalog-signer-rs256-prehash`** | **`pkcs7-signer-rs256-prehash`** on the same file |

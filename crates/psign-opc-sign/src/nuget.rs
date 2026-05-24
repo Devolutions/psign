@@ -10,6 +10,72 @@ use zip::write::FileOptions;
 pub const PACKAGE_SIGNATURE_FILE_NAME: &str = ".signature.p7s";
 pub const SIGNATURE_CONTENT_VERSION: &str = "1";
 
+fn nuget_zip_options(compression: zip::CompressionMethod) -> FileOptions {
+    FileOptions::default().compression_method(compression)
+}
+
+fn normalize_nuget_zip_metadata(bytes: &mut [u8]) -> Result<()> {
+    let eocd = bytes
+        .windows(4)
+        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+        .ok_or_else(|| anyhow!("ZIP central directory end not found"))?;
+    if eocd + 22 > bytes.len() {
+        return Err(anyhow!("truncated ZIP central directory end"));
+    }
+
+    let central_dir_size = u32::from_le_bytes(
+        bytes[eocd + 12..eocd + 16]
+            .try_into()
+            .expect("central directory size slice"),
+    ) as usize;
+    let central_dir_offset = u32::from_le_bytes(
+        bytes[eocd + 16..eocd + 20]
+            .try_into()
+            .expect("central directory offset slice"),
+    ) as usize;
+    let central_dir_end = central_dir_offset
+        .checked_add(central_dir_size)
+        .ok_or_else(|| anyhow!("ZIP central directory size overflow"))?;
+    if central_dir_end > bytes.len() {
+        return Err(anyhow!("ZIP central directory extends past end of file"));
+    }
+
+    let mut pos = central_dir_offset;
+    while pos < central_dir_end {
+        if pos + 46 > bytes.len() || bytes[pos..pos + 4] != [0x50, 0x4b, 0x01, 0x02] {
+            return Err(anyhow!("invalid ZIP central directory entry"));
+        }
+        bytes[pos + 5] = 0;
+        bytes[pos + 38..pos + 42].fill(0);
+
+        let name_len = u16::from_le_bytes(
+            bytes[pos + 28..pos + 30]
+                .try_into()
+                .expect("file name length slice"),
+        ) as usize;
+        let extra_len = u16::from_le_bytes(
+            bytes[pos + 30..pos + 32]
+                .try_into()
+                .expect("extra field length slice"),
+        ) as usize;
+        let comment_len = u16::from_le_bytes(
+            bytes[pos + 32..pos + 34]
+                .try_into()
+                .expect("file comment length slice"),
+        ) as usize;
+        pos = pos
+            .checked_add(46)
+            .and_then(|n| n.checked_add(name_len))
+            .and_then(|n| n.checked_add(extra_len))
+            .and_then(|n| n.checked_add(comment_len))
+            .ok_or_else(|| anyhow!("ZIP central directory entry size overflow"))?;
+    }
+    if pos != central_dir_end {
+        return Err(anyhow!("ZIP central directory entry length mismatch"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NuGetHashAlgorithm {
     Sha256,
@@ -243,7 +309,7 @@ where
 
 fn write_package_without_signature_impl<R, W>(
     reader: R,
-    writer: W,
+    mut writer: W,
     require_signature: bool,
 ) -> Result<()>
 where
@@ -251,33 +317,39 @@ where
     W: Write + Seek,
 {
     let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
-    let mut output = zip::ZipWriter::new(writer);
+    let mut out = std::io::Cursor::new(Vec::new());
     let mut had_signature = false;
 
-    for i in 0..input.len() {
-        let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
-        let name = normalize_zip_part_name(file.name())?;
-        if name == PACKAGE_SIGNATURE_FILE_NAME {
-            had_signature = true;
-            continue;
+    {
+        let mut output = zip::ZipWriter::new(&mut out);
+        for i in 0..input.len() {
+            let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
+            let name = normalize_zip_part_name(file.name())?;
+            if name == PACKAGE_SIGNATURE_FILE_NAME {
+                had_signature = true;
+                continue;
+            }
+
+            let options = nuget_zip_options(file.compression());
+            if file.is_dir() {
+                output.add_directory(name, options)?;
+            } else {
+                output.start_file(name, options)?;
+                std::io::copy(&mut file, &mut output)?;
+            }
         }
 
-        let options = FileOptions::default().compression_method(file.compression());
-        if file.is_dir() {
-            output.add_directory(name, options)?;
-        } else {
-            output.start_file(name, options)?;
-            std::io::copy(&mut file, &mut output)?;
+        if require_signature && !had_signature {
+            return Err(anyhow!(
+                "package does not contain {PACKAGE_SIGNATURE_FILE_NAME}"
+            ));
         }
-    }
 
-    if require_signature && !had_signature {
-        return Err(anyhow!(
-            "package does not contain {PACKAGE_SIGNATURE_FILE_NAME}"
-        ));
+        output.finish()?;
     }
-
-    output.finish()?;
+    let mut bytes = out.into_inner();
+    normalize_nuget_zip_metadata(&mut bytes)?;
+    writer.write_all(&bytes)?;
     Ok(())
 }
 
@@ -318,7 +390,7 @@ pub fn embed_signature_path(
 
 pub fn embed_signature<R, W>(
     reader: R,
-    writer: W,
+    mut writer: W,
     signature_der: &[u8],
     overwrite: bool,
 ) -> Result<()>
@@ -330,40 +402,47 @@ where
         return Err(anyhow!("NuGet package signature payload is empty"));
     }
     let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
-    let mut output = zip::ZipWriter::new(writer);
+    let mut out = std::io::Cursor::new(Vec::new());
     let mut had_signature = false;
 
-    for i in 0..input.len() {
-        let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
-        let name = normalize_zip_part_name(file.name())?;
-        if name == PACKAGE_SIGNATURE_FILE_NAME {
-            had_signature = true;
-            if overwrite {
-                continue;
+    {
+        let mut output = zip::ZipWriter::new(&mut out);
+        for i in 0..input.len() {
+            let mut file = input.by_index(i).context("read NuGet ZIP entry")?;
+            let name = normalize_zip_part_name(file.name())?;
+            if name == PACKAGE_SIGNATURE_FILE_NAME {
+                had_signature = true;
+                if overwrite {
+                    continue;
+                }
+                return Err(anyhow!(
+                    "package already contains {}; pass overwrite to replace it",
+                    PACKAGE_SIGNATURE_FILE_NAME
+                ));
             }
-            return Err(anyhow!(
-                "package already contains {}; pass overwrite to replace it",
-                PACKAGE_SIGNATURE_FILE_NAME
-            ));
+
+            let options = nuget_zip_options(file.compression());
+            if file.is_dir() {
+                output.add_directory(name, options)?;
+            } else {
+                output.start_file(name, options)?;
+                std::io::copy(&mut file, &mut output)?;
+            }
         }
 
-        let options = FileOptions::default().compression_method(file.compression());
-        if file.is_dir() {
-            output.add_directory(name, options)?;
-        } else {
-            output.start_file(name, options)?;
-            std::io::copy(&mut file, &mut output)?;
+        if !had_signature || overwrite {
+            output.start_file(
+                PACKAGE_SIGNATURE_FILE_NAME,
+                nuget_zip_options(zip::CompressionMethod::Stored),
+            )?;
+            output.write_all(signature_der)?;
         }
-    }
 
-    if !had_signature || overwrite {
-        output.start_file(
-            PACKAGE_SIGNATURE_FILE_NAME,
-            FileOptions::default().compression_method(zip::CompressionMethod::Stored),
-        )?;
-        output.write_all(signature_der)?;
+        output.finish()?;
     }
-    output.finish()?;
+    let mut bytes = out.into_inner();
+    normalize_nuget_zip_metadata(&mut bytes)?;
+    writer.write_all(&bytes)?;
     Ok(())
 }
 
@@ -389,6 +468,69 @@ mod tests {
             writer.finish().unwrap();
         }
         out.into_inner()
+    }
+
+    fn eocd_offset(bytes: &[u8]) -> usize {
+        bytes
+            .windows(4)
+            .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
+            .expect("EOCD")
+    }
+
+    fn central_directory_entries(bytes: &[u8]) -> Vec<(String, u8, u32)> {
+        let eocd = eocd_offset(bytes);
+        let central_dir_size =
+            u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap()) as usize;
+        let central_dir_offset =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let central_dir_end = central_dir_offset + central_dir_size;
+        let mut entries = Vec::new();
+        let mut pos = central_dir_offset;
+        while pos < central_dir_end {
+            assert_eq!(&bytes[pos..pos + 4], &[0x50, 0x4b, 0x01, 0x02]);
+            let host_os = bytes[pos + 5];
+            let external_attrs = u32::from_le_bytes(bytes[pos + 38..pos + 42].try_into().unwrap());
+            let name_len =
+                u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().unwrap()) as usize;
+            let name = std::str::from_utf8(&bytes[pos + 46..pos + 46 + name_len])
+                .expect("entry name")
+                .to_owned();
+            entries.push((name, host_os, external_attrs));
+            pos += 46 + name_len + extra_len + comment_len;
+        }
+        entries
+    }
+
+    fn mark_central_directory_entries_as_unix(bytes: &mut [u8]) {
+        let eocd = eocd_offset(bytes);
+        let central_dir_size =
+            u32::from_le_bytes(bytes[eocd + 12..eocd + 16].try_into().unwrap()) as usize;
+        let central_dir_offset =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let central_dir_end = central_dir_offset + central_dir_size;
+        let mut pos = central_dir_offset;
+        while pos < central_dir_end {
+            bytes[pos + 5] = 3;
+            bytes[pos + 38..pos + 42].copy_from_slice(&0xa1ed_0000u32.to_le_bytes());
+            let name_len =
+                u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(bytes[pos + 30..pos + 32].try_into().unwrap()) as usize;
+            let comment_len =
+                u16::from_le_bytes(bytes[pos + 32..pos + 34].try_into().unwrap()) as usize;
+            pos += 46 + name_len + extra_len + comment_len;
+        }
+    }
+
+    fn assert_no_unix_central_directory_metadata(bytes: &[u8]) {
+        for (name, host_os, external_attrs) in central_directory_entries(bytes) {
+            assert_eq!(host_os, 0, "{name} host OS");
+            assert_eq!(external_attrs, 0, "{name} external attributes");
+        }
     }
 
     #[test]
@@ -476,7 +618,8 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
 
         embed_signature(Cursor::new(zip), &mut out, b"cms", false).unwrap();
-        let info = inspect_package_reader_for_test(out.into_inner());
+        let signed = out.into_inner();
+        let info = inspect_package_reader_for_test(signed.clone());
 
         assert_eq!(
             info.entry(PACKAGE_SIGNATURE_FILE_NAME)
@@ -487,6 +630,19 @@ mod tests {
             info.entry(PACKAGE_SIGNATURE_FILE_NAME)
                 .map(|e| e.compression.as_str()),
             Some("Stored")
+        );
+        assert_no_unix_central_directory_metadata(&signed);
+        let mut archive = zip::ZipArchive::new(Cursor::new(signed)).unwrap();
+        assert_eq!(
+            archive
+                .by_name(PACKAGE_SIGNATURE_FILE_NAME)
+                .unwrap()
+                .unix_mode(),
+            None
+        );
+        assert_eq!(
+            archive.by_name("lib/net8.0/a.dll").unwrap().unix_mode(),
+            None
         );
     }
 
@@ -542,6 +698,49 @@ mod tests {
             info.entry("lib/net8.0/a.dll").map(|e| e.uncompressed_size),
             Some(2)
         );
+    }
+
+    #[test]
+    fn embed_signature_clears_unix_central_directory_metadata() {
+        let mut zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        mark_central_directory_entries_as_unix(&mut zip);
+        assert!(
+            central_directory_entries(&zip)
+                .iter()
+                .any(|(_, host_os, attrs)| *host_os == 3 && *attrs != 0)
+        );
+        let mut out = Cursor::new(Vec::new());
+
+        embed_signature(Cursor::new(zip), &mut out, b"cms", false).unwrap();
+        let signed = out.into_inner();
+
+        assert_no_unix_central_directory_metadata(&signed);
+    }
+
+    #[test]
+    fn write_package_without_signature_clears_unix_central_directory_metadata() {
+        let mut zip = zip_with(&[
+            ("lib/net8.0/a.dll", b"pe"),
+            (PACKAGE_SIGNATURE_FILE_NAME, b"cms"),
+        ]);
+        mark_central_directory_entries_as_unix(&mut zip);
+        let mut out = Cursor::new(Vec::new());
+
+        write_package_without_signature(Cursor::new(zip), &mut out).unwrap();
+        let unsigned = out.into_inner();
+
+        assert_no_unix_central_directory_metadata(&unsigned);
+    }
+
+    #[test]
+    fn canonical_unsigned_package_rejects_truncated_central_directory() {
+        let mut zip = zip_with(&[("lib/net8.0/a.dll", b"pe")]);
+        let eocd = eocd_offset(&zip);
+        zip[eocd + 12..eocd + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let err = normalize_nuget_zip_metadata(&mut zip).unwrap_err();
+
+        assert!(err.to_string().contains("central directory"));
     }
 
     fn inspect_package_reader_for_test(bytes: Vec<u8>) -> PackageSummary {

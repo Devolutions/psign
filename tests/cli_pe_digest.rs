@@ -331,6 +331,7 @@ fn nupkg_signature_pkcs7_from_external_signature_creates_verifiable_blob() {
     let key = dir.path().join("signer.pkcs8");
     let content = dir.path().join("signature-content.txt");
     let prehash = dir.path().join("prehash.bin");
+    let assembled_prehash = dir.path().join("assembled-prehash.bin");
     let external_signature = dir.path().join("external.sig");
     let signature = dir.path().join("signature.p7s");
     let signed = dir.path().join("signed.nupkg");
@@ -348,6 +349,8 @@ fn nupkg_signature_pkcs7_from_external_signature_creates_verifiable_blob() {
     prehash_cmd
         .arg("nupkg-signature-pkcs7-prehash")
         .arg(&package)
+        .arg("--cert")
+        .arg(&cert)
         .arg("--encoding")
         .arg("raw")
         .arg("--output")
@@ -378,6 +381,20 @@ fn nupkg_signature_pkcs7_from_external_signature_creates_verifiable_blob() {
         .assert()
         .success()
         .stdout(predicate::str::contains("signature_len="));
+
+    let mut assembled_prehash_cmd = portable_cmd();
+    assembled_prehash_cmd
+        .arg("pkcs7-signer-rs256-prehash")
+        .arg(&signature)
+        .arg("--encoding")
+        .arg("raw")
+        .arg("--output")
+        .arg(&assembled_prehash);
+    assembled_prehash_cmd.assert().success();
+    assert_eq!(
+        std::fs::read(&prehash).expect("read original prehash"),
+        std::fs::read(&assembled_prehash).expect("read assembled prehash")
+    );
 
     let mut verify = portable_cmd();
     verify
@@ -521,10 +538,8 @@ fn nupkg_sign_embeds_rfc3161_timestamp_attribute() {
     inspect
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "microsoft_nested_rfc3161_attribute",
-        ))
-        .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+        .stdout(predicate::str::contains("id_aa_time_stamp_token"))
+        .stdout(predicate::str::contains("1.2.840.113549.1.9.16.2.14"));
 
     let mut verify = portable_cmd();
     verify
@@ -1783,7 +1798,7 @@ fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(42u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,
