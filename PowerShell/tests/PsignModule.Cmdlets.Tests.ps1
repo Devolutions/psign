@@ -3,18 +3,31 @@
 <#
     .SYNOPSIS
     Tests for Test-PsignModule, Protect-PsignModule, and Unprotect-PsignSignature cmdlets.
+    Requires Windows (uses New-SelfSignedCertificate and Cert:\ store).
+
+    Cross-platform equivalents of these tests exist in TestPsignModule.Expanded.Tests.ps1
+    and ProtectPsignModule.Expanded.Tests.ps1 using .NET crypto APIs.
 #>
 
+BeforeDiscovery {
+    $script:SkipNonWindows = (-not $IsWindows) -and ($PSVersionTable.PSEdition -eq 'Core')
+}
+
 BeforeAll {
+    if ((-not $IsWindows) -and ($PSVersionTable.PSEdition -eq 'Core')) {
+        return
+    }
+
     $ModuleDir = Join-Path $PSScriptRoot '..' 'Devolutions.Psign'
     Import-Module (Join-Path $ModuleDir 'Devolutions.Psign.psd1') -Force -ErrorAction Stop
     $env:PSIGN_NO_AUTO_TRUST = '1'
 
-    # Create a code signing certificate for testing
+    # Create a code signing certificate for testing (exportable key required for portable signing)
     $script:TestCert = New-SelfSignedCertificate `
         -Type CodeSigningCert `
         -Subject 'CN=PsignPesterTest' `
         -CertStoreLocation 'Cert:\CurrentUser\My' `
+        -KeyExportPolicy Exportable `
         -NotAfter (Get-Date).AddDays(1)
 
     # Set up a test module directory
@@ -34,7 +47,7 @@ AfterAll {
     Remove-Item Env:\PSIGN_NO_AUTO_TRUST -ErrorAction SilentlyContinue
 }
 
-Describe 'Test-PsignModule' {
+Describe 'Test-PsignModule' -Skip:$script:SkipNonWindows {
     BeforeAll {
         # Create a proper module structure
         $modDir = $script:TestModuleDir
@@ -117,7 +130,7 @@ Describe 'Test-PsignModule' {
     }
 }
 
-Describe 'Protect-PsignModule' {
+Describe 'Protect-PsignModule' -Skip:$script:SkipNonWindows {
     BeforeAll {
         # Create a fresh unsigned module for signing tests
         $script:SignTestDir = Join-Path ([IO.Path]::GetTempPath()) "psign-sign-test-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
@@ -185,7 +198,7 @@ Describe 'Protect-PsignModule' {
     }
 }
 
-Describe 'Unprotect-PsignSignature' {
+Describe 'Unprotect-PsignSignature' -Skip:$script:SkipNonWindows {
     It 'removes script signature block' {
         $testFile = Join-Path ([IO.Path]::GetTempPath()) "psign-strip-$([Guid]::NewGuid().ToString('N').Substring(0,8)).ps1"
         @"
