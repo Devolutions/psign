@@ -153,7 +153,7 @@ pub fn pkcs7_signed_data_der_terminal_root(pkcs7_der: &[u8]) -> Result<Cert> {
     let leaf = picky_sig
         .signing_certificate(&merged)
         .map_err(|e| anyhow!("resolve signing certificate: {e}"))?;
-    let chain_vec = issuer_chain_excluding_leaf(leaf, &merged)?;
+    let chain_vec = issuer_chain_excluding_leaf(leaf, &merged, None)?;
     let root = terminal_root_cert(leaf, &chain_vec);
     Ok(root.clone())
 }

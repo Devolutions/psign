@@ -105,7 +105,7 @@ Keep production recursive/nested package signing on dotnet/sign until the remain
 
 ## PowerShell module (`Devolutions.Psign`)
 
-The `Set-PortableSignature` and `Get-PortableSignature` cmdlets provide a PowerShell-native experience for portable signing. The module now supports package-native signing for NuGet, VSIX, ClickOnce, and App Installer formats in addition to PE/DLL and PowerShell scripts.
+The `Set-PsignSignature` and `Get-PsignSignature` cmdlets provide a PowerShell-native experience for portable signing. The module now supports package-native signing for NuGet, VSIX, ClickOnce, and App Installer formats in addition to PE/DLL and PowerShell scripts.
 
 ### Supported formats
 
@@ -123,20 +123,20 @@ The `Set-PortableSignature` and `Get-PortableSignature` cmdlets provide a PowerS
 
 ```powershell
 # Sign a NuGet package with local cert/key
-Set-PortableSignature -FilePath package.nupkg -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+Set-PsignSignature -FilePath package.nupkg -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
 
 # Sign a VSIX with a PFX
-Set-PortableSignature -FilePath extension.vsix -PfxPath signer.pfx -Password $securePassword
+Set-PsignSignature -FilePath extension.vsix -PfxPath signer.pfx -Password $securePassword
 
 # Sign a ClickOnce manifest
-Set-PortableSignature -FilePath app.exe.manifest -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+Set-PsignSignature -FilePath app.exe.manifest -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
 
 # Sign all signable files in a module directory
-Set-PortableSignature -FilePath ./MyModule -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
+Set-PsignSignature -FilePath ./MyModule -CertificatePath signer.der -PrivateKeyPath signer.pkcs8
 
 # Inspect signature status
-Get-PortableSignature -FilePath signed.nupkg
-Get-PortableSignature -FilePath signed.vsix
+Get-PsignSignature -FilePath signed.nupkg
+Get-PsignSignature -FilePath signed.vsix
 ```
 
 ### Cloud provider parameters (reserved)
@@ -145,13 +145,13 @@ The following parameters are accepted for future Azure Key Vault and Artifact Si
 
 ```powershell
 # Azure Key Vault (reserved — currently returns a clear error)
-Set-PortableSignature -FilePath package.nupkg `
+Set-PsignSignature -FilePath package.nupkg `
     -AzureKeyVaultUrl "https://myvault.vault.azure.net" `
     -AzureKeyVaultCertificate "my-cert" `
     -AzureKeyVaultAccessToken $token
 
 # Artifact Signing / Trusted Signing (reserved — currently returns a clear error)
-Set-PortableSignature -FilePath package.nupkg `
+Set-PsignSignature -FilePath package.nupkg `
     -ArtifactSigningEndpoint "https://wus2.codesigning.azure.net" `
     -ArtifactSigningAccountName "my-account" `
     -ArtifactSigningProfileName "my-profile" `

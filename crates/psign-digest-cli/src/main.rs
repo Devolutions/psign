@@ -153,6 +153,9 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
         Some(s) => Some(parse_verification_date_ymd(s)?),
         None => None,
     };
+    // When using authroot_cab, automatically enable AIA fetching so the chain builder
+    // can download missing root certificates from intermediate cert AIA extensions.
+    let effective_aia = a.online_aia || a.authroot_cab.is_some();
     Ok(TrustVerifyPeOptions {
         anchor_dir: a.anchor_dir.clone(),
         trusted_ca_files: a.trusted_ca.clone(),
@@ -161,7 +164,7 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
         verification_instant_override,
         verbose_chain: a.verbose_chain,
         online: OnlineTrustOptions {
-            enable_aia: a.online_aia,
+            enable_aia: effective_aia,
             aia_url_override: a.aia_url_override.clone(),
             enable_ocsp: a.online_ocsp,
             ocsp_url_override: a.ocsp_url_override.clone(),
@@ -203,6 +206,7 @@ fn verify_xml_signer_certificate_trust(cert_der: &[u8], shared: &TrustVerifyShar
         &leaf,
         &mut merged,
         &opts.online,
+        Some(&anchors),
     )?;
     let root = psign_authenticode_trust::chain::terminal_root_cert_owned(&leaf, &chain_owned);
     let root_thumb = psign_authenticode_trust::anchor::cert_sha1_thumbprint(root)?;

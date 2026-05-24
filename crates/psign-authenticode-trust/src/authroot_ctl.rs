@@ -40,18 +40,48 @@ fn ctl_thumbs_from_signed_data_econtent(buf: &[u8]) -> Result<Vec<[u8; 20]>> {
 
 fn parse_ctl_inner_subject_sha1s(econtent: &[u8]) -> Result<Vec<[u8; 20]>> {
     let mut out = Vec::new();
+
+    // Strategy 1: econtent is a SEQUENCE wrapping the CTL body
     if let Ok(seq_content) = tlv_sequence_payload(econtent) {
-        let children = tlv_collect_children(seq_content)?;
-        for child in children {
-            if let Ok(mut ts) = parse_subject_list(child) {
-                out.append(&mut ts);
+        if seq_content.len() > econtent.len() / 2 {
+            // The SEQUENCE spans most of econtent — treat its content as CTL children
+            out.extend(extract_subjects_from_ctl_children(seq_content));
+        } else {
+            // Small leading SEQUENCE — econtent is likely naked CTL children
+            let children = tlv_collect_children(econtent).unwrap_or_default();
+            for child in &children {
+                if let Ok(mut ts) = parse_subject_list(child) {
+                    out.append(&mut ts);
+                }
             }
         }
     }
+
+    // Strategy 2: econtent IS the naked CTL body (children without outer SEQUENCE tag)
+    if out.is_empty() {
+        out.extend(extract_subjects_from_ctl_children(econtent));
+    }
+
+    // Strategy 3: econtent itself is a subject list
     if out.is_empty() {
         out.extend(parse_subject_list(econtent).unwrap_or_default());
     }
+
     Ok(out)
+}
+
+fn extract_subjects_from_ctl_children(content: &[u8]) -> Vec<[u8; 20]> {
+    let children = match tlv_collect_children(content) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for child in children {
+        if let Ok(mut ts) = parse_subject_list(child) {
+            out.append(&mut ts);
+        }
+    }
+    out
 }
 
 fn parse_subject_list(seq_tlv: &[u8]) -> Result<Vec<[u8; 20]>> {

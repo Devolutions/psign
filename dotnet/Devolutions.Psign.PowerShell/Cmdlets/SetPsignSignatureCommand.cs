@@ -5,13 +5,15 @@ using System.Security.Cryptography.X509Certificates;
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
 using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Provider;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
-[Cmdlet(VerbsCommon.Set, "PortableSignature", SupportsShouldProcess = true, DefaultParameterSetName = FilePathParameterSet)]
+[Cmdlet(VerbsCommon.Set, "PsignSignature", SupportsShouldProcess = true, DefaultParameterSetName = FilePathParameterSet)]
+[Alias("Set-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
-public sealed class SetPortableSignatureCommand : PSCmdlet
+public sealed class SetPsignSignatureCommand : PSCmdlet
 {
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
@@ -20,18 +22,19 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
     private X509Certificate2? storeCertificate;
     private string? storePrivateKeyDerBase64;
 
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to files to sign. Wildcards are supported.")]
     [Alias("Path")]
     public string[] FilePath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
-    [Alias("PSPath")]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to files. No wildcard expansion.")]
+    [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "File name or extension hint for the content bytes.")]
     public string[] SourcePathOrExtension { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "Raw file content bytes to sign.")]
+    [ValidateNotNullOrEmpty]
     public byte[] Content { get; set; } = [];
 
     [Parameter]
@@ -142,7 +145,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-OutputPath cannot be used with -Content. Read the signed bytes from the output object's Content property."),
-                    "PortableSignatureContentOutputPathUnsupported",
+                    "PsignSignatureContentOutputPathUnsupported",
                     ErrorCategory.InvalidArgument,
                     OutputPath));
             }
@@ -159,7 +162,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         {
             ThrowTerminatingError(new ErrorRecord(
                 new PSInvalidOperationException("-OutputPath can only be used with a single input file."),
-                "PortableSignatureOutputPathRequiresSingleInput",
+                "PsignSignatureOutputPathRequiresSingleInput",
                 ErrorCategory.InvalidArgument,
                 OutputPath));
         }
@@ -172,7 +175,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-OutputPath can only be used with a single input file, not module directories or wildcard groups."),
-                    "PortableSignatureOutputPathRequiresSingleInput",
+                    "PsignSignatureOutputPathRequiresSingleInput",
                     ErrorCategory.InvalidArgument,
                     input));
             }
@@ -182,6 +185,14 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
                 SignPath(resolved);
             }
         }
+    }
+
+    protected override void EndProcessing()
+    {
+        pfxCertificate?.Dispose();
+        pfxCertificate = null;
+        storeCertificate?.Dispose();
+        storeCertificate = null;
     }
 
     private void SignContent(string sourcePathOrExtension)
@@ -239,7 +250,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "SetPortableSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
+            WriteError(new ErrorRecord(ex, "SetPsignSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
         }
         finally
         {
@@ -321,7 +332,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "SetPortableSignatureFailed", ErrorCategory.NotSpecified, path));
+            WriteError(new ErrorRecord(ex, "SetPsignSignatureFailed", ErrorCategory.NotSpecified, path));
         }
     }
 
@@ -361,7 +372,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-CertificatePath and -PrivateKeyPath must be supplied together."),
-                    "PortableSignatureIncompleteKeyPair",
+                    "PsignSignatureIncompleteKeyPair",
                     ErrorCategory.InvalidArgument,
                     this));
             }
@@ -381,7 +392,7 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
             {
                 ThrowTerminatingError(new ErrorRecord(
                     new PSInvalidOperationException("-AzureKeyVaultCertificate is required when using -AzureKeyVaultUrl."),
-                    "PortableSignatureAkvCertificateRequired",
+                    "PsignSignatureAkvCertificateRequired",
                     ErrorCategory.InvalidArgument,
                     this));
             }
@@ -396,10 +407,78 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         {
             ThrowTerminatingError(new ErrorRecord(
                 new PSInvalidOperationException("Supply exactly one signing source: -Certificate, -CertificatePath/-PrivateKeyPath, -PfxPath, -Thumbprint, -AzureKeyVaultUrl, or -ArtifactSigningEndpoint/-ArtifactSigningAccountName."),
-                "PortableSignatureSigningMaterialRequired",
+                "PsignSignatureSigningMaterialRequired",
                 ErrorCategory.InvalidArgument,
                 this));
         }
+
+        ValidateSelectedCertificate();
+    }
+
+    private void ValidateSelectedCertificate()
+    {
+        if (Certificate is not null)
+        {
+            ValidateCodeSigningCertificate(Certificate, requirePrivateKey: true, "-Certificate");
+        }
+        else if (CertificatePath is not null)
+        {
+            string resolved = SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath);
+            using X509Certificate2 certificate = new(resolved);
+            ValidateCodeSigningCertificate(certificate, requirePrivateKey: false, "-CertificatePath");
+        }
+        else if (PfxPath is not null)
+        {
+            ValidateCodeSigningCertificate(LoadPfxCertificate(), requirePrivateKey: true, "-PfxPath");
+        }
+        else if (Thumbprint is not null)
+        {
+            // The portable store loads the private key from a separate .key file,
+            // so the X509Certificate2 from the .der file won't report HasPrivateKey.
+            // LoadStoreCertificate() already validates the .key file exists.
+            ValidateCodeSigningCertificate(LoadStoreCertificate(), requirePrivateKey: false, "-Thumbprint");
+        }
+    }
+
+    private static void ValidateCodeSigningCertificate(X509Certificate2? certificate, bool requirePrivateKey, string source)
+    {
+        if (certificate is null)
+        {
+            throw new PSInvalidOperationException($"{source} did not resolve to a signing certificate.");
+        }
+
+        if (requirePrivateKey && !certificate.HasPrivateKey)
+        {
+            throw new PSInvalidOperationException($"{source} must include an accessible private key.");
+        }
+
+        foreach (X509Extension extension in certificate.Extensions)
+        {
+            if (extension is X509KeyUsageExtension keyUsage
+                && (keyUsage.KeyUsages & X509KeyUsageFlags.DigitalSignature) == 0)
+            {
+                throw new PSInvalidOperationException($"{source} certificate is not valid for digital signatures.");
+            }
+
+            if (extension is X509EnhancedKeyUsageExtension eku
+                && !HasCodeSigningEku(eku))
+            {
+                throw new PSInvalidOperationException($"{source} certificate is not valid for code signing.");
+            }
+        }
+    }
+
+    private static bool HasCodeSigningEku(X509EnhancedKeyUsageExtension eku)
+    {
+        foreach (Oid oid in eku.EnhancedKeyUsages)
+        {
+            if (oid.Value == "1.3.6.1.5.5.7.3.3")
+            {
+                return true;
+            }
+        }
+
+        return eku.EnhancedKeyUsages.Count == 0;
     }
 
     private X509Certificate2? LoadPfxCertificate()
@@ -415,21 +494,11 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
 
         string resolved = SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath);
         string? password = Password is null ? null : SecureStringToString(Password);
-        try
-        {
-            pfxCertificate = new X509Certificate2(
-                resolved,
-                password,
-                X509KeyStorageFlags.Exportable);
-            return pfxCertificate;
-        }
-        finally
-        {
-            if (password is not null)
-            {
-                password = null;
-            }
-        }
+        pfxCertificate = new X509Certificate2(
+            resolved,
+            password,
+            X509KeyStorageFlags.Exportable);
+        return pfxCertificate;
     }
 
     private string? GetCertificateDerBase64()
@@ -459,7 +528,12 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
         using RSA? rsa = cert.GetRSAPrivateKey();
         if (rsa is null)
         {
-            throw new PSInvalidOperationException("Portable signing requires an exportable RSA private key.");
+            if (cert.GetECDsaPrivateKey() is not null)
+            {
+                throw new PSInvalidOperationException(
+                    $"Portable signing does not support ECDSA certificates. Use an RSA certificate instead.");
+            }
+            throw new PSInvalidOperationException("Portable signing requires a certificate with an exportable RSA private key.");
         }
         try
         {
@@ -579,84 +653,25 @@ public sealed class SetPortableSignatureCommand : PSCmdlet
 
     private string ResolveCertStoreBaseDirectory()
     {
-        if (CertStoreDirectory is not null)
-        {
-            return SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertStoreDirectory);
-        }
-
-        string? envStore = Environment.GetEnvironmentVariable("PSIGN_CERT_STORE");
-        if (!string.IsNullOrWhiteSpace(envStore))
-        {
-            return envStore;
-        }
-
-        string? home = Environment.GetEnvironmentVariable("HOME")
-            ?? Environment.GetEnvironmentVariable("USERPROFILE");
-        if (string.IsNullOrWhiteSpace(home))
-        {
-            throw new PSInvalidOperationException(
-                "Cannot resolve the default portable cert-store path. Set -CertStoreDirectory or PSIGN_CERT_STORE.");
-        }
-
-        return Path.Combine(home, ".psign", "cert-store");
+        string? resolved = CertStoreDirectory is not null
+            ? SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertStoreDirectory)
+            : null;
+        return CertStorePathHelper.ResolveBaseDirectory(resolved);
     }
 
     private static string NormalizeStoreName(string storeName)
     {
-        string trimmed = storeName.Trim();
-        if (trimmed.Length == 0 || trimmed.Contains('/') || trimmed.Contains('\\') || trimmed.Contains('\0'))
-        {
-            throw new PSInvalidOperationException("Portable certificate store name must not be empty or contain path separators.");
-        }
-
-        return trimmed.ToLowerInvariant() switch
-        {
-            "my" => "MY",
-            "root" => "Root",
-            "ca" => "CA",
-            "trust" => "Trust",
-            "disallowed" => "Disallowed",
-            _ => trimmed,
-        };
+        return CertStorePathHelper.NormalizeStoreName(storeName);
     }
 
     private static string NormalizeSha1Thumbprint(string thumbprint)
     {
-        string clean = new(thumbprint.Where(c => c != ':' && !char.IsWhiteSpace(c)).ToArray());
-        if (clean.Length != 40 || clean.Any(c => !Uri.IsHexDigit(c)))
-        {
-            throw new PSInvalidOperationException("SHA1 thumbprint must be 40 hexadecimal characters.");
-        }
-
-        return clean.ToUpperInvariant();
+        return CertStorePathHelper.NormalizeThumbprint(thumbprint);
     }
 
     private static byte[] ReadPkcs8PrivateKeyDer(string keyPath)
     {
-        string text = File.ReadAllText(keyPath);
-        const string begin = "-----BEGIN PRIVATE KEY-----";
-        const string end = "-----END PRIVATE KEY-----";
-        int beginIndex = text.IndexOf(begin, StringComparison.Ordinal);
-        int endIndex = text.IndexOf(end, StringComparison.Ordinal);
-        if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex)
-        {
-            throw new PSInvalidOperationException(
-                $"Portable cert-store key '{keyPath}' must be unencrypted PKCS#8 PEM (BEGIN PRIVATE KEY).");
-        }
-
-        int base64Start = beginIndex + begin.Length;
-        string base64 = text[base64Start..endIndex];
-        string compact = new(base64.Where(c => !char.IsWhiteSpace(c)).ToArray());
-        try
-        {
-            return Convert.FromBase64String(compact);
-        }
-        catch (FormatException ex)
-        {
-            throw new PSInvalidOperationException(
-                $"Portable cert-store key '{keyPath}' contains invalid PKCS#8 PEM base64.",
-                ex);
-        }
+        return CertStorePathHelper.ReadPkcs8PrivateKeyDer(keyPath);
     }
 
     private static string ContentFileName(string sourcePathOrExtension)

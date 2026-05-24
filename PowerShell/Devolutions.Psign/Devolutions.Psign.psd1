@@ -1,6 +1,6 @@
 @{
     RootModule = 'Devolutions.Psign.psm1'
-    ModuleVersion = '0.3.0'
+    ModuleVersion = '0.4.0'
     GUID = 'e6e50e4b-bf25-4ed6-a343-49f904e79f8f'
     Author = 'Devolutions'
     CompanyName = 'Devolutions'
@@ -9,9 +9,19 @@
     CompatiblePSEditions = @('Core')
     PowerShellVersion = '7.4'
     NestedModules = @('lib/net8.0/Devolutions.Psign.PowerShell.dll')
-    CmdletsToExport = @('Get-PortableSignature', 'Set-PortableSignature')
+    FormatsToProcess = @('Devolutions.Psign.Format.ps1xml')
+    CmdletsToExport = @(
+        'Get-PsignSignature',
+        'Set-PsignSignature',
+        'Test-PsignModule',
+        'Protect-PsignModule',
+        'Unprotect-PsignSignature'
+    )
     FunctionsToExport = @()
-    AliasesToExport = @()
+    AliasesToExport = @(
+        'Get-PortableSignature',
+        'Set-PortableSignature'
+    )
     PrivateData = @{
         PSData = @{
             Tags = @('Authenticode', 'CodeSigning', 'Portable', 'psign')

@@ -3,30 +3,33 @@ using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
 using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Trust;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
-[Cmdlet(VerbsCommon.Get, "PortableSignature", DefaultParameterSetName = FilePathParameterSet)]
+[Cmdlet(VerbsCommon.Get, "PsignSignature", DefaultParameterSetName = FilePathParameterSet)]
+[Alias("Get-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
-public sealed class GetPortableSignatureCommand : PSCmdlet
+public sealed class GetPsignSignatureCommand : PSCmdlet
 {
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
     private const string ContentParameterSet = "Content";
 
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet)]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to files to inspect. Wildcards are supported.")]
     [Alias("Path")]
     public string[] FilePath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet)]
-    [Alias("PSPath")]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to files. No wildcard expansion.")]
+    [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "File name or extension hint for the content bytes.")]
     public string[] SourcePathOrExtension { get; set; } = [];
 
-    [Parameter(Mandatory = true, ParameterSetName = ContentParameterSet)]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = ContentParameterSet, HelpMessage = "Raw file content bytes to verify.")]
+    [ValidateNotNullOrEmpty]
     public byte[] Content { get; set; } = [];
 
     [Parameter]
@@ -59,6 +62,9 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
     [Parameter]
     [ValidateSet("Off", "BestEffort", "Require")]
     public string RevocationMode { get; set; } = "Off";
+
+    [Parameter]
+    public SwitchParameter SkipTrust { get; set; }
 
     protected override void ProcessRecord()
     {
@@ -99,7 +105,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "GetPortableSignatureFailed", ErrorCategory.NotSpecified, path));
+            WriteError(new ErrorRecord(ex, "GetPsignSignatureFailed", ErrorCategory.NotSpecified, path));
         }
     }
 
@@ -117,7 +123,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
         }
         catch (Exception ex)
         {
-            WriteError(new ErrorRecord(ex, "GetPortableSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
+            WriteError(new ErrorRecord(ex, "GetPsignSignatureContentFailed", ErrorCategory.NotSpecified, sourcePathOrExtension));
         }
         finally
         {
@@ -127,6 +133,21 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
 
     private PortableGetSignatureRequest CreateRequest(string path)
     {
+        string? resolvedAuthRootCab = AuthRootCab is null
+            ? null
+            : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AuthRootCab);
+
+        // Auto-trust: if no explicit trust params and not opted out, use cached AuthRoot CAB
+        if (!SkipTrust.IsPresent
+            && resolvedAuthRootCab is null
+            && AnchorDirectory is null
+            && TrustedCertificatePath.Length == 0
+            && TrustedCertificate.Length == 0)
+        {
+            resolvedAuthRootCab = AuthRootCache.GetOrDownloadAuthRootCab(
+                msg => WriteVerbose(msg));
+        }
+
         return new PortableGetSignatureRequest
         {
             Path = path,
@@ -139,9 +160,7 @@ public sealed class GetPortableSignatureCommand : PSCmdlet
             AnchorDirectory = AnchorDirectory is null
                 ? null
                 : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AnchorDirectory),
-            AuthRootCab = AuthRootCab is null
-                ? null
-                : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AuthRootCab),
+            AuthRootCab = resolvedAuthRootCab,
             AsOf = AsOf is null
                 ? null
                 : AsOf.Value.ToUniversalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),

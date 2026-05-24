@@ -4,10 +4,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Disable auto-trust during tests — test certificates are self-signed and
+# won't chain to the Microsoft AuthRoot CTL.
+$env:PSIGN_NO_AUTO_TRUST = '1'
+
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildScript = Join-Path (Join-Path $repo 'PowerShell') 'build.ps1'
 if (-not $env:PSIGN_PWSH_TEST_SKIP_BUILD) {
-    & $buildScript -Configuration $Configuration
+    # If the module is already loaded in this process, the native DLL is locked
+    # and cannot be overwritten by a rebuild. Skip the build in that case.
+    $alreadyLoaded = Get-Module Devolutions.Psign -ErrorAction SilentlyContinue
+    if ($alreadyLoaded) {
+        Write-Host "Skipping build: module already loaded in this session (native DLL locked)."
+    } else {
+        & $buildScript -Configuration $Configuration
+    }
 }
 
 $modulePath = Join-Path (Join-Path (Join-Path $repo 'PowerShell') 'Devolutions.Psign') 'Devolutions.Psign.psd1'
@@ -136,55 +147,55 @@ try {
     $work = Join-Path $temp 'tiny.exe'
     Copy-Item $unsigned $work
 
-    if (-not (Get-Command Get-PortableSignature -ErrorAction SilentlyContinue)) {
-        throw 'Get-PortableSignature was not exported.'
+    if (-not (Get-Command Get-PsignSignature -ErrorAction SilentlyContinue)) {
+        throw 'Get-PsignSignature was not exported.'
     }
-    if (-not (Get-Command Set-PortableSignature -ErrorAction SilentlyContinue)) {
-        throw 'Set-PortableSignature was not exported.'
+    if (-not (Get-Command Set-PsignSignature -ErrorAction SilentlyContinue)) {
+        throw 'Set-PsignSignature was not exported.'
     }
-    $getParameters = (Get-Command Get-PortableSignature).Parameters
+    $getParameters = (Get-Command Get-PsignSignature).Parameters
     foreach ($parameterName in @('FilePath', 'LiteralPath', 'SourcePathOrExtension', 'Content', 'TrustedCertificate', 'TrustedCertificatePath', 'AnchorDirectory', 'AuthRootCab', 'AsOf', 'PreferTimestampSigningTime', 'RequireValidTimestamp', 'OnlineAia', 'OnlineOcsp', 'RevocationMode')) {
         if (-not $getParameters.ContainsKey($parameterName)) {
-            throw "Get-PortableSignature is missing expected migration parameter '$parameterName'."
+            throw "Get-PsignSignature is missing expected migration parameter '$parameterName'."
         }
     }
-    $setParameters = (Get-Command Set-PortableSignature).Parameters
+    $setParameters = (Get-Command Set-PsignSignature).Parameters
     foreach ($parameterName in @('FilePath', 'LiteralPath', 'SourcePathOrExtension', 'Content', 'Certificate', 'CertificatePath', 'PrivateKeyPath', 'PfxPath', 'Password', 'Thumbprint', 'CertStoreDirectory', 'StoreName', 'MachineStore', 'IncludeChain', 'ChainCertificatePath', 'TimestampServer', 'TimestampHashAlgorithm', 'HashAlgorithm', 'OutputPath', 'Force')) {
         if (-not $setParameters.ContainsKey($parameterName)) {
-            throw "Set-PortableSignature is missing expected migration parameter '$parameterName'."
+            throw "Set-PsignSignature is missing expected migration parameter '$parameterName'."
         }
     }
 
-    $before = Get-PortableSignature -LiteralPath $work
+    $before = Get-PsignSignature -LiteralPath $work
     if ($before.Status -ne 'NotSigned') {
         throw "Expected NotSigned before signing, got $($before.Status)."
     }
 
-    $signed = Set-PortableSignature -LiteralPath $work -CertificatePath $certPath -PrivateKeyPath $keyPath
+    $signed = Set-PsignSignature -LiteralPath $work -CertificatePath $certPath -PrivateKeyPath $keyPath
     if ($signed.Status -ne 'Valid') {
         throw "Expected Valid after signing, got $($signed.Status): $($signed.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $signed -ExpectedCertificate $cert -Label 'PE signing response'
 
-    $after = Get-PortableSignature -LiteralPath $work
+    $after = Get-PsignSignature -LiteralPath $work
     if ($after.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature after signing, got $($after.Status)."
+        throw "Expected Valid from Get-PsignSignature after signing, got $($after.Status)."
     }
     Assert-SignerCertificate -Signature $after -ExpectedCertificate $cert -Label 'PE get response'
 
-    $trustedAfter = Get-PortableSignature -LiteralPath $work -TrustedCertificate $rootCert -AsOf ([System.DateTime]::UtcNow) -RevocationMode Off
+    $trustedAfter = Get-PsignSignature -LiteralPath $work -TrustedCertificate $rootCert -AsOf ([System.DateTime]::UtcNow) -RevocationMode Off
     if ($trustedAfter.Status -ne 'Valid' -or $trustedAfter.TrustStatus -ne 'Valid') {
         throw "Expected explicit trust verification to succeed for signed PE, got status=$($trustedAfter.Status) trust=$($trustedAfter.TrustStatus): $($trustedAfter.StatusMessage)"
     }
-    $untrustedAfter = Get-PortableSignature -LiteralPath $work -TrustedCertificate $chainCert
+    $untrustedAfter = Get-PsignSignature -LiteralPath $work -TrustedCertificate $chainCert
     if ($untrustedAfter.Status -ne 'NotTrusted' -or $untrustedAfter.TrustStatus -ne 'NotTrusted') {
         throw "Expected explicit trust verification to fail with wrong anchor, got status=$($untrustedAfter.Status) trust=$($untrustedAfter.TrustStatus): $($untrustedAfter.StatusMessage)"
     }
 
     $length = (Get-Item -LiteralPath $work).Length
-    Set-PortableSignature -LiteralPath $work -CertificatePath $certPath -PrivateKeyPath $keyPath -WhatIf | Out-Null
+    Set-PsignSignature -LiteralPath $work -CertificatePath $certPath -PrivateKeyPath $keyPath -WhatIf | Out-Null
     if ((Get-Item -LiteralPath $work).Length -ne $length) {
-        throw 'Set-PortableSignature -WhatIf mutated the file.'
+        throw 'Set-PsignSignature -WhatIf mutated the file.'
     }
 
     $readOnlyWork = Join-Path $temp 'tiny-readonly.exe'
@@ -193,20 +204,20 @@ try {
     try {
         $failedWithoutForce = $false
         try {
-            Set-PortableSignature -LiteralPath $readOnlyWork -CertificatePath $certPath -PrivateKeyPath $keyPath -ErrorAction Stop | Out-Null
+            Set-PsignSignature -LiteralPath $readOnlyWork -CertificatePath $certPath -PrivateKeyPath $keyPath -ErrorAction Stop | Out-Null
         }
         catch {
             $failedWithoutForce = $true
         }
         if (-not $failedWithoutForce) {
-            throw 'Expected Set-PortableSignature to fail on a read-only file without -Force.'
+            throw 'Expected Set-PsignSignature to fail on a read-only file without -Force.'
         }
-        $forceSigned = Set-PortableSignature -LiteralPath $readOnlyWork -CertificatePath $certPath -PrivateKeyPath $keyPath -Force
+        $forceSigned = Set-PsignSignature -LiteralPath $readOnlyWork -CertificatePath $certPath -PrivateKeyPath $keyPath -Force
         if ($forceSigned.Status -ne 'Valid') {
             throw "Expected Valid after read-only file signing with -Force, got $($forceSigned.Status): $($forceSigned.StatusMessage)"
         }
         if (-not (Get-Item -LiteralPath $readOnlyWork).IsReadOnly) {
-            throw 'Expected Set-PortableSignature -Force to restore the read-only attribute.'
+            throw 'Expected Set-PsignSignature -Force to restore the read-only attribute.'
         }
     }
     finally {
@@ -215,7 +226,7 @@ try {
 
     $storeWork = Join-Path $temp 'tiny-store.exe'
     Copy-Item $unsigned $storeWork
-    $storeSigned = Set-PortableSignature -LiteralPath $storeWork -Sha1 $cert.Thumbprint -CertStoreDirectory $storeDir
+    $storeSigned = Set-PsignSignature -LiteralPath $storeWork -Sha1 $cert.Thumbprint -CertStoreDirectory $storeDir
     if ($storeSigned.Status -ne 'Valid') {
         throw "Expected Valid after portable cert-store signing, got $($storeSigned.Status): $($storeSigned.StatusMessage)"
     }
@@ -225,11 +236,11 @@ try {
     Copy-Item $unsigned $chainWork
     $defaultChainWork = Join-Path $temp 'tiny-chain-default.exe'
     Copy-Item $unsigned $defaultChainWork
-    $defaultChainSigned = Set-PortableSignature -LiteralPath $defaultChainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -ChainCertificatePath $chainCertPath
+    $defaultChainSigned = Set-PsignSignature -LiteralPath $defaultChainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -ChainCertificatePath $chainCertPath
     if ($defaultChainSigned.EmbeddedCertificateCount -ne 1) {
         throw "Expected default IncludeChain NotRoot to exclude a self-signed root certificate, got $($defaultChainSigned.EmbeddedCertificateCount) embedded certificates."
     }
-    $chainSigned = Set-PortableSignature -LiteralPath $chainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -IncludeChain All -ChainCertificatePath $chainCertPath
+    $chainSigned = Set-PsignSignature -LiteralPath $chainWork -CertificatePath $certPath -PrivateKeyPath $keyPath -IncludeChain All -ChainCertificatePath $chainCertPath
     if ($chainSigned.EmbeddedCertificateCount -lt 2) {
         throw "Expected IncludeChain All with ChainCertificatePath to embed at least 2 certificates, got $($chainSigned.EmbeddedCertificateCount)."
     }
@@ -237,27 +248,27 @@ try {
     $unsignedCab = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $repo 'tests') 'fixtures') 'generated-unsigned') 'cab') 'sample.cab'
     $cabWork = Join-Path $temp 'sample.cab'
     Copy-Item $unsignedCab $cabWork
-    $cabSigned = Set-PortableSignature -LiteralPath $cabWork -CertificatePath $certPath -PrivateKeyPath $keyPath
+    $cabSigned = Set-PsignSignature -LiteralPath $cabWork -CertificatePath $certPath -PrivateKeyPath $keyPath
     if ($cabSigned.Status -ne 'Valid') {
         throw "Expected Valid after CAB signing, got $($cabSigned.Status): $($cabSigned.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $cabSigned -ExpectedCertificate $cert -Label 'CAB signing response'
-    $cabAfter = Get-PortableSignature -LiteralPath $cabWork
+    $cabAfter = Get-PsignSignature -LiteralPath $cabWork
     if ($cabAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed CAB, got $($cabAfter.Status): $($cabAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature for signed CAB, got $($cabAfter.Status): $($cabAfter.StatusMessage)"
     }
 
     $unsignedMsi = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $repo 'tests') 'fixtures') 'generated-unsigned') 'installer') 'tiny.msi'
     $msiWork = Join-Path $temp 'tiny.msi'
     Copy-Item $unsignedMsi $msiWork
-    $msiSigned = Set-PortableSignature -LiteralPath $msiWork -CertificatePath $certPath -PrivateKeyPath $keyPath
+    $msiSigned = Set-PsignSignature -LiteralPath $msiWork -CertificatePath $certPath -PrivateKeyPath $keyPath
     if ($msiSigned.Status -ne 'Valid') {
         throw "Expected Valid after MSI signing, got $($msiSigned.Status): $($msiSigned.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $msiSigned -ExpectedCertificate $cert -Label 'MSI signing response'
-    $msiAfter = Get-PortableSignature -LiteralPath $msiWork
+    $msiAfter = Get-PsignSignature -LiteralPath $msiWork
     if ($msiAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed MSI, got $($msiAfter.Status): $($msiAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature for signed MSI, got $($msiAfter.Status): $($msiAfter.StatusMessage)"
     }
 
     $zipSource = Join-Path $temp 'zip-source'
@@ -265,14 +276,14 @@ try {
     Set-Content -LiteralPath (Join-Path $zipSource 'payload.txt') -Value 'portable zip authenticode' -Encoding UTF8
     $zipWork = Join-Path $temp 'payload.zip'
     Compress-Archive -LiteralPath (Join-Path $zipSource 'payload.txt') -DestinationPath $zipWork
-    $zipSigned = Set-PortableSignature -LiteralPath $zipWork -CertificatePath $certPath -PrivateKeyPath $keyPath
+    $zipSigned = Set-PsignSignature -LiteralPath $zipWork -CertificatePath $certPath -PrivateKeyPath $keyPath
     if ($zipSigned.Status -ne 'Valid') {
         throw "Expected Valid after ZIP signing, got $($zipSigned.Status): $($zipSigned.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $zipSigned -ExpectedCertificate $cert -Label 'ZIP signing response'
-    $zipAfter = Get-PortableSignature -LiteralPath $zipWork
+    $zipAfter = Get-PsignSignature -LiteralPath $zipWork
     if ($zipAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed ZIP, got $($zipAfter.Status): $($zipAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature for signed ZIP, got $($zipAfter.Status): $($zipAfter.StatusMessage)"
     }
 
     $scriptPath = Join-Path $temp 'Invoke-Test.ps1'
@@ -280,21 +291,21 @@ try {
 param([string] $Name = "portable")
 "Hello $Name"
 '@ -Encoding UTF8
-    $scriptSigned = Set-PortableSignature -LiteralPath $scriptPath -Certificate $cert
+    $scriptSigned = Set-PsignSignature -LiteralPath $scriptPath -Certificate $cert
     if ($scriptSigned.Status -ne 'Valid') {
         throw "Expected Valid for signed PowerShell script, got $($scriptSigned.Status): $($scriptSigned.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $scriptSigned -ExpectedCertificate $cert -Label 'script signing response'
-    $scriptAfter = Get-PortableSignature -LiteralPath $scriptPath
+    $scriptAfter = Get-PsignSignature -LiteralPath $scriptPath
     if ($scriptAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed script, got $($scriptAfter.Status)."
+        throw "Expected Valid from Get-PsignSignature for signed script, got $($scriptAfter.Status)."
     }
-    $trustedScript = Get-PortableSignature -LiteralPath $scriptPath -TrustedCertificate $rootCert
+    $trustedScript = Get-PsignSignature -LiteralPath $scriptPath -TrustedCertificate $rootCert
     if ($trustedScript.Status -ne 'Valid' -or $trustedScript.TrustStatus -ne 'Valid') {
         throw "Expected explicit trust verification to succeed for signed script, got status=$($trustedScript.Status) trust=$($trustedScript.TrustStatus): $($trustedScript.StatusMessage)"
     }
     Add-Content -LiteralPath $scriptPath -Value '# tamper'
-    $scriptTampered = Get-PortableSignature -LiteralPath $scriptPath
+    $scriptTampered = Get-PsignSignature -LiteralPath $scriptPath
     if ($scriptTampered.Status -ne 'HashMismatch') {
         throw "Expected HashMismatch for tampered signed script, got $($scriptTampered.Status): $($scriptTampered.StatusMessage)"
     }
@@ -307,7 +318,7 @@ param([string] $Name = "portable")
   </Type>
 </Types>
 '@ -Encoding UTF8
-    $ps1xmlSigned = Set-PortableSignature -LiteralPath $ps1xmlPath -Certificate $cert
+    $ps1xmlSigned = Set-PsignSignature -LiteralPath $ps1xmlPath -Certificate $cert
     if ($ps1xmlSigned.Status -ne 'Valid') {
         throw "Expected Valid for signed ps1xml, got $($ps1xmlSigned.Status): $($ps1xmlSigned.StatusMessage)"
     }
@@ -316,35 +327,35 @@ param([string] $Name = "portable")
     if ($ps1xmlText -notmatch '<!-- SIG # Begin signature block -->') {
         throw 'Expected signed ps1xml to use XML Authenticode signature markers.'
     }
-    $ps1xmlAfter = Get-PortableSignature -LiteralPath $ps1xmlPath
+    $ps1xmlAfter = Get-PsignSignature -LiteralPath $ps1xmlPath
     if ($ps1xmlAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed ps1xml, got $($ps1xmlAfter.Status): $($ps1xmlAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature for signed ps1xml, got $($ps1xmlAfter.Status): $($ps1xmlAfter.StatusMessage)"
     }
     Add-Content -LiteralPath $ps1xmlPath -Value '<!-- tamper -->'
-    $ps1xmlTampered = Get-PortableSignature -LiteralPath $ps1xmlPath
+    $ps1xmlTampered = Get-PsignSignature -LiteralPath $ps1xmlPath
     if ($ps1xmlTampered.Status -ne 'HashMismatch') {
         throw "Expected HashMismatch for tampered signed ps1xml, got $($ps1xmlTampered.Status): $($ps1xmlTampered.StatusMessage)"
     }
 
     $scriptContent = [System.Text.Encoding]::UTF8.GetBytes("'content mode'")
-    $contentSigned = Set-PortableSignature -SourcePathOrExtension '.ps1' -Content $scriptContent -Certificate $cert
+    $contentSigned = Set-PsignSignature -SourcePathOrExtension '.ps1' -Content $scriptContent -Certificate $cert
     if ($contentSigned.Status -ne 'Valid') {
         throw "Expected Valid for signed PowerShell script content, got $($contentSigned.Status): $($contentSigned.StatusMessage)"
     }
     if ($null -eq $contentSigned.Content -or $contentSigned.Content.Length -le $scriptContent.Length) {
-        throw 'Expected Set-PortableSignature -Content to return signed content bytes.'
+        throw 'Expected Set-PsignSignature -Content to return signed content bytes.'
     }
     Assert-SignerCertificate -Signature $contentSigned -ExpectedCertificate $cert -Label 'script content signing response'
-    $contentAfter = Get-PortableSignature -SourcePathOrExtension '.ps1' -Content $contentSigned.Content
+    $contentAfter = Get-PsignSignature -SourcePathOrExtension '.ps1' -Content $contentSigned.Content
     if ($contentAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature -Content for signed script, got $($contentAfter.Status): $($contentAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature -Content for signed script, got $($contentAfter.Status): $($contentAfter.StatusMessage)"
     }
 
     $timestampServer = Start-PsignTimestampServer
     try {
         $timestampScript = Join-Path $temp 'Timestamped.ps1'
         Set-Content -LiteralPath $timestampScript -Value '"timestamped"' -Encoding UTF8
-        $timestamped = Set-PortableSignature -LiteralPath $timestampScript -Certificate $cert -TimestampServer $timestampServer.Url -TimestampHashAlgorithm Sha256
+        $timestamped = Set-PsignSignature -LiteralPath $timestampScript -Certificate $cert -TimestampServer $timestampServer.Url -TimestampHashAlgorithm Sha256
         if ($timestamped.Status -ne 'Valid') {
             throw "Expected Valid for timestamped script, got $($timestamped.Status): $($timestamped.StatusMessage)"
         }
@@ -372,7 +383,7 @@ param([string] $Name = "portable")
     Set-Content -LiteralPath (Join-Path $moduleDir 'PortableModule.psd1') -Value "@{ RootModule = 'PortableModule.psm1'; ModuleVersion = '1.0.0'; GUID = '$([System.Guid]::NewGuid())' }" -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $moduleDir 'PortableModule.Types.ps1xml') -Value '<Types />' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $nestedDir 'Helper.ps1') -Value '$script:PortableHelper = $true' -Encoding UTF8
-    $moduleSigned = @(Set-PortableSignature -LiteralPath $moduleDir -CertificatePath $certPath -PrivateKeyPath $keyPath)
+    $moduleSigned = @(Set-PsignSignature -LiteralPath $moduleDir -CertificatePath $certPath -PrivateKeyPath $keyPath)
     if ($moduleSigned.Count -ne 4) {
         throw "Expected 4 signed PowerShell module files, got $($moduleSigned.Count)."
     }
@@ -382,7 +393,7 @@ param([string] $Name = "portable")
     foreach ($moduleSignature in $moduleSigned) {
         Assert-SignerCertificate -Signature $moduleSignature -ExpectedCertificate $cert -Label "module signing response $($moduleSignature.Path)"
     }
-    $moduleValidated = @(Get-PortableSignature -LiteralPath $moduleDir)
+    $moduleValidated = @(Get-PsignSignature -LiteralPath $moduleDir)
     if ($moduleValidated.Count -ne 4) {
         throw "Expected 4 validated PowerShell module files, got $($moduleValidated.Count)."
     }
@@ -393,18 +404,18 @@ param([string] $Name = "portable")
     $unsignedMsix = Join-Path (Join-Path (Join-Path (Join-Path (Join-Path $repo 'tests') 'fixtures') 'generated-unsigned') 'msix') 'sample.msix'
     $msixWork = Join-Path $temp 'sample.msix'
     Copy-Item $unsignedMsix $msixWork
-    $msixBefore = Get-PortableSignature -LiteralPath $msixWork
+    $msixBefore = Get-PsignSignature -LiteralPath $msixWork
     if ($msixBefore.Status -notin @('NotSigned', 'Incompatible')) {
         throw "Expected unsigned MSIX preflight status before signing, got $($msixBefore.Status)."
     }
-    $msixSigned = Set-PortableSignature -LiteralPath $msixWork -PfxPath $pfxPath -Password $pfxPassword
+    $msixSigned = Set-PsignSignature -LiteralPath $msixWork -PfxPath $pfxPath -Password $pfxPassword
     if ($msixSigned.Status -ne 'Valid') {
         throw "Expected Valid after MSIX signing, got $($msixSigned.Status): $($msixSigned.StatusMessage)"
     }
     Assert-SignerCertificate -Signature $msixSigned -ExpectedCertificate $cert -Label 'MSIX signing response'
-    $msixAfter = Get-PortableSignature -LiteralPath $msixWork
+    $msixAfter = Get-PsignSignature -LiteralPath $msixWork
     if ($msixAfter.Status -ne 'Valid') {
-        throw "Expected Valid from Get-PortableSignature for signed MSIX, got $($msixAfter.Status): $($msixAfter.StatusMessage)"
+        throw "Expected Valid from Get-PsignSignature for signed MSIX, got $($msixAfter.Status): $($msixAfter.StatusMessage)"
     }
 }
 finally {

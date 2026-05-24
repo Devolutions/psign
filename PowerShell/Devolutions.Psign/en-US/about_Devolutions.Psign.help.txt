@@ -1,0 +1,120 @@
+TOPIC
+    about_Devolutions.Psign
+
+SHORT DESCRIPTION
+    Portable cross-platform Authenticode signing, verification, and module
+    compliance tools backed by psign.
+
+LONG DESCRIPTION
+    The Devolutions.Psign module provides Authenticode-compatible signing and
+    verification that works on Windows, Linux, and macOS without relying on
+    the Windows trust stack.
+
+    CORE CMDLETS
+
+        Get-PsignSignature
+            Inspect Authenticode signatures on files (PE, scripts, packages).
+            Returns a PortableSignature object with Status, SignerCertificate,
+            TimestampSigningTime, DigestAlgorithm, and trust diagnostics.
+
+        Set-PsignSignature
+            Sign files with a local certificate, PFX, portable cert store
+            thumbprint, Azure Key Vault, or Azure Trusted Signing.
+
+    MODULE MANAGEMENT CMDLETS
+
+        Test-PsignModule
+            Simulate PowerShell execution policy validation on a module.
+            Reports which files pass or fail AllSigned/RemoteSigned checks.
+
+        Protect-PsignModule
+            Batch-sign all policy-checked files in a PowerShell module.
+
+        Unprotect-PsignSignature
+            Strip Authenticode signature blocks from script files.
+
+    CERTIFICATE STORE
+
+        The pcert:\ drive provides a navigable certificate store at
+        ~/.psign/cert-store (or $env:PSIGN_CERT_STORE). Use standard
+        PowerShell commands:
+
+            Get-ChildItem pcert:\CurrentUser\MY
+            New-Item pcert:\CurrentUser\MY -Value $cert
+            Remove-Item pcert:\CurrentUser\MY\<THUMBPRINT>
+
+    TRUST MODEL
+
+        By default, Get-PsignSignature automatically downloads and caches
+        the Microsoft AuthRoot CAB for trust evaluation. To disable:
+
+            $env:PSIGN_NO_AUTO_TRUST = '1'
+
+        For explicit trust:
+            -TrustedCertificate <X509Certificate2[]>
+            -TrustedCertificatePath <string[]>
+            -AnchorDirectory <string>
+            -AuthRootCab <string>
+
+    SIGNING SOURCES
+
+        Local certificate:      -Certificate <X509Certificate2>
+        File-backed key pair:   -CertificatePath + -PrivateKeyPath
+        PFX/PKCS#12:           -PfxPath [-Password]
+        Portable cert store:    -Thumbprint [-StoreName] [-MachineStore]
+        Azure Key Vault:        -AzureKeyVaultUrl -AzureKeyVaultCertificate
+        Azure Trusted Signing:  -ArtifactSigningEndpoint -ArtifactSigningAccountName
+
+    TAB COMPLETION
+
+        The module registers argument completers for:
+        - Thumbprint (from the pcert store, shows subject names)
+        - StoreName (MY, Root, CA, Trust, Disallowed)
+        - HashAlgorithm (Sha256, Sha384, Sha512)
+        - TimestampHashAlgorithm (Sha1, Sha256, Sha384, Sha512)
+        - IncludeChain (Signer, NotRoot, All)
+        - RevocationMode (Off, BestEffort, Require)
+        - Policy (AllSigned, RemoteSigned)
+
+EXAMPLES
+    # Verify a signed script
+    Get-PsignSignature ./script.ps1
+
+    # Verify with detailed output
+    Get-PsignSignature ./app.exe | Format-List
+
+    # Sign a script with a PFX
+    Set-PsignSignature ./script.ps1 -PfxPath ./cert.pfx
+
+    # Sign using the portable cert store
+    Set-PsignSignature ./script.ps1 -Thumbprint ABC123...
+
+    # Sign in-memory content and get signed bytes back
+    $bytes = [Text.Encoding]::UTF8.GetBytes('"hello"')
+    $signed = Set-PsignSignature -SourcePathOrExtension '.ps1' -Content $bytes -PfxPath ./cert.pfx
+    $signed.Content  # signed bytes
+
+    # Import a certificate into the portable store via pcert:
+    $cert = [Security.Cryptography.X509Certificates.X509Certificate2]::new('./cert.pfx', 'pw')
+    New-Item pcert:\CurrentUser\MY -Value $cert
+
+    # Sign using a cert from the pcert: provider
+    $signer = Get-Item pcert:\CurrentUser\MY\<THUMBPRINT>
+    Set-PsignSignature ./script.ps1 -Thumbprint $signer.Thumbprint
+
+    # Check if a module passes AllSigned policy
+    Test-PsignModule ./MyModule -Policy AllSigned
+
+    # Sign all files in a module
+    Protect-PsignModule ./MyModule -PfxPath ./cert.pfx
+
+    # Strip signatures from scripts
+    Unprotect-PsignSignature ./script.ps1
+
+SEE ALSO
+    Get-PsignSignature
+    Set-PsignSignature
+    Test-PsignModule
+    Protect-PsignModule
+    Unprotect-PsignSignature
+    https://github.com/Devolutions/psign

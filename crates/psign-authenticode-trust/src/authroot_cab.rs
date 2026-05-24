@@ -63,3 +63,42 @@ fn certs_from_maybe_pkcs7_der(bytes: &[u8]) -> Vec<Cert> {
     };
     pkcs7.decode_certificates()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Integration test for real-world AuthRoot CAB parsing.
+    /// Requires a cached CAB at `~/.psign/authroot/authrootstl.cab`.
+    /// Run with `cargo test -p psign-authenticode-trust -- --ignored` to execute.
+    #[test]
+    #[ignore]
+    fn parse_real_authroot_cab() {
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_default();
+        let cab_path = std::path::PathBuf::from(&home)
+            .join(".psign")
+            .join("authroot")
+            .join("authrootstl.cab");
+        if !cab_path.exists() {
+            panic!(
+                "No cached AuthRoot CAB at {} — download first via the PowerShell module",
+                cab_path.display()
+            );
+        }
+        let cab_bytes = std::fs::read(&cab_path).unwrap();
+        let (certs, thumbs) = ingest_authroot_cab_bytes(&cab_bytes).unwrap();
+        // The Microsoft AuthRoot CAB typically has 2 CTL signing certs and 400-600 root thumbprints
+        assert!(
+            !certs.is_empty(),
+            "expected at least 1 embedded signing cert, got {}",
+            certs.len()
+        );
+        assert!(
+            thumbs.len() >= 100,
+            "expected at least 100 CTL root thumbprints, got {}",
+            thumbs.len()
+        );
+    }
+}

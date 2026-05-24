@@ -125,7 +125,8 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
     let tsa_leaf = Cert::from_der(&tsa_der).map_err(|e| anyhow!("timestamp signer Cert: {e}"))?;
     let embedded_certs = signed_data_embedded_picky_certs(&ts_sd)?;
     let mut merged = merge_unique_certs(anchor_certs.to_vec(), embedded_certs.clone())?;
-    let chain_owned = issuer_chain_excluding_leaf_online(&tsa_leaf, &mut merged, online)?;
+    let chain_owned =
+        issuer_chain_excluding_leaf_online(&tsa_leaf, &mut merged, online, Some(anchors))?;
     let chain_vec: Vec<&Cert> = chain_owned.iter().collect();
     let root = terminal_root_cert_owned(&tsa_leaf, &chain_owned);
     let root_thumb = cert_sha1_thumbprint(root)?;

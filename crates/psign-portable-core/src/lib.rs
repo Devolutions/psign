@@ -1229,6 +1229,13 @@ fn trust_options(
         temp_dir = Some(dir);
     }
 
+    // When using authroot_cab, automatically enable AIA fetching so the chain builder
+    // can download missing root certificates from the intermediate cert's AIA extension.
+    // The AuthRoot CAB only contains SHA-1 thumbprints of trusted roots, not their DER
+    // bytes. AIA fetching allows the chain builder to obtain the root cert on demand and
+    // then verify its thumbprint against the anchor store.
+    let effective_aia = request.online_aia || request.authroot_cab.is_some();
+
     Ok((
         TrustVerifyPeOptions {
             anchor_dir: request.anchor_directory.clone(),
@@ -1242,7 +1249,7 @@ fn trust_options(
                 .transpose()?,
             verbose_chain: false,
             online: OnlineTrustOptions {
-                enable_aia: request.online_aia,
+                enable_aia: effective_aia,
                 enable_ocsp: request.online_ocsp,
                 revocation_mode: request.revocation_mode.into(),
                 ..OnlineTrustOptions::default()

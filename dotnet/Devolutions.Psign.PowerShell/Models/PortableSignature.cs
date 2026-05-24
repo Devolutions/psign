@@ -1,10 +1,16 @@
 using System.Text.Json.Serialization;
 using System.Security.Cryptography.X509Certificates;
+using System.Management.Automation;
 
 namespace Devolutions.Psign.PowerShell.Models;
 
 public sealed class PortableSignature
 {
+    private X509Certificate2? _signerCertificate;
+    private X509Certificate2? _timeStamperCertificate;
+    private bool _signerCertificateResolved;
+    private bool _timeStamperCertificateResolved;
+
     [JsonPropertyName("schema_version")]
     public int SchemaVersion { get; init; }
 
@@ -15,13 +21,15 @@ public sealed class PortableSignature
     public string Format { get; init; } = string.Empty;
 
     [JsonPropertyName("status")]
-    public string Status { get; init; } = string.Empty;
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public SignatureStatus Status { get; init; } = SignatureStatus.UnknownError;
 
     [JsonPropertyName("status_message")]
     public string StatusMessage { get; init; } = string.Empty;
 
     [JsonPropertyName("trust_status")]
-    public string? TrustStatus { get; init; }
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public SignatureStatus? TrustStatus { get; init; }
 
     [JsonPropertyName("signature_count")]
     public int SignatureCount { get; init; }
@@ -51,16 +59,60 @@ public sealed class PortableSignature
     public string[] PortableDiagnostics { get; init; } = [];
 
     [JsonIgnore]
-    public X509Certificate2? SignerCertificate => DecodeCertificate(SignerCertificateDerBase64);
+    public X509Certificate2? SignerCertificate
+    {
+        get
+        {
+            if (!_signerCertificateResolved)
+            {
+                _signerCertificate = DecodeCertificate(SignerCertificateDerBase64);
+                _signerCertificateResolved = true;
+            }
+            return _signerCertificate;
+        }
+    }
 
     [JsonIgnore]
-    public X509Certificate2? TimeStamperCertificate => DecodeCertificate(TimeStamperCertificateDerBase64);
+    public X509Certificate2? TimeStamperCertificate
+    {
+        get
+        {
+            if (!_timeStamperCertificateResolved)
+            {
+                _timeStamperCertificate = DecodeCertificate(TimeStamperCertificateDerBase64);
+                _timeStamperCertificateResolved = true;
+            }
+            return _timeStamperCertificate;
+        }
+    }
 
     [JsonIgnore]
-    public string SignatureType => Format;
+    public SignatureType SignatureType
+    {
+        get
+        {
+            if (Status is SignatureStatus.NotSigned or SignatureStatus.NotSupportedFileFormat)
+            {
+                return SignatureType.None;
+            }
+
+            return Format.Equals("Catalog", StringComparison.OrdinalIgnoreCase)
+                ? SignatureType.Catalog
+                : SignatureType.Authenticode;
+        }
+    }
 
     [JsonIgnore]
     public bool IsOSBinary => false;
+
+    [JsonIgnore]
+    public string[]? SubjectAlternativeName => ExtractSubjectAlternativeName(SignerCertificate);
+
+    [JsonIgnore]
+    public string PortableStatus => Status.ToString();
+
+    [JsonIgnore]
+    public string? PortableTrustStatus => TrustStatus?.ToString();
 
     [JsonIgnore]
     public string? SourcePathOrExtension { get; set; }
@@ -76,5 +128,33 @@ public sealed class PortableSignature
         }
 
         return new X509Certificate2(Convert.FromBase64String(derBase64));
+    }
+
+    private static string[]? ExtractSubjectAlternativeName(X509Certificate2? certificate)
+    {
+        if (certificate is null)
+        {
+            return null;
+        }
+
+        foreach (X509Extension extension in certificate.Extensions)
+        {
+            if (extension.Oid?.Value != "2.5.29.17")
+            {
+                continue;
+            }
+
+            string formatted = extension.Format(multiLine: true);
+            if (string.IsNullOrWhiteSpace(formatted))
+            {
+                return null;
+            }
+
+            return formatted.Split(
+                ["\r\n", "\n", "\r"],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        }
+
+        return null;
     }
 }

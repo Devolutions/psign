@@ -174,7 +174,8 @@ fn verify_pkcs7_trust_cms_rsa_sha256_fallback(
         .cloned()
         .unwrap_or(leaf_from_x509);
 
-    let chain_owned = issuer_chain_excluding_leaf_online(&leaf, &mut merged, online)?;
+    let chain_owned =
+        issuer_chain_excluding_leaf_online(&leaf, &mut merged, online, Some(anchors))?;
     let chain_vec: Vec<&Cert> = chain_owned.iter().collect();
     let root = terminal_root_cert_owned(&leaf, &chain_owned);
 
@@ -265,7 +266,8 @@ pub fn verify_authenticode_pkcs7_trust(
         .map_err(|e| anyhow!("resolve signing certificate: {e}"))?;
 
     let leaf = leaf.clone();
-    let chain_owned = issuer_chain_excluding_leaf_online(&leaf, &mut merged, online)?;
+    let chain_owned =
+        issuer_chain_excluding_leaf_online(&leaf, &mut merged, online, Some(anchors))?;
     let chain_vec: Vec<&Cert> = chain_owned.iter().collect();
     let root = terminal_root_cert_owned(&leaf, &chain_owned);
 
