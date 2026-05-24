@@ -1506,6 +1506,7 @@ fn is_unsupported_nested_signable(format: &CodeFormat) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_pkcs7_id_data(
     content: &[u8],
     signer: &CodeSigner,

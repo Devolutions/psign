@@ -1783,7 +1783,7 @@ fn write_test_rsa_cert_key(cert_path: &Path, key_path: &Path) {
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(42u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,
