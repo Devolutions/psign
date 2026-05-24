@@ -1835,15 +1835,14 @@ impl CodeSigner {
         content_mode: pkcs7::Pkcs7ContentMode,
         signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
     ) -> Result<Vec<u8>> {
-        let mut signer_cert_hint =
-            if signed_attribute_profile == pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor {
-                Some(match self.remote_signer_certificate_hint()? {
-                    Some(signer_cert) => signer_cert,
-                    None => self.probe_remote_signer_certificate(digest)?,
-                })
-            } else {
-                None
-            };
+        let mut signer_cert_hint = if signed_attribute_profile.requires_signer_certificate() {
+            Some(match self.remote_signer_certificate_hint()? {
+                Some(signer_cert) => signer_cert,
+                None => self.probe_remote_signer_certificate(digest)?,
+            })
+        } else {
+            None
+        };
 
         for attempt in 0..2 {
             let signed_attrs = pkcs7::pkcs7_signed_attrs(

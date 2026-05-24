@@ -118,6 +118,20 @@ pub enum Pkcs7SignedAttributeProfile {
     /// NuGet author package signature attributes needed for NuGet tooling to classify the primary
     /// package signature as a publisher/author signature.
     NuGetAuthor,
+    /// NuGet author attributes that are stable across split prehash/from-signature CLI steps.
+    ///
+    /// One-shot signing should prefer [`Self::NuGetAuthor`]. Split signing cannot safely include a
+    /// fresh `signingTime` unless the exact signed attributes are persisted between steps.
+    NuGetAuthorWithoutSigningTime,
+}
+
+impl Pkcs7SignedAttributeProfile {
+    pub fn requires_signer_certificate(self) -> bool {
+        matches!(
+            self,
+            Self::NuGetAuthor | Self::NuGetAuthorWithoutSigningTime
+        )
+    }
 }
 
 /// Whether CMS `SignedData.encapContentInfo` embeds the signed content.
@@ -1675,11 +1689,13 @@ pub fn pkcs7_signed_attrs(
         pkcs9_content_type_attribute(econtent_type)?,
         pkcs9_message_digest_attribute(&econtent_digest)?,
     ];
-    if profile == Pkcs7SignedAttributeProfile::NuGetAuthor {
+    if profile.requires_signer_certificate() {
         let signer_cert = signer_cert.ok_or_else(|| {
             anyhow!("NuGet author signed attributes require the signer certificate")
         })?;
-        attrs.push(pkcs9_signing_time_attribute()?);
+        if profile == Pkcs7SignedAttributeProfile::NuGetAuthor {
+            attrs.push(pkcs9_signing_time_attribute()?);
+        }
         attrs.push(commitment_type_indication_attribute(
             COMMITMENT_TYPE_IDENTIFIER_PROOF_OF_ORIGIN_OID,
         )?);

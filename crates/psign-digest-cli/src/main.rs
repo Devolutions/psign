@@ -1762,7 +1762,7 @@ fn timestamp_pkcs7_if_requested(
             }
             #[cfg(not(feature = "timestamp-http"))]
             {
-                let _ = (url, timestamp_digest);
+                let _ = (url, timestamp_digest, timestamp_attribute);
                 Err(anyhow!(
                     "{context} RFC3161 timestamping requires the timestamp-http feature"
                 ))
@@ -2434,7 +2434,9 @@ enum Command {
     /// Compute the signed-attributes digest for externally signing NuGet CMS.
     ///
     /// Sign this digest with RSA PKCS#1 v1.5 using the selected SHA-2 algorithm, then pass the
-    /// signature bytes to `nupkg-signature-pkcs7-from-signature`.
+    /// signature bytes to `nupkg-signature-pkcs7-from-signature`. Split NuGet signing uses stable
+    /// author attributes (`commitmentTypeIndication` and `signingCertificateV2`) without
+    /// `signingTime` so both CLI steps can reconstruct the same signed attributes.
     NupkgSignaturePkcs7Prehash {
         path: PathBuf,
         /// Package hash and CMS signer digest algorithm.
@@ -5034,7 +5036,7 @@ where
             let prehash = pkcs7_id_data_remote_prehash(
                 &content,
                 algorithm.into(),
-                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthorWithoutSigningTime,
                 Some(&signer_cert),
             )?;
             write_digest_output(encoding, &prehash, output.as_deref())?;
@@ -5065,7 +5067,7 @@ where
                 algorithm.into(),
                 &signature_bytes,
                 pkcs7::Pkcs7ContentMode::Attached,
-                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthorWithoutSigningTime,
             )
             .with_context(|| {
                 format!(

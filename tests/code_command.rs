@@ -2494,7 +2494,7 @@ fn write_test_rsa_pfx(pfx_path: &Path, password: &str) {
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(85u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,
@@ -2533,7 +2533,7 @@ fn write_test_rsa_cert_key_inner(cert_path: &Path, key_path: &Path, pem_path: Op
     let builder = CertificateBuilder::new(
         Profile::Root,
         SerialNumber::from(84u32),
-        Validity::from_now(Duration::from_secs(86_400)).expect("validity"),
+        Validity::from_now(Duration::from_secs(7 * 86_400)).expect("validity"),
         subject,
         spki,
         &signing_key,
