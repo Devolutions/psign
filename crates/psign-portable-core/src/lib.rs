@@ -153,6 +153,50 @@ impl PortableGetSignatureRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableValidatePowerShellRequest {
+    pub source_path_or_extension: PathBuf,
+    pub content_base64: String,
+    #[serde(default)]
+    pub trusted_certificate_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub trusted_certificates_der_base64: Vec<String>,
+    #[serde(default)]
+    pub anchor_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub authroot_cab: Option<PathBuf>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub prefer_timestamp_signing_time: bool,
+    #[serde(default)]
+    pub require_valid_timestamp: bool,
+    #[serde(default)]
+    pub online_aia: bool,
+    #[serde(default)]
+    pub online_ocsp: bool,
+    #[serde(default)]
+    pub revocation_mode: PortableRevocationMode,
+}
+
+impl PortableValidatePowerShellRequest {
+    fn trust_request(&self) -> PortableGetSignatureRequest {
+        PortableGetSignatureRequest {
+            path: self.source_path_or_extension.clone(),
+            trusted_certificate_paths: self.trusted_certificate_paths.clone(),
+            trusted_certificates_der_base64: self.trusted_certificates_der_base64.clone(),
+            anchor_directory: self.anchor_directory.clone(),
+            authroot_cab: self.authroot_cab.clone(),
+            as_of: self.as_of.clone(),
+            prefer_timestamp_signing_time: self.prefer_timestamp_signing_time,
+            require_valid_timestamp: self.require_valid_timestamp,
+            online_aia: self.online_aia,
+            online_ocsp: self.online_ocsp,
+            revocation_mode: self.revocation_mode,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableSignRequest {
     pub path: PathBuf,
     #[serde(default)]
@@ -363,6 +407,29 @@ pub fn portable_get_signature(
     Ok(response)
 }
 
+pub fn portable_validate_powershell_script(
+    request: PortableValidatePowerShellRequest,
+) -> Result<PortableSignatureResponse> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&request.content_base64)
+        .context("decode content_base64")?;
+    let format = infer_powershell_source_format(&request.source_path_or_extension);
+    if format != PortableFileFormat::PowerShellScript {
+        return Ok(base_response(
+            request.source_path_or_extension,
+            format,
+            PortableSignatureStatus::NotSupportedFileFormat,
+            "Unsupported file format for portable PowerShell signature validation.",
+        ));
+    }
+
+    let mut response = inspect_script(&request.source_path_or_extension, &data)?;
+    let trust_request = request.trust_request();
+    apply_trust_if_requested(&trust_request, format, &data, &mut response)?;
+
+    Ok(response)
+}
+
 pub fn infer_format(path: &Path) -> PortableFileFormat {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return PortableFileFormat::Unknown;
@@ -385,6 +452,23 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
         }
         "vbs" | "js" | "wsf" => PortableFileFormat::WshScript,
         _ => PortableFileFormat::Unknown,
+    }
+}
+
+fn infer_powershell_source_format(path: &Path) -> PortableFileFormat {
+    let format = infer_format(path);
+    if format != PortableFileFormat::Unknown {
+        return format;
+    }
+
+    let Some(source) = path.file_name().and_then(|name| name.to_str()) else {
+        return PortableFileFormat::Unknown;
+    };
+    let extension = source.trim_start_matches('.');
+    if ps_script::extension_supported(extension) {
+        PortableFileFormat::PowerShellScript
+    } else {
+        PortableFileFormat::Unknown
     }
 }
 
@@ -1595,7 +1679,7 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,
                 path: path.to_path_buf(),
-                format: infer_format(path),
+                format: infer_powershell_source_format(path),
                 status: PortableSignatureStatus::Valid,
                 status_message: "Portable script digest binding is valid; trust was not evaluated."
                     .to_string(),
@@ -1611,7 +1695,11 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
                 diagnostics: Vec::new(),
             })
         }
-        Err(error) => Ok(map_digest_error(path, infer_format(path), error)),
+        Err(error) => Ok(map_digest_error(
+            path,
+            infer_powershell_source_format(path),
+            error,
+        )),
     }
 }
 
@@ -2068,6 +2156,94 @@ mod tests {
             infer_format(Path::new("unknown.bin")),
             PortableFileFormat::Unknown
         );
+    }
+
+    #[test]
+    fn infers_powershell_source_extensions() {
+        assert_eq!(
+            infer_powershell_source_format(Path::new(".ps1")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
+            infer_powershell_source_format(Path::new("psm1")),
+            PortableFileFormat::PowerShellScript
+        );
+        assert_eq!(
+            infer_powershell_source_format(Path::new("unknown")),
+            PortableFileFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn validates_unsigned_powershell_content_without_temp_file() {
+        let request = PortableValidatePowerShellRequest {
+            source_path_or_extension: PathBuf::from(".ps1"),
+            content_base64: base64::engine::general_purpose::STANDARD
+                .encode(b"Write-Output 'unsigned'\n"),
+            trusted_certificate_paths: Vec::new(),
+            trusted_certificates_der_base64: Vec::new(),
+            anchor_directory: None,
+            authroot_cab: None,
+            as_of: None,
+            prefer_timestamp_signing_time: false,
+            require_valid_timestamp: false,
+            online_aia: false,
+            online_ocsp: false,
+            revocation_mode: PortableRevocationMode::Off,
+        };
+        let response = portable_validate_powershell_script(request).expect("validate content");
+        assert_eq!(response.status, PortableSignatureStatus::NotSigned);
+        assert_eq!(response.format, PortableFileFormat::PowerShellScript);
+    }
+
+    #[test]
+    fn validates_signed_powershell_content_with_explicit_trust() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-script-trust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let script_path = temp_dir.join("trusted.ps1");
+        let signed_path = temp_dir.join("trusted.signed.ps1");
+        std::fs::write(&script_path, b"Write-Output 'trusted'\r\n").expect("write script");
+
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let sign_request = PortableSignRequest {
+            path: script_path,
+            output_path: Some(signed_path.clone()),
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            chain_certificate_paths: vec![fixture_dir.join("authenticode-test-ca.crt")],
+            ..default_sign_request()
+        };
+        portable_sign(sign_request).expect("sign script");
+
+        let signed = std::fs::read(&signed_path).expect("read signed script");
+        let validate_request = PortableValidatePowerShellRequest {
+            source_path_or_extension: PathBuf::from(".ps1"),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(signed),
+            trusted_certificate_paths: vec![fixture_dir.join("authenticode-test-ca.crt")],
+            trusted_certificates_der_base64: Vec::new(),
+            anchor_directory: None,
+            authroot_cab: None,
+            as_of: None,
+            prefer_timestamp_signing_time: false,
+            require_valid_timestamp: false,
+            online_aia: false,
+            online_ocsp: false,
+            revocation_mode: PortableRevocationMode::Off,
+        };
+        let response =
+            portable_validate_powershell_script(validate_request).expect("validate signed script");
+        assert_eq!(response.status, PortableSignatureStatus::Valid);
+        assert_eq!(response.trust_status, Some(PortableSignatureStatus::Valid));
+        assert!(response.signer_certificate_der_base64.is_some());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

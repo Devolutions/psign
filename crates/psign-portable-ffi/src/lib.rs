@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use psign_portable_core::{
     PortableErrorCode, PortableErrorResponse, portable_error_response, portable_get_signature,
-    portable_sign, version,
+    portable_sign, portable_validate_powershell_script, version,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,6 +63,24 @@ pub unsafe extern "C" fn psign_core_get_signature(
     request_json_len: usize,
 ) -> PsignFfiResult {
     invoke_json(request_json_ptr, request_json_len, portable_get_signature)
+}
+
+/// Validate a PowerShell script/module signature from in-memory content.
+///
+/// # Safety
+///
+/// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
+/// of the call. The returned buffer must be released with `psign_core_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psign_core_validate_powershell_script(
+    request_json_ptr: *const u8,
+    request_json_len: usize,
+) -> PsignFfiResult {
+    invoke_json(
+        request_json_ptr,
+        request_json_len,
+        portable_validate_powershell_script,
+    )
 }
 
 /// Sign a file with the portable Authenticode core.
@@ -188,5 +206,17 @@ mod tests {
         assert_eq!(result.status_code, STATUS_INVALID_REQUEST);
         let json = unsafe { result_json(result) };
         assert!(json.contains("InvalidRequest"));
+    }
+
+    #[test]
+    fn validate_powershell_script_returns_json() {
+        let request =
+            br#"{"source_path_or_extension":".ps1","content_base64":"V3JpdGUtT3V0cHV0IDENCg=="}"#;
+        let result =
+            unsafe { psign_core_validate_powershell_script(request.as_ptr(), request.len()) };
+        assert_eq!(result.status_code, STATUS_OK);
+        let json = unsafe { result_json(result) };
+        assert!(json.contains("PowerShellScript"));
+        assert!(json.contains("NotSigned"));
     }
 }
