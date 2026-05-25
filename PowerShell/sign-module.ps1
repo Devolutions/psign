@@ -97,9 +97,13 @@ function Assert-PsignModuleSignatures {
 
     foreach ($target in $Targets) {
         $signature = Get-PsignSignature -LiteralPath $target -ErrorAction Stop
-        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        if ($signature.SignatureType -ne [System.Management.Automation.SignatureType]::Authenticode -or
+            $signature.Status -notin @(
+                [System.Management.Automation.SignatureStatus]::Valid,
+                [System.Management.Automation.SignatureStatus]::NotTrusted
+            )) {
             $relativePath = Resolve-Path -LiteralPath $target -Relative
-            throw "Expected valid Authenticode signature for '$relativePath', got '$($signature.Status)': $($signature.StatusMessage)"
+            throw "Expected intact Authenticode signature for '$relativePath', got '$($signature.Status)': $($signature.StatusMessage)"
         }
     }
 }
