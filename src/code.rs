@@ -15,7 +15,7 @@ use psign_codesigning_rest::{
 };
 use psign_opc_sign::{nuget, opc, vsix};
 use psign_sip_digest::timestamp::{build_timestamp_request_bytes, parse_time_stamp_resp_der};
-use psign_sip_digest::{pe_digest, pe_embed, pkcs7, rdp};
+use psign_sip_digest::{pe_digest, pe_embed, pkcs7, rdp, verify_pe};
 use rsa::signature::{SignatureEncoding as _, Signer as _, hazmat::PrehashSigner as _};
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -235,11 +235,16 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                         display_path(&output)
                     ))
                 } else {
-                    let signed =
-                        sign_pe_bytes(&input_bytes, &node.path, &signer, signing_digest, false)
-                            .with_context(|| {
-                                format!("sign Authenticode payload {}", input.display())
-                            })?;
+                    let signed = sign_pe_bytes(
+                        &input_bytes,
+                        &node.path,
+                        &signer,
+                        signing_digest,
+                        false,
+                        args.timestamp_url.as_deref(),
+                        args.timestamp_digest,
+                    )
+                    .with_context(|| format!("sign Authenticode payload {}", input.display()))?;
                     std::fs::write(&output, signed).with_context(|| {
                         format!("write signed Authenticode payload {}", output.display())
                     })?;
@@ -503,11 +508,15 @@ fn execute_code_plan(args: &CodeArgs, plan: &CodePlan) -> Result<CommandOutput> 
                 ensure_parent_dir(&output)?;
                 let input_bytes =
                     std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
-                let signed =
-                    sign_clickonce_deploy_bytes(&input_bytes, &node.path, &signer, signing_digest)
-                        .with_context(|| {
-                            format!("sign ClickOnce deploy payload {}", input.display())
-                        })?;
+                let signed = sign_clickonce_deploy_bytes(
+                    &input_bytes,
+                    &node.path,
+                    &signer,
+                    signing_digest,
+                    args.timestamp_url.as_deref(),
+                    args.timestamp_digest,
+                )
+                .with_context(|| format!("sign ClickOnce deploy payload {}", input.display()))?;
                 std::fs::write(&output, signed).with_context(|| {
                     format!("write signed ClickOnce deploy payload {}", output.display())
                 })?;
@@ -966,12 +975,27 @@ fn sign_nested_package_entries(
             }
             CodeFormat::Deploy => entry_updates.push(ZipEntryUpdate {
                 name,
-                bytes: sign_clickonce_deploy_bytes(&bytes, &nested_label, signer, signing_digest)?,
+                bytes: sign_clickonce_deploy_bytes(
+                    &bytes,
+                    &nested_label,
+                    signer,
+                    signing_digest,
+                    timestamp_url,
+                    timestamp_digest,
+                )?,
                 compression,
             }),
             CodeFormat::Pe | CodeFormat::Winmd => entry_updates.push(ZipEntryUpdate {
                 name,
-                bytes: sign_pe_bytes(&bytes, &nested_label, signer, signing_digest, skip_signed)?,
+                bytes: sign_pe_bytes(
+                    &bytes,
+                    &nested_label,
+                    signer,
+                    signing_digest,
+                    skip_signed,
+                    timestamp_url,
+                    timestamp_digest,
+                )?,
                 compression,
             }),
             CodeFormat::Msix
@@ -1036,6 +1060,8 @@ fn sign_clickonce_deploy_bytes(
     label: &str,
     signer: &CodeSigner,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
+    timestamp_url: Option<&str>,
+    timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
     if signing_digest != pkcs7::AuthenticodeSigningDigest::Sha256 {
         return Err(anyhow!(
@@ -1054,8 +1080,16 @@ fn sign_clickonce_deploy_bytes(
             "ClickOnce .deploy payload {label} maps to unsupported content name {content_name}"
         ));
     }
-    sign_pe_bytes(input_bytes, label, signer, signing_digest, false)
-        .with_context(|| format!("sign ClickOnce .deploy PE payload {label}"))
+    sign_pe_bytes(
+        input_bytes,
+        label,
+        signer,
+        signing_digest,
+        false,
+        timestamp_url,
+        timestamp_digest,
+    )
+    .with_context(|| format!("sign ClickOnce .deploy PE payload {label}"))
 }
 
 fn clickonce_deploy_content_name(label: &str) -> Option<String> {
@@ -1080,6 +1114,8 @@ fn sign_pe_bytes(
     signer: &CodeSigner,
     signing_digest: pkcs7::AuthenticodeSigningDigest,
     skip_signed: bool,
+    timestamp_url: Option<&str>,
+    timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
     if skip_signed && pe_has_signature(input_bytes) {
         return Ok(input_bytes.to_vec());
@@ -1087,9 +1123,67 @@ fn sign_pe_bytes(
     if signing_digest != pkcs7::AuthenticodeSigningDigest::Sha256 {
         return Err(anyhow!("PE/WinMD signing currently supports only SHA-256"));
     }
-    signer
+    let signed = signer
         .sign_pe_bytes(input_bytes, signing_digest)
-        .with_context(|| format!("sign PE/WinMD payload {label}"))
+        .with_context(|| format!("sign PE/WinMD payload {label}"))?;
+    timestamp_pe_if_requested(&signed, timestamp_url, timestamp_digest)
+        .with_context(|| format!("timestamp PE/WinMD payload {label}"))
+}
+
+fn timestamp_pe_if_requested(
+    pe_image: &[u8],
+    timestamp_url: Option<&str>,
+    timestamp_digest: Option<DigestAlgorithm>,
+) -> Result<Vec<u8>> {
+    match (timestamp_url, timestamp_digest) {
+        (Some(url), Some(digest)) => timestamp_pe_rfc3161(pe_image, url, digest),
+        (Some(_), None) => Err(anyhow!(
+            "`psign-tool code` requires --timestamp-digest with --timestamp-url"
+        )),
+        (None, Some(_)) => Err(anyhow!(
+            "`psign-tool code` requires --timestamp-url with --timestamp-digest"
+        )),
+        (None, None) => Ok(pe_image.to_vec()),
+    }
+}
+
+#[cfg(feature = "timestamp-http")]
+fn timestamp_pe_rfc3161(
+    pe_image: &[u8],
+    timestamp_url: &str,
+    timestamp_digest: DigestAlgorithm,
+) -> Result<Vec<u8>> {
+    let pkcs7_count = verify_pe::pe_pkcs7_signed_data_entry_count(pe_image)
+        .context("inspect PE/WinMD Authenticode PKCS#7 rows")?;
+    let pkcs7_index = pkcs7_count
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("PE/WinMD has no PKCS#7 Authenticode row to timestamp"))?;
+    let pkcs7_der = verify_pe::pe_nth_pkcs7_signed_data_der(pe_image, pkcs7_index)
+        .with_context(|| format!("extract PE/WinMD PKCS#7 row {pkcs7_index}"))?;
+    let stamped_pkcs7 = timestamp_pkcs7_der_rfc3161(
+        &pkcs7_der,
+        timestamp_url,
+        timestamp_digest,
+        Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+    )
+    .with_context(|| format!("timestamp PE/WinMD PKCS#7 row {pkcs7_index}"))?;
+    pe_embed::pe_replace_authenticode_pkcs7_certificate_at(
+        pe_image.to_vec(),
+        pkcs7_index,
+        &stamped_pkcs7,
+    )
+    .with_context(|| format!("replace PE/WinMD PKCS#7 row {pkcs7_index}"))
+}
+
+#[cfg(not(feature = "timestamp-http"))]
+fn timestamp_pe_rfc3161(
+    _pe_image: &[u8],
+    _timestamp_url: &str,
+    _timestamp_digest: DigestAlgorithm,
+) -> Result<Vec<u8>> {
+    Err(anyhow!(
+        "`psign-tool code` RFC3161 timestamping requires the timestamp-http feature"
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

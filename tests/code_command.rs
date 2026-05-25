@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use psign_opc_sign::nuget;
-use psign_sip_digest::pkcs7;
+use psign_sip_digest::{pkcs7, verify_pe};
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -385,6 +385,59 @@ fn code_signs_top_level_pe_with_local_cert_key() {
         .arg(&output)
         .assert()
         .success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn code_signs_top_level_pe_with_rfc3161_timestamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.exe");
+    let output = base.join("app.timestamped.exe");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::copy(
+        repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi"),
+        &input,
+    )
+    .unwrap();
+    let (mut guard, timestamp_url) = spawn_timestamp_server();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--timestamp-url",
+            &timestamp_url,
+            "--timestamp-digest",
+            "sha256",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("app.exe");
+    cmd.assert().success();
+    let status = guard.0.wait().expect("timestamp server exit");
+    assert!(status.success(), "timestamp server failed with {status}");
+
+    let mut verify = psign();
+    verify
+        .args(["portable", "verify-pe"])
+        .arg(&output)
+        .assert()
+        .success();
+
+    let pkcs7_der =
+        verify_pe::pe_nth_pkcs7_signed_data_der(&std::fs::read(&output).unwrap(), 0).unwrap();
+    assert_pkcs7_has_unsigned_attr(
+        &pkcs7_der,
+        pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID,
+        pkcs7::PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+    );
 }
 
 #[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
@@ -1780,6 +1833,61 @@ fn code_signs_nupkg_with_rfc3161_timestamp() {
         .stdout(predicate::str::contains("1.2.840.113549.1.9.16.2.14"));
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn code_signs_nupkg_nested_pe_with_rfc3161_timestamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("with-pe.nupkg");
+    let output = base.join("with-pe.timestamped.nupkg");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    let nested_pe = base.join("tiny32.timestamped.dll");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::copy(
+        repo_root().join("tests/fixtures/package-signing/unsigned/with-pe.nupkg"),
+        &input,
+    )
+    .unwrap();
+    let (mut guard, timestamp_url) = spawn_timestamp_server_with_max_requests(2);
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--timestamp-url",
+            &timestamp_url,
+            "--timestamp-digest",
+            "sha256",
+            "--output",
+        ])
+        .arg(&output)
+        .arg("with-pe.nupkg");
+    cmd.assert().success();
+    let status = guard.0.wait().expect("timestamp server exit");
+    assert!(status.success(), "timestamp server failed with {status}");
+
+    let signature_der = nuget::extract_signature_path(&output).expect("extract NuGet signature");
+    assert_pkcs7_has_unsigned_attr(
+        &signature_der,
+        pkcs7::PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+        pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID,
+    );
+
+    extract_zip_entry(&output, "lib/net8.0/tiny32.dll", &nested_pe);
+    let nested_pkcs7 =
+        verify_pe::pe_nth_pkcs7_signed_data_der(&std::fs::read(&nested_pe).unwrap(), 0).unwrap();
+    assert_pkcs7_has_unsigned_attr(
+        &nested_pkcs7,
+        pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID,
+        pkcs7::PKCS9_RFC3161_TIMESTAMP_TOKEN_OID,
+    );
+}
+
 #[test]
 fn code_rejects_zero_max_concurrency() {
     let mut cmd = psign();
@@ -2378,7 +2486,13 @@ impl Drop for PsignServerGuard {
 
 #[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
 fn spawn_timestamp_server() -> (PsignServerGuard, String) {
+    spawn_timestamp_server_with_max_requests(1)
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+fn spawn_timestamp_server_with_max_requests(max_requests: u64) -> (PsignServerGuard, String) {
     let mut server_cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("psign-server"));
+    let max_requests = max_requests.to_string();
     server_cmd.args([
         "timestamp-server",
         "--listen",
@@ -2386,7 +2500,7 @@ fn spawn_timestamp_server() -> (PsignServerGuard, String) {
         "--gen-time",
         "20240102030405Z",
         "--max-requests",
-        "1",
+        max_requests.as_str(),
     ]);
     server_cmd.stdout(std::process::Stdio::piped());
     server_cmd.stderr(std::process::Stdio::piped());
