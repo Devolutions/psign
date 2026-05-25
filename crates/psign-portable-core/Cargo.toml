@@ -13,6 +13,7 @@ artifact-signing-rest = ["dep:psign-codesigning-rest"]
 
 [dependencies]
 anyhow = "1"
+authenticode = { version = "0.5.0", features = ["std", "object"] }
 base64 = "0.22"
 der = "0.7"
 psign-authenticode-trust = { path = "../psign-authenticode-trust" }
@@ -29,4 +30,3 @@ sha1 = { version = "0.10", default-features = false }
 sha2 = "0.10"
 x509-cert = { version = "0.2.5", default-features = false, features = ["pem"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
-
