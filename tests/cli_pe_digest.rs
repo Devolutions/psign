@@ -5105,12 +5105,329 @@ fn psign_server_artifact_signing_signs_winmd_with_portable_cli() {
         .stdout(predicate::str::contains("trust-verify-pe: ok"));
 }
 
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_cab_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_cab = dir.path().join("tiny.cab");
+    let out_cab = dir.path().join("tiny.artifact-signed.cab");
+    let unsigned = minimal_unsigned_cab_fixture_bytes();
+    std::fs::write(&in_cab, &unsigned).expect("write unsigned CAB");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-cab")
+        .arg(&in_cab)
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_cab);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-cab: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-cab").arg(&out_cab);
+    verify.assert().success();
+
+    let signed = std::fs::read(&out_cab).expect("read signed CAB");
+    let pkcs7 = cab_digest::cab_signature_pkcs7_der(&signed).expect("extract CAB PKCS#7");
+    let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7).expect("parse SignedData");
+    let indirect = pkcs7::signed_data_spc_indirect_message_digest_octets(&sd).expect("indirect");
+    pkcs7::verify_signed_data_authenticode_indirect_digest_and_rsa_sha256_pkcs1v15_signature(
+        &sd, 0, &indirect,
+    )
+    .expect("portable Artifact Signing CAB RSA signature verifies");
+}
+
+#[cfg(all(
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "artifact-signing-rest"
+))]
+#[test]
+fn psign_server_artifact_signing_timestamps_cab_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_cab = dir.path().join("tiny.cab");
+    let out_cab = dir.path().join("tiny.artifact-signed-timestamped.cab");
+    std::fs::write(&in_cab, minimal_unsigned_cab_fixture_bytes()).expect("write unsigned CAB");
+
+    let (mut artifact_guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-cab")
+        .arg(&in_cab)
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--output")
+        .arg(&out_cab);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-cab: ok"));
+    let artifact_status = artifact_guard.0.wait().expect("artifact server exit");
+    assert!(
+        artifact_status.success(),
+        "artifact server failed with {artifact_status}"
+    );
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
+
+    let signed = std::fs::read(&out_cab).expect("read signed CAB");
+    let pkcs7 = cab_digest::cab_signature_pkcs7_der(&signed).expect("extract CAB PKCS#7");
+    let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7).expect("parse SignedData");
+    let signer = sd.signer_infos.0.as_slice().first().expect("SignerInfo");
+    let has_timestamp = signer
+        .unsigned_attrs
+        .as_ref()
+        .map(|attrs| {
+            attrs
+                .iter()
+                .any(|attr| attr.oid == pkcs7::MS_RFC3161_TIMESTAMP_TOKEN_OID)
+        })
+        .unwrap_or(false);
+    assert!(has_timestamp, "CAB signature has no RFC3161 timestamp");
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_msi_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_msi = dir.path().join("tiny.artifact-signed.msi");
+    let input = repo_root().join("tests/fixtures/msi-authenticode-upstream/tiny-pkcs7-stub.msi");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-msi")
+        .arg(&input)
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_msi);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-msi: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-msi").arg(&out_msi);
+    verify.assert().success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn psign_server_artifact_signing_signs_catalog_with_portable_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_cat = dir.path().join("artifact-signed.cat");
+    let subjects = [
+        tiny32_unsigned_fixture(),
+        catalog_workflow_subject("hello.txt"),
+        catalog_workflow_subject("blob.bin"),
+    ];
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = portable_cmd();
+    cmd.arg("sign-catalog")
+        .arg(subjects[0].as_path())
+        .arg(subjects[1].as_path())
+        .arg(subjects[2].as_path())
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--output")
+        .arg(&out_cat);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sign-catalog: ok"))
+        .stdout(predicate::str::contains("members=3"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-catalog").arg(&out_cat);
+    verify.assert().success();
+
+    for subject in &subjects {
+        let mut member = portable_cmd();
+        member
+            .arg("verify-catalog-member")
+            .arg("--catalog")
+            .arg(&out_cat)
+            .arg(subject);
+        member
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("verify-catalog-member: ok"));
+    }
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_signs_cab() {
+    let dir = tempfile::tempdir().unwrap();
+    let cab_path = dir.path().join("tiny.mode-portable.cab");
+    std::fs::write(&cab_path, minimal_unsigned_cab_fixture_bytes()).expect("write unsigned CAB");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg(&cab_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-cab").arg(&cab_path);
+    verify.assert().success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_uses_file_list_skip_signed_and_parallelism() {
+    let dir = tempfile::tempdir().unwrap();
+    let unsigned_cab = dir.path().join("unsigned.cab");
+    let already_signed_cab = dir.path().join("already-signed.cab");
+    let file_list = dir.path().join("files.txt");
+    std::fs::write(&unsigned_cab, minimal_unsigned_cab_fixture_bytes())
+        .expect("write unsigned CAB");
+    std::fs::copy(tiny_signed_cab_fixture(), &already_signed_cab).expect("copy signed CAB");
+    std::fs::write(
+        &file_list,
+        format!(
+            "{}\n{}\n",
+            already_signed_cab.display(),
+            unsigned_cab.display()
+        ),
+    )
+    .expect("write file list");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--input-file-list")
+        .arg(&file_list)
+        .arg("--skip-signed")
+        .arg("--max-degree-of-parallelism")
+        .arg("2");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped (already signed):"))
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-cab").arg(&unsigned_cab);
+    verify.assert().success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_continue_on_error_reports_partial_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let cab_path = dir.path().join("tiny.cab");
+    let unsupported_path = dir.path().join("unsupported.ps1");
+    std::fs::write(&cab_path, minimal_unsigned_cab_fixture_bytes()).expect("write unsigned CAB");
+    std::fs::write(&unsupported_path, b"not a portable Artifact Signing target")
+        .expect("write unsupported target");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg("--continue-on-error")
+        .arg(&cab_path)
+        .arg(&unsupported_path);
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("Signed:"))
+        .stdout(predicate::str::contains("Failed:"))
+        .stdout(predicate::str::contains(
+            "portable Artifact Signing is currently implemented for PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX targets",
+        ));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-cab").arg(&cab_path);
+    verify.assert().success();
+}
+
 #[cfg(feature = "artifact-signing-rest")]
 #[test]
-fn mode_portable_artifact_signing_rejects_non_pe_targets_before_remote_submit() {
+fn mode_portable_artifact_signing_rejects_unsupported_targets_before_remote_submit() {
     let dir = tempfile::tempdir().unwrap();
-    let cab_path = dir.path().join("unsigned.cab");
-    std::fs::write(&cab_path, minimal_unsigned_cab_bytes()).expect("write CAB");
+    let script_path = dir.path().join("unsigned.ps1");
+    std::fs::write(&script_path, b"Write-Host test").expect("write script");
 
     let mut cmd = Command::cargo_bin("psign-tool").unwrap();
     cmd.arg("--mode")
@@ -5124,10 +5441,48 @@ fn mode_portable_artifact_signing_rejects_non_pe_targets_before_remote_submit() 
         .arg("prof")
         .arg("--artifact-signing-access-token")
         .arg("test-token")
-        .arg(&cab_path);
+        .arg(&script_path);
     cmd.assert().failure().stderr(predicate::str::contains(
-        "portable Artifact Signing is currently implemented only for PE/WinMD targets",
+        "portable Artifact Signing is currently implemented for PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX targets",
     ));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_signs_flat_msix() {
+    let dir = tempfile::tempdir().unwrap();
+    let msix_path = dir.path().join("sample.msix");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/generated-unsigned/msix/sample.msix"),
+        &msix_path,
+    )
+    .expect("copy MSIX fixture");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg(&endpoint)
+        .arg(&msix_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-msix").arg(&msix_path);
+    verify.assert().success();
 }
 
 #[cfg(all(

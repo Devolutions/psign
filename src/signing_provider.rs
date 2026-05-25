@@ -71,11 +71,13 @@ pub enum AzureAuthConfig {
     },
     ManagedIdentity {
         client_id: Option<String>,
+        resource_id: Option<String>,
         authority: Option<String>,
     },
     WorkloadIdentity {
         tenant_id: Option<String>,
         client_id: Option<String>,
+        federated_token_file: Option<String>,
         authority: Option<String>,
     },
     Ambient {
@@ -127,9 +129,11 @@ impl SigningProviderConfig {
                         args.azure_key_vault_credential_type,
                         args.azure_key_vault_access_token.as_deref(),
                         args.azure_key_vault_managed_identity,
+                        None,
                         args.azure_key_vault_tenant_id.as_deref(),
                         args.azure_key_vault_client_id.as_deref(),
                         args.azure_key_vault_client_secret.as_deref(),
+                        None,
                         args.azure_authority.as_deref(),
                     ),
                 },
@@ -156,9 +160,12 @@ impl SigningProviderConfig {
                         args.artifact_signing_credential_type,
                         args.artifact_signing_access_token.as_deref(),
                         args.artifact_signing_managed_identity,
+                        args.artifact_signing_managed_identity_resource_id
+                            .as_deref(),
                         args.artifact_signing_tenant_id.as_deref(),
                         args.artifact_signing_client_id.as_deref(),
                         args.artifact_signing_client_secret.as_deref(),
+                        args.artifact_signing_federated_token_file.as_deref(),
                         args.artifact_signing_authority.as_deref(),
                     ),
                 },
@@ -248,21 +255,26 @@ fn artifact_signing_requested(args: &SignArgs) -> bool {
         || text_present(&args.artifact_signing_correlation_id)
         || text_present(&args.artifact_signing_access_token)
         || args.artifact_signing_managed_identity
+        || text_present(&args.artifact_signing_managed_identity_resource_id)
         || args.artifact_signing_credential_type.is_some()
         || text_present(&args.artifact_signing_tenant_id)
         || text_present(&args.artifact_signing_client_id)
         || text_present(&args.artifact_signing_client_secret)
+        || text_present(&args.artifact_signing_federated_token_file)
         || text_present(&args.artifact_signing_authority)
         || text_present(&args.artifact_signing_endpoint_base_url)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn azure_auth(
     credential_type: Option<AzureCredentialType>,
     access_token: Option<&str>,
     managed_identity: bool,
+    managed_identity_resource_id: Option<&str>,
     tenant_id: Option<&str>,
     client_id: Option<&str>,
     client_secret: Option<&str>,
+    federated_token_file: Option<&str>,
     authority: Option<&str>,
 ) -> AzureAuthConfig {
     let authority = trim_str(authority).map(str::to_owned);
@@ -270,6 +282,7 @@ fn azure_auth(
         AzureCredentialType::AccessToken => AzureAuthConfig::AccessToken { authority },
         AzureCredentialType::ManagedIdentity => AzureAuthConfig::ManagedIdentity {
             client_id: trim_str(client_id).map(str::to_owned),
+            resource_id: trim_str(managed_identity_resource_id).map(str::to_owned),
             authority,
         },
         AzureCredentialType::ClientSecret => AzureAuthConfig::ClientSecret {
@@ -280,6 +293,7 @@ fn azure_auth(
         AzureCredentialType::WorkloadIdentity => AzureAuthConfig::WorkloadIdentity {
             tenant_id: trim_str(tenant_id).map(str::to_owned),
             client_id: trim_str(client_id).map(str::to_owned),
+            federated_token_file: trim_str(federated_token_file).map(str::to_owned),
             authority,
         },
         AzureCredentialType::Default => {
@@ -288,12 +302,20 @@ fn azure_auth(
             } else if managed_identity {
                 AzureAuthConfig::ManagedIdentity {
                     client_id: trim_str(client_id).map(str::to_owned),
+                    resource_id: trim_str(managed_identity_resource_id).map(str::to_owned),
                     authority,
                 }
             } else if trim_str(client_secret).is_some() {
                 AzureAuthConfig::ClientSecret {
                     tenant_id: trim_str(tenant_id).map(str::to_owned),
                     client_id: trim_str(client_id).map(str::to_owned),
+                    authority,
+                }
+            } else if trim_str(federated_token_file).is_some() {
+                AzureAuthConfig::WorkloadIdentity {
+                    tenant_id: trim_str(tenant_id).map(str::to_owned),
+                    client_id: trim_str(client_id).map(str::to_owned),
+                    federated_token_file: trim_str(federated_token_file).map(str::to_owned),
                     authority,
                 }
             } else {

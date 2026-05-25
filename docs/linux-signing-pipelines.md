@@ -1,6 +1,6 @@
 # Linux signing pipelines (what works today)
 
-**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys, Azure Key Vault RSA signing, or Azure Artifact Signing REST, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. It still does not provide a broad native-compatible `sign` verb, MSIX signing/embed, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
+**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys, Azure Key Vault RSA signing, or Azure Artifact Signing REST, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. CAB, MSI/MSP, generic catalog, and flat MSIX/AppX signing can also use Azure Artifact Signing REST. It still does not provide MSIX/AppX bundle, upload, or encrypted package final signing, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
 
 For tool-by-tool gaps vs **`signtool.exe`**, AzureSignTool, and Artifact Signing, see [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md). On Windows, for writable copies of native signing binaries outside protected install paths, see [`writable-signing-binaries.md`](writable-signing-binaries.md).
 
@@ -59,9 +59,9 @@ psign-tool --mode portable sign \
 
 Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
 
-## 1.3 Portable PE signing with Azure Artifact Signing REST
+## 1.3 Portable signing with Azure Artifact Signing REST
 
-With **`--features artifact-signing-rest`**, PE/WinMD signing can use Azure Artifact Signing as a REST remote signer without Microsoft client DLLs or SignTool:
+With **`--features artifact-signing-rest`**, PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, and generic catalog signing can use Azure Artifact Signing as a REST remote signer without Microsoft client DLLs or SignTool:
 
 ```bash
 psign-tool portable sign-pe ./MyApp.exe \
@@ -85,7 +85,57 @@ psign-tool --mode portable sign \
   ./MyApp.exe
 ```
 
-This path builds Authenticode CMS locally, sends the CMS authenticated-attributes digest to Artifact Signing `:sign`, embeds the returned RSA signature and signing certificate, then attaches the RFC3161 timestamp before PE embedding. For production, keep timestamping enabled because Artifact Signing profile certificates are short-lived.
+This path builds Authenticode CMS locally, sends the CMS authenticated-attributes digest to Artifact Signing `:sign`, embeds the returned RSA signature and signing certificate, then attaches the RFC3161 timestamp before embedding when `timestamp-http` is enabled. For production signatures, keep timestamping enabled because Artifact Signing profile certificates are short-lived.
+
+CAB, MSI/MSP, and flat MSIX/AppX can also use the native-shaped in-place form:
+
+```bash
+psign-tool --mode portable sign \
+  --dmdf ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  ./installer.msi ./payload.cab ./package.msix
+```
+
+For output-path control or catalog authoring, use the scoped portable commands:
+
+```bash
+psign-tool portable sign-cab ./payload.cab \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --output ./payload.signed.cab
+
+psign-tool portable sign-msi ./installer.msi \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --output ./installer.signed.msi
+
+psign-tool portable sign-catalog \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --output ./files.cat \
+  ./file1.exe ./file2.txt
+```
+
+Non-PE sign-time timestamp mutation is still not a general `SignerTimeStampEx3` replacement for every SIP target, but CAB/MSI/catalog and flat MSIX/AppX Artifact Signing persist RFC3161 tokens in their generated PKCS#7 when built with `timestamp-http`.
+
+Native-shaped portable Artifact Signing batches can use `--input-file-list`, `--skip-signed`, `--continue-on-error`, and `--max-degree-of-parallelism`:
+
+```bash
+psign-tool --mode portable sign \
+  --dmdf ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --input-file-list ./files-to-sign.txt \
+  --skip-signed \
+  --continue-on-error \
+  --max-degree-of-parallelism 4
+```
+
+The file list accepts one path or glob per line; blank lines and `#` comments are ignored. Skip detection currently covers PE/WinMD certificate tables, CAB signatures, MSI/MSP `DigitalSignature` streams, and flat MSIX/AppX `AppxSignature.p7x` packages.
 
 ## 1.4 Package-native helper workflows
 
@@ -184,10 +234,12 @@ Build **`psign-tool portable`** with **`--features artifact-signing-rest`**. For
    psign-tool portable artifact-signing-submit \
      --region REGION --account-name ACCOUNT --profile-name PROFILE \
      --digest-file digest.bin --signature-algorithm RS256 \
-     --managed-identity   # or --access-token / tenant + client-id + client-secret
+     --managed-identity   # or --access-token / client-secret / workload identity / default chain
    ```
 
-3. **Embed** PKCS#7 / complete Authenticode: PE/WinMD is now handled by `portable sign-pe --artifact-signing-*`; non-PE remote-sign embedding still requires Windows mode or future portable remote-signer support.
+   The portable Rust credential resolver supports explicit bearer tokens, system- or user-assigned managed identity, client-secret service principals, workload identity federation, and a DefaultAzureCredential-like non-interactive chain from `AZURE_*` environment variables. Metadata `ExcludeCredentials` entries are honored by that default chain.
+
+3. **Embed** PKCS#7 / complete Authenticode: PE/WinMD, CAB, MSI/MSP, and generic catalog signing are now handled by `portable sign-* --artifact-signing-*`; native-shaped `--mode portable sign --artifact-signing-*` supports PE/WinMD, CAB, and MSI/MSP in place. Add `--timestamp-url ... --timestamp-digest sha256` to timestamp the generated Authenticode CMS where the `timestamp-http` feature is enabled.
 
 Optional debug: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 

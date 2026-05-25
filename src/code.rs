@@ -10,8 +10,8 @@ use psign_azure_kv_rest::{
 };
 #[cfg(feature = "artifact-signing-rest")]
 use psign_codesigning_rest::{
-    CodesigningAuth, CodesigningSubmitParams, DEFAULT_API_VERSION,
-    submit_codesign_hash_signature_blocking,
+    CodesigningAuth, CodesigningAuthInput, CodesigningCredentialType, CodesigningSubmitParams,
+    DEFAULT_API_VERSION, resolve_codesigning_auth, submit_codesign_hash_signature_blocking,
 };
 use psign_opc_sign::{nuget, opc, vsix};
 use psign_sip_digest::timestamp::{build_timestamp_request_bytes, parse_time_stamp_resp_der};
@@ -1735,9 +1735,12 @@ struct CodeArtifactSigningSigner {
     correlation_id: Option<String>,
     access_token: Option<String>,
     managed_identity: bool,
+    managed_identity_resource_id: Option<String>,
+    credential_type: Option<AzureCredentialType>,
     tenant_id: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
+    federated_token_file: Option<String>,
     authority: Option<String>,
     endpoint_base_url: Option<String>,
 }
@@ -2075,49 +2078,42 @@ impl CodeArtifactSigningSigner {
                     .and_then(|m| text_opt(m.CorrelationId.as_deref()))
             }),
             authority: text_opt(self.authority.as_deref()),
-            auth: self.auth()?,
+            auth: self.auth(
+                metadata
+                    .as_ref()
+                    .and_then(|m| m.ExcludeCredentials.clone())
+                    .unwrap_or_default(),
+            )?,
             endpoint_base_url: endpoint,
         })
     }
 
-    fn auth(&self) -> Result<CodesigningAuth> {
-        let has_token = text_opt(self.access_token.as_deref()).is_some();
-        let tenant = text_opt(self.tenant_id.as_deref());
-        let client = text_opt(self.client_id.as_deref());
-        let secret = text_opt(self.client_secret.as_deref());
-        let client_parts = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
-        if self.managed_identity {
-            if has_token || client_parts != 0 {
-                return Err(anyhow!(
-                    "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
-                ));
-            }
-            return Ok(CodesigningAuth::ManagedIdentity);
-        }
-        if let Some(token) = text_opt(self.access_token.as_deref()) {
-            if client_parts != 0 {
-                return Err(anyhow!(
-                    "use either Artifact Signing access token or client credentials, not both"
-                ));
-            }
-            return Ok(CodesigningAuth::Bearer(token));
-        }
-        if client_parts != 0 && client_parts != 3 {
-            return Err(anyhow!(
-                "Artifact Signing client credentials require all of tenant-id, client-id, and client-secret"
-            ));
-        }
-        if client_parts == 0 {
-            return Err(anyhow!(
-                "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
-            ));
-        }
-        Ok(CodesigningAuth::ClientCredentials {
-            tenant_id: tenant.unwrap(),
-            client_id: client.unwrap(),
-            client_secret: secret.unwrap(),
+    fn auth(&self, exclude_credentials: Vec<String>) -> Result<CodesigningAuth> {
+        resolve_codesigning_auth(&CodesigningAuthInput {
+            access_token: self.access_token.clone(),
+            managed_identity: self.managed_identity,
+            managed_identity_resource_id: self.managed_identity_resource_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            federated_token_file: self.federated_token_file.clone(),
+            credential_type: codesigning_credential_type(self.credential_type),
+            exclude_credentials,
         })
     }
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn codesigning_credential_type(
+    value: Option<AzureCredentialType>,
+) -> Option<CodesigningCredentialType> {
+    value.map(|value| match value {
+        AzureCredentialType::Default => CodesigningCredentialType::Default,
+        AzureCredentialType::ManagedIdentity => CodesigningCredentialType::ManagedIdentity,
+        AzureCredentialType::AccessToken => CodesigningCredentialType::AccessToken,
+        AzureCredentialType::ClientSecret => CodesigningCredentialType::ClientSecret,
+        AzureCredentialType::WorkloadIdentity => CodesigningCredentialType::WorkloadIdentity,
+    })
 }
 
 fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
@@ -2285,14 +2281,6 @@ fn resolve_code_signer_azure_key_vault(_args: &CodeArgs) -> Result<CodeSigner> {
 
 #[cfg(feature = "artifact-signing-rest")]
 fn resolve_code_signer_artifact_signing(args: &CodeArgs) -> Result<CodeSigner> {
-    if matches!(
-        args.artifact_signing_credential_type,
-        Some(AzureCredentialType::WorkloadIdentity)
-    ) {
-        return Err(anyhow!(
-            "`psign-tool code` Artifact Signing execution does not support workload identity yet"
-        ));
-    }
     Ok(CodeSigner {
         backend: CodeSignerBackend::ArtifactSigning(Box::new(CodeArtifactSigningSigner {
             metadata: args.artifact_signing_metadata.clone(),
@@ -2309,9 +2297,14 @@ fn resolve_code_signer_artifact_signing(args: &CodeArgs) -> Result<CodeSigner> {
                     args.artifact_signing_credential_type,
                     Some(AzureCredentialType::ManagedIdentity)
                 ),
+            managed_identity_resource_id: args
+                .artifact_signing_managed_identity_resource_id
+                .clone(),
+            credential_type: args.artifact_signing_credential_type,
             tenant_id: args.artifact_signing_tenant_id.clone(),
             client_id: args.artifact_signing_client_id.clone(),
             client_secret: args.artifact_signing_client_secret.clone(),
+            federated_token_file: args.artifact_signing_federated_token_file.clone(),
             authority: args.artifact_signing_authority.clone(),
             endpoint_base_url: args.artifact_signing_endpoint_base_url.clone(),
         })),
@@ -2349,10 +2342,16 @@ fn artifact_signing_requested(args: &CodeArgs) -> bool {
         || text_opt(args.artifact_signing_correlation_id.as_deref()).is_some()
         || text_opt(args.artifact_signing_access_token.as_deref()).is_some()
         || args.artifact_signing_managed_identity
+        || text_opt(
+            args.artifact_signing_managed_identity_resource_id
+                .as_deref(),
+        )
+        .is_some()
         || args.artifact_signing_credential_type.is_some()
         || text_opt(args.artifact_signing_tenant_id.as_deref()).is_some()
         || text_opt(args.artifact_signing_client_id.as_deref()).is_some()
         || text_opt(args.artifact_signing_client_secret.as_deref()).is_some()
+        || text_opt(args.artifact_signing_federated_token_file.as_deref()).is_some()
         || text_opt(args.artifact_signing_authority.as_deref()).is_some()
         || text_opt(args.artifact_signing_endpoint_base_url.as_deref()).is_some()
 }

@@ -251,11 +251,58 @@ pub struct PortableSignRequest {
     #[serde(default)]
     pub artifact_signing_managed_identity: Option<bool>,
     #[serde(default)]
+    pub artifact_signing_managed_identity_resource_id: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_credential_type: Option<String>,
+    #[serde(default)]
     pub artifact_signing_tenant_id: Option<String>,
     #[serde(default)]
     pub artifact_signing_client_id: Option<String>,
     #[serde(default)]
     pub artifact_signing_client_secret: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_federated_token_file: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_exclude_credentials: Vec<String>,
+}
+
+impl Default for PortableSignRequest {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            output_path: None,
+            hash_algorithm: PortableDigestAlgorithm::default(),
+            certificate_path: None,
+            private_key_path: None,
+            certificate_der_base64: None,
+            private_key_der_base64: None,
+            pfx_path: None,
+            pfx_password: None,
+            chain_certificate_paths: Vec::new(),
+            chain_certificates_der_base64: Vec::new(),
+            timestamp_server: None,
+            timestamp_hash_algorithm: None,
+            azure_key_vault_url: None,
+            azure_key_vault_certificate: None,
+            azure_key_vault_access_token: None,
+            azure_key_vault_client_id: None,
+            azure_key_vault_client_secret: None,
+            azure_key_vault_tenant_id: None,
+            azure_key_vault_managed_identity: None,
+            artifact_signing_endpoint: None,
+            artifact_signing_account_name: None,
+            artifact_signing_profile_name: None,
+            artifact_signing_access_token: None,
+            artifact_signing_managed_identity: None,
+            artifact_signing_managed_identity_resource_id: None,
+            artifact_signing_credential_type: None,
+            artifact_signing_tenant_id: None,
+            artifact_signing_client_id: None,
+            artifact_signing_client_secret: None,
+            artifact_signing_federated_token_file: None,
+            artifact_signing_exclude_credentials: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -912,42 +959,54 @@ fn validate_kv_auth_inputs(request: &PortableSignRequest) -> Result<()> {
 fn artifact_signing_auth(
     request: &PortableSignRequest,
 ) -> Result<psign_codesigning_rest::CodesigningAuth> {
-    let has_token = text_opt(request.artifact_signing_access_token.as_deref()).is_some();
-    let tenant = text_opt(request.artifact_signing_tenant_id.as_deref());
-    let client = text_opt(request.artifact_signing_client_id.as_deref());
-    let secret = text_opt(request.artifact_signing_client_secret.as_deref());
-    let managed_identity = request.artifact_signing_managed_identity.unwrap_or(false);
-    let sp_count = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
+    psign_codesigning_rest::resolve_codesigning_auth(
+        &psign_codesigning_rest::CodesigningAuthInput {
+            access_token: request.artifact_signing_access_token.clone(),
+            managed_identity: request.artifact_signing_managed_identity.unwrap_or(false),
+            managed_identity_resource_id: request
+                .artifact_signing_managed_identity_resource_id
+                .clone(),
+            tenant_id: request.artifact_signing_tenant_id.clone(),
+            client_id: request.artifact_signing_client_id.clone(),
+            client_secret: request.artifact_signing_client_secret.clone(),
+            federated_token_file: request.artifact_signing_federated_token_file.clone(),
+            credential_type: request
+                .artifact_signing_credential_type
+                .as_deref()
+                .map(parse_artifact_signing_credential_type)
+                .transpose()?,
+            exclude_credentials: request.artifact_signing_exclude_credentials.clone(),
+        },
+    )
+}
 
-    if managed_identity {
-        if has_token || sp_count != 0 {
-            bail!(
-                "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
-            );
+#[cfg(feature = "artifact-signing-rest")]
+fn parse_artifact_signing_credential_type(
+    value: &str,
+) -> Result<psign_codesigning_rest::CodesigningCredentialType> {
+    let normalized = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    match normalized.as_str() {
+        "" | "default" | "defaultazurecredential" => {
+            Ok(psign_codesigning_rest::CodesigningCredentialType::Default)
         }
-        return Ok(psign_codesigning_rest::CodesigningAuth::ManagedIdentity);
-    }
-    if let Some(token) = text_opt(request.artifact_signing_access_token.as_deref()) {
-        if sp_count != 0 {
-            bail!("use either Artifact Signing access token or client credentials, not both");
+        "managedidentity" | "managedidentitycredential" => {
+            Ok(psign_codesigning_rest::CodesigningCredentialType::ManagedIdentity)
         }
-        return Ok(psign_codesigning_rest::CodesigningAuth::Bearer(token));
+        "accesstoken" | "bearer" => {
+            Ok(psign_codesigning_rest::CodesigningCredentialType::AccessToken)
+        }
+        "clientsecret" | "clientsecretcredential" => {
+            Ok(psign_codesigning_rest::CodesigningCredentialType::ClientSecret)
+        }
+        "workloadidentity" | "workloadidentitycredential" => {
+            Ok(psign_codesigning_rest::CodesigningCredentialType::WorkloadIdentity)
+        }
+        _ => bail!("unsupported Artifact Signing credential type '{value}'"),
     }
-    if sp_count != 0 && sp_count != 3 {
-        bail!(
-            "Artifact Signing client credentials require artifact_signing_tenant_id, artifact_signing_client_id, and artifact_signing_client_secret"
-        );
-    }
-    if sp_count == 0 {
-        bail!(
-            "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
-        );
-    }
-    Ok(psign_codesigning_rest::CodesigningAuth::ClientCredentials {
-        tenant_id: tenant.unwrap(),
-        client_id: client.unwrap(),
-        client_secret: secret.unwrap(),
-    })
 }
 
 #[cfg(feature = "azure-kv-sign")]
@@ -2811,9 +2870,13 @@ mod tests {
             artifact_signing_profile_name: None,
             artifact_signing_access_token: None,
             artifact_signing_managed_identity: None,
+            artifact_signing_managed_identity_resource_id: None,
+            artifact_signing_credential_type: None,
             artifact_signing_tenant_id: None,
             artifact_signing_client_id: None,
             artifact_signing_client_secret: None,
+            artifact_signing_federated_token_file: None,
+            artifact_signing_exclude_credentials: Vec::new(),
         }
     }
 }

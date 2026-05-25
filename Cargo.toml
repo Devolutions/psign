@@ -51,7 +51,12 @@ azure-kv-sign = [
     "psign-digest-cli/azure-kv-sign-portable",
 ]
 ## Azure Artifact Signing / Trusted Signing **data-plane** hash signing (REST LRO); experimental helper command `artifact-signing-submit`.
-artifact-signing-rest = ["dep:psign-codesigning-rest", "psign-digest-cli/artifact-signing-rest"]
+artifact-signing-rest = [
+    "dep:psign-codesigning-rest",
+    "dep:psign-portable-core",
+    "psign-digest-cli/artifact-signing-rest",
+    "psign-portable-core/artifact-signing-rest",
+]
 ## Portable RFC 3161 TSA HTTP POST helper under `psign-tool portable`.
 timestamp-http = ["psign-digest-cli/timestamp-http"]
 ## Local RFC 3161 timestamp test server (`psign-server`).
@@ -62,6 +67,7 @@ psign-sip-digest = { path = "crates/psign-sip-digest" }
 psign-authenticode-trust = { path = "crates/psign-authenticode-trust" }
 psign-digest-cli = { path = "crates/psign-digest-cli" }
 psign-opc-sign = { path = "crates/psign-opc-sign" }
+psign-portable-core = { path = "crates/psign-portable-core", optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
