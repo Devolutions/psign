@@ -8,7 +8,27 @@ param(
 
     [switch] $SkipNativeBuild,
 
-    [string] $ModuleArchivePath
+    [string] $ModuleArchivePath,
+
+    [switch] $SignModule,
+
+    [string] $AzureKeyVaultUrl,
+
+    [string] $AzureKeyVaultCertificate,
+
+    [string] $AzureKeyVaultClientId,
+
+    [string] $AzureKeyVaultClientSecret,
+
+    [string] $AzureKeyVaultTenantId,
+
+    [string] $TimestampServer,
+
+    [ValidateSet('Sha256', 'Sha384', 'Sha512')]
+    [string] $HashAlgorithm = 'Sha256',
+
+    [ValidateSet('Sha1', 'Sha256', 'Sha384', 'Sha512')]
+    [string] $TimestampHashAlgorithm = 'Sha256'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +37,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $moduleRoot = Join-Path $PSScriptRoot 'Devolutions.Psign'
 $localRepo = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString('N'))
 $installRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString('N'))
+$stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString('N'))
 $repoName = "DevolutionsPsignLocal$([System.Guid]::NewGuid().ToString('N'))"
 
 $buildArgs = @{
@@ -49,9 +70,36 @@ foreach ($cmdlet in $expectedCmdlets) {
     }
 }
 
+$packageModuleRoot = $moduleRoot
+if ($SignModule) {
+    New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
+    Copy-Item -LiteralPath $moduleRoot -Destination $stagingRoot -Recurse -Force
+    $packageModuleRoot = Join-Path $stagingRoot (Split-Path -Leaf $moduleRoot)
+
+    & (Join-Path $PSScriptRoot 'sign-module.ps1') `
+        -ModuleRoot $packageModuleRoot `
+        -SignerModuleRoot $moduleRoot `
+        -AzureKeyVaultUrl $AzureKeyVaultUrl `
+        -AzureKeyVaultCertificate $AzureKeyVaultCertificate `
+        -AzureKeyVaultClientId $AzureKeyVaultClientId `
+        -AzureKeyVaultClientSecret $AzureKeyVaultClientSecret `
+        -AzureKeyVaultTenantId $AzureKeyVaultTenantId `
+        -TimestampServer $TimestampServer `
+        -HashAlgorithm $HashAlgorithm `
+        -TimestampHashAlgorithm $TimestampHashAlgorithm | Out-Host
+
+    $manifestPath = Join-Path $packageModuleRoot 'Devolutions.Psign.psd1'
+    $manifest = Test-ModuleManifest -Path $manifestPath
+    foreach ($cmdlet in $expectedCmdlets) {
+        if ($manifest.ExportedCmdlets.Keys -notcontains $cmdlet) {
+            throw "Signed module manifest does not export expected cmdlet '$cmdlet'."
+        }
+    }
+}
+
 try {
     Register-PSRepository -Name $repoName -SourceLocation $localRepo -PublishLocation $localRepo -InstallationPolicy Trusted
-    Publish-Module -Path $moduleRoot -Repository $repoName -NuGetApiKey 'local-package'
+    Publish-Module -Path $packageModuleRoot -Repository $repoName -NuGetApiKey 'local-package'
 
     $package = Get-ChildItem -Path $localRepo -Filter 'Devolutions.Psign.*.nupkg' |
         Sort-Object LastWriteTimeUtc -Descending |
@@ -69,6 +117,10 @@ try {
             throw "Installed package smoke test did not find cmdlet '$cmdlet'."
         }
     }
+    if ($SignModule) {
+        $savedModuleRoot = Split-Path -Parent $savedManifest
+        & (Join-Path $PSScriptRoot 'sign-module.ps1') -ModuleRoot $savedModuleRoot -VerifyOnly | Out-Host
+    }
     $nativeProbe = New-TemporaryFile
     try {
         $null = Get-PsignSignature -LiteralPath $nativeProbe.FullName -ErrorAction Stop
@@ -80,7 +132,7 @@ try {
         if (Test-Path -LiteralPath $ModuleArchivePath) {
             Remove-Item -LiteralPath $ModuleArchivePath -Force
         }
-        Compress-Archive -Path $moduleRoot -DestinationPath $ModuleArchivePath -Force
+        Compress-Archive -Path $packageModuleRoot -DestinationPath $ModuleArchivePath -Force
     }
     Get-Item -LiteralPath (Join-Path $OutputDirectory $package.Name)
 }
@@ -89,4 +141,5 @@ finally {
     Unregister-PSRepository -Name $repoName -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $localRepo -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

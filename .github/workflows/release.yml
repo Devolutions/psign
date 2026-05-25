@@ -659,6 +659,7 @@ jobs:
     needs:
       - preflight
       - sign_windows
+    environment: ${{ needs.preflight.outputs.publish_env }}
 
     steps:
       - name: Checkout
@@ -677,10 +678,57 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Resolve PowerShell module signing mode
+        id: module_signing_mode
+        shell: pwsh
+        env:
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry_run }}')
+          $signDryRun = [System.Boolean]::Parse('${{ github.event.inputs.sign_dry_run }}')
+
+          $requiredValues = @(
+            $env:CODE_SIGNING_KEYVAULT_URL,
+            $env:AZURE_TENANT_ID,
+            $env:CODE_SIGNING_CLIENT_ID,
+            $env:CODE_SIGNING_CLIENT_SECRET,
+            $env:CODE_SIGNING_CERTIFICATE_NAME,
+            $env:CODE_SIGNING_TIMESTAMP_SERVER
+          )
+
+          $hasSigningSecrets = $true
+          foreach ($value in $requiredValues) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              $hasSigningSecrets = $false
+              break
+            }
+          }
+
+          $shouldSign = $hasSigningSecrets -and ((-not $dryRun) -or $signDryRun)
+
+          if (-not $dryRun -and -not $hasSigningSecrets) {
+            throw 'Code signing secrets are required for non-dry-run release jobs.'
+          }
+
+          "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "PowerShell module payload will be signed: $shouldSign"
+
       - name: Package PowerShell module
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          SIGN_POWERSHELL_MODULE: ${{ steps.module_signing_mode.outputs.should_sign }}
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
         run: |
           $tag = $env:RELEASE_TAG
           if (-not $tag.StartsWith('v')) {
@@ -691,12 +739,25 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $archivePath = Join-Path 'dist' "Devolutions.Psign.$version.zip"
 
-          ./PowerShell/package.ps1 `
-            -Configuration Release `
-            -NativeArtifactsRoot 'dist/native' `
-            -SkipNativeBuild `
-            -OutputDirectory 'dist/powershell' `
-            -ModuleArchivePath $archivePath
+          $packageArgs = @{
+            Configuration = 'Release'
+            NativeArtifactsRoot = 'dist/native'
+            SkipNativeBuild = $true
+            OutputDirectory = 'dist/powershell'
+            ModuleArchivePath = $archivePath
+          }
+
+          if ([System.Boolean]::Parse($env:SIGN_POWERSHELL_MODULE)) {
+            $packageArgs.SignModule = $true
+            $packageArgs.AzureKeyVaultUrl = $env:CODE_SIGNING_KEYVAULT_URL
+            $packageArgs.AzureKeyVaultCertificate = $env:CODE_SIGNING_CERTIFICATE_NAME
+            $packageArgs.AzureKeyVaultClientId = $env:CODE_SIGNING_CLIENT_ID
+            $packageArgs.AzureKeyVaultClientSecret = $env:CODE_SIGNING_CLIENT_SECRET
+            $packageArgs.AzureKeyVaultTenantId = $env:AZURE_TENANT_ID
+            $packageArgs.TimestampServer = $env:CODE_SIGNING_TIMESTAMP_SERVER
+          }
+
+          ./PowerShell/package.ps1 @packageArgs
 
       - name: Upload PowerShell module package artifact
         uses: actions/upload-artifact@v7
