@@ -2018,6 +2018,7 @@ dependencies = [
  "psign-codesigning-rest",
  "psign-digest-cli",
  "psign-opc-sign",
+ "psign-portable-core",
  "psign-sip-digest",
  "rand 0.8.6",
  "rayon",

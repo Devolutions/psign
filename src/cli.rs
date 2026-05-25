@@ -215,6 +215,9 @@ pub struct CodeArgs {
     pub artifact_signing_access_token: Option<String>,
     #[arg(long = "artifact-signing-managed-identity")]
     pub artifact_signing_managed_identity: bool,
+    /// Managed identity resource ID for Artifact Signing user-assigned identity auth.
+    #[arg(long = "artifact-signing-managed-identity-resource-id")]
+    pub artifact_signing_managed_identity_resource_id: Option<String>,
     /// Azure.Identity-style credential selector for Artifact Signing.
     #[arg(long = "artifact-signing-credential-type", value_enum)]
     pub artifact_signing_credential_type: Option<AzureCredentialType>,
@@ -224,6 +227,9 @@ pub struct CodeArgs {
     pub artifact_signing_client_id: Option<String>,
     #[arg(long = "artifact-signing-client-secret")]
     pub artifact_signing_client_secret: Option<String>,
+    /// Federated token file for workload identity Artifact Signing auth.
+    #[arg(long = "artifact-signing-federated-token-file")]
+    pub artifact_signing_federated_token_file: Option<String>,
     #[arg(long = "artifact-signing-authority")]
     pub artifact_signing_authority: Option<String>,
     /// Override Artifact Signing data-plane origin for deterministic local tests.
@@ -429,7 +435,7 @@ pub enum AzureCredentialType {
     AccessToken,
     /// Use tenant/client-id/client-secret service-principal credentials.
     ClientSecret,
-    /// Reserve the Azure.Identity workload identity shape; execution support is not wired yet.
+    /// Use workload identity federation from CLI inputs or AZURE_* environment variables.
     WorkloadIdentity,
 }
 
@@ -507,11 +513,17 @@ pub struct ArtifactSigningSubmitArgs {
     #[arg(long)]
     pub managed_identity: bool,
     #[arg(long)]
+    pub managed_identity_resource_id: Option<String>,
+    #[arg(long, value_enum)]
+    pub credential_type: Option<AzureCredentialType>,
+    #[arg(long)]
     pub tenant_id: Option<String>,
     #[arg(long)]
     pub client_id: Option<String>,
     #[arg(long)]
     pub client_secret: Option<String>,
+    #[arg(long)]
+    pub federated_token_file: Option<String>,
     #[arg(long)]
     pub authority: Option<String>,
     /// Override data-plane origin for deterministic local tests.
@@ -900,6 +912,9 @@ pub struct SignArgs {
     pub artifact_signing_access_token: Option<String>,
     #[arg(long = "artifact-signing-managed-identity")]
     pub artifact_signing_managed_identity: bool,
+    /// Managed identity resource ID for Artifact Signing user-assigned identity auth.
+    #[arg(long = "artifact-signing-managed-identity-resource-id")]
+    pub artifact_signing_managed_identity_resource_id: Option<String>,
     /// Azure.Identity-style credential selector for Artifact Signing.
     #[arg(long = "artifact-signing-credential-type", value_enum)]
     pub artifact_signing_credential_type: Option<AzureCredentialType>,
@@ -909,6 +924,9 @@ pub struct SignArgs {
     pub artifact_signing_client_id: Option<String>,
     #[arg(long = "artifact-signing-client-secret")]
     pub artifact_signing_client_secret: Option<String>,
+    /// Federated token file for workload identity Artifact Signing auth.
+    #[arg(long = "artifact-signing-federated-token-file")]
+    pub artifact_signing_federated_token_file: Option<String>,
     #[arg(long = "artifact-signing-authority")]
     pub artifact_signing_authority: Option<String>,
     /// Override Artifact Signing data-plane origin for deterministic local tests.
@@ -930,7 +948,7 @@ pub struct SignArgs {
     #[arg(long = "exit-codes", value_enum)]
     pub exit_codes: Option<SignExitCodes>,
     /// File(s) to sign (native trailing `<filename(s)>`).
-    #[arg(required = true)]
+    #[arg(required_unless_present = "sign_input_file_list")]
     pub files: Vec<PathBuf>,
 }
 

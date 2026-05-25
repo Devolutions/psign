@@ -15,13 +15,46 @@ const MI_RESOURCE: &str = "https://codesigning.azure.net";
 /// Authentication mode for **`codesigning.azure.net`**.
 #[derive(Debug, Clone)]
 pub enum CodesigningAuth {
-    ManagedIdentity,
+    ManagedIdentity {
+        client_id: Option<String>,
+        resource_id: Option<String>,
+    },
     Bearer(String),
     ClientCredentials {
         tenant_id: String,
         client_id: String,
         client_secret: String,
     },
+    WorkloadIdentity {
+        tenant_id: String,
+        client_id: String,
+        federated_token_file: String,
+    },
+    DefaultChain {
+        exclude_credentials: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CodesigningCredentialType {
+    Default,
+    ManagedIdentity,
+    AccessToken,
+    ClientSecret,
+    WorkloadIdentity,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CodesigningAuthInput {
+    pub access_token: Option<String>,
+    pub managed_identity: bool,
+    pub managed_identity_resource_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub federated_token_file: Option<String>,
+    pub credential_type: Option<CodesigningCredentialType>,
+    pub exclude_credentials: Vec<String>,
 }
 
 /// Parameters for **`…/certificateprofiles/{profile}:sign`** (blocking).
@@ -77,6 +110,314 @@ fn normalize_authority(authority: Option<&str>) -> String {
         .to_string()
 }
 
+fn text_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|v| text_opt(Some(&v)))
+}
+
+fn credential_excluded(exclude_credentials: &[String], names: &[&str]) -> bool {
+    exclude_credentials.iter().any(|value| {
+        let normalized = value.trim().replace(['-', '_', ' '], "");
+        names
+            .iter()
+            .any(|name| normalized.eq_ignore_ascii_case(&name.replace(['-', '_', ' '], "")))
+    })
+}
+
+pub fn resolve_codesigning_auth(input: &CodesigningAuthInput) -> Result<CodesigningAuth> {
+    let token = text_opt(input.access_token.as_deref());
+    let tenant = text_opt(input.tenant_id.as_deref());
+    let client = text_opt(input.client_id.as_deref());
+    let secret = text_opt(input.client_secret.as_deref());
+    let federated_token_file = text_opt(input.federated_token_file.as_deref());
+    let resource_id = text_opt(input.managed_identity_resource_id.as_deref());
+    let client_parts = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
+
+    match input
+        .credential_type
+        .unwrap_or(CodesigningCredentialType::Default)
+    {
+        CodesigningCredentialType::AccessToken => {
+            if client_parts != 0 || input.managed_identity || federated_token_file.is_some() {
+                return Err(anyhow!(
+                    "Artifact Signing access-token credential cannot be combined with managed identity, workload identity, or client credentials"
+                ));
+            }
+            return token.map(CodesigningAuth::Bearer).ok_or_else(|| {
+                anyhow!("Artifact Signing access-token credential requires access-token")
+            });
+        }
+        CodesigningCredentialType::ClientSecret => {
+            if token.is_some() || input.managed_identity || federated_token_file.is_some() {
+                return Err(anyhow!(
+                    "Artifact Signing client-secret credential cannot be combined with access token, managed identity, or workload identity"
+                ));
+            }
+            if client_parts != 3 {
+                return Err(anyhow!(
+                    "Artifact Signing client-secret credential requires tenant-id, client-id, and client-secret"
+                ));
+            }
+            return Ok(CodesigningAuth::ClientCredentials {
+                tenant_id: tenant.unwrap(),
+                client_id: client.unwrap(),
+                client_secret: secret.unwrap(),
+            });
+        }
+        CodesigningCredentialType::ManagedIdentity => {
+            if token.is_some()
+                || tenant.is_some()
+                || secret.is_some()
+                || federated_token_file.is_some()
+            {
+                return Err(anyhow!(
+                    "Artifact Signing managed identity credential cannot be combined with access token, tenant/client-secret, or workload identity"
+                ));
+            }
+            return Ok(CodesigningAuth::ManagedIdentity {
+                client_id: client,
+                resource_id,
+            });
+        }
+        CodesigningCredentialType::WorkloadIdentity => {
+            if token.is_some()
+                || secret.is_some()
+                || input.managed_identity
+                || resource_id.is_some()
+            {
+                return Err(anyhow!(
+                    "Artifact Signing workload identity credential cannot be combined with access token, client secret, or managed identity"
+                ));
+            }
+            let tenant_id = tenant
+                .or_else(|| env_text("AZURE_TENANT_ID"))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Artifact Signing workload identity requires tenant-id or AZURE_TENANT_ID"
+                    )
+                })?;
+            let client_id = client
+                .or_else(|| env_text("AZURE_CLIENT_ID"))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Artifact Signing workload identity requires client-id or AZURE_CLIENT_ID"
+                    )
+                })?;
+            let token_file = federated_token_file
+                .or_else(|| env_text("AZURE_FEDERATED_TOKEN_FILE"))
+                .ok_or_else(|| {
+                    anyhow!("Artifact Signing workload identity requires federated-token-file or AZURE_FEDERATED_TOKEN_FILE")
+                })?;
+            return Ok(CodesigningAuth::WorkloadIdentity {
+                tenant_id,
+                client_id,
+                federated_token_file: token_file,
+            });
+        }
+        CodesigningCredentialType::Default => {}
+    }
+
+    if input.managed_identity {
+        if token.is_some() || tenant.is_some() || secret.is_some() || federated_token_file.is_some()
+        {
+            return Err(anyhow!(
+                "use either Artifact Signing managed identity, access token, workload identity, or client credentials, not multiple"
+            ));
+        }
+        return Ok(CodesigningAuth::ManagedIdentity {
+            client_id: client,
+            resource_id,
+        });
+    }
+    if let Some(token) = token {
+        if client_parts != 0 || federated_token_file.is_some() {
+            return Err(anyhow!(
+                "use either Artifact Signing access token, workload identity, or client credentials, not multiple"
+            ));
+        }
+        return Ok(CodesigningAuth::Bearer(token));
+    }
+    if let Some(federated_token_file) = federated_token_file {
+        if secret.is_some() {
+            return Err(anyhow!(
+                "use either Artifact Signing workload identity or client credentials, not both"
+            ));
+        }
+        if tenant.is_none() || client.is_none() {
+            return Err(anyhow!(
+                "Artifact Signing workload identity requires tenant-id, client-id, and federated-token-file"
+            ));
+        }
+        return Ok(CodesigningAuth::WorkloadIdentity {
+            tenant_id: tenant.unwrap(),
+            client_id: client.unwrap(),
+            federated_token_file,
+        });
+    }
+    if client_parts != 0 && client_parts != 3 {
+        return Err(anyhow!(
+            "Artifact Signing client credentials require all of tenant-id, client-id, and client-secret"
+        ));
+    }
+    if client_parts == 3 {
+        return Ok(CodesigningAuth::ClientCredentials {
+            tenant_id: tenant.unwrap(),
+            client_id: client.unwrap(),
+            client_secret: secret.unwrap(),
+        });
+    }
+    Ok(CodesigningAuth::DefaultChain {
+        exclude_credentials: input.exclude_credentials.clone(),
+    })
+}
+
+fn acquire_managed_identity_token(
+    client_id: Option<&str>,
+    resource_id: Option<&str>,
+) -> Result<String> {
+    let endpoint = std::env::var("PSIGN_CODESIGNING_IMDS_ENDPOINT")
+        .unwrap_or_else(|_| "http://169.254.169.254/metadata/identity/oauth2/token".to_string());
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let mut query = vec![
+        ("api-version".to_string(), "2018-02-01".to_string()),
+        ("resource".to_string(), MI_RESOURCE.to_string()),
+    ];
+    if let Some(client_id) = text_opt(client_id) {
+        query.push(("client_id".to_string(), client_id));
+    }
+    if let Some(resource_id) = text_opt(resource_id) {
+        query.push(("mi_res_id".to_string(), resource_id));
+    }
+    let rsp = http
+        .get(endpoint)
+        .query(&query)
+        .header("Metadata", "true")
+        .send()
+        .context("managed identity token (IMDS) for codesigning.azure.net")?;
+    if !rsp.status().is_success() {
+        return Err(anyhow!(
+            "managed identity token HTTP {}: {}",
+            rsp.status(),
+            rsp.text().unwrap_or_default()
+        ));
+    }
+    #[derive(Deserialize)]
+    struct MiJson {
+        access_token: String,
+    }
+    let j: MiJson = rsp.json().context("managed identity JSON")?;
+    Ok(j.access_token)
+}
+
+fn acquire_client_credentials_token(
+    authority: Option<&str>,
+    tenant_id: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String> {
+    let tenant = tenant_id.trim();
+    let cid = client_id.trim();
+    let sec = client_secret.trim();
+    if tenant.is_empty() || cid.is_empty() || sec.is_empty() {
+        return Err(anyhow!(
+            "client credentials require non-empty tenant_id, client_id, client_secret"
+        ));
+    }
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let token_url = format!(
+        "{}/{tenant}/oauth2/v2.0/token",
+        normalize_authority(authority)
+    );
+    let rsp = http
+        .post(&token_url)
+        .form(&[
+            ("client_id", cid),
+            ("client_secret", sec),
+            ("grant_type", "client_credentials"),
+            ("scope", DEFAULT_SCOPE),
+        ])
+        .send()
+        .context("OAuth token request (codesigning.azure.net)")?;
+    if !rsp.status().is_success() {
+        return Err(anyhow!(
+            "OAuth HTTP {}: {}",
+            rsp.status(),
+            rsp.text().unwrap_or_default()
+        ));
+    }
+    #[derive(Deserialize)]
+    struct TokenJson {
+        access_token: String,
+    }
+    let j: TokenJson = rsp.json().context("OAuth JSON")?;
+    Ok(j.access_token)
+}
+
+fn acquire_workload_identity_token(
+    authority: Option<&str>,
+    tenant_id: &str,
+    client_id: &str,
+    federated_token_file: &str,
+) -> Result<String> {
+    let assertion = std::fs::read_to_string(federated_token_file)
+        .with_context(|| format!("read federated token file {federated_token_file}"))?;
+    let tenant = tenant_id.trim();
+    let cid = client_id.trim();
+    let assertion = assertion.trim();
+    if tenant.is_empty() || cid.is_empty() || assertion.is_empty() {
+        return Err(anyhow!(
+            "workload identity requires non-empty tenant_id, client_id, and federated token file"
+        ));
+    }
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let token_url = format!(
+        "{}/{tenant}/oauth2/v2.0/token",
+        normalize_authority(authority)
+    );
+    let rsp = http
+        .post(&token_url)
+        .form(&[
+            ("client_id", cid),
+            ("client_assertion", assertion),
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ),
+            ("grant_type", "client_credentials"),
+            ("scope", DEFAULT_SCOPE),
+        ])
+        .send()
+        .context("OAuth workload identity token request (codesigning.azure.net)")?;
+    if !rsp.status().is_success() {
+        return Err(anyhow!(
+            "OAuth workload identity HTTP {}: {}",
+            rsp.status(),
+            rsp.text().unwrap_or_default()
+        ));
+    }
+    #[derive(Deserialize)]
+    struct TokenJson {
+        access_token: String,
+    }
+    let j: TokenJson = rsp.json().context("OAuth workload identity JSON")?;
+    Ok(j.access_token)
+}
+
 fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String> {
     match &params.auth {
         CodesigningAuth::Bearer(tok) => {
@@ -86,78 +427,87 @@ fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String>
             }
             Ok(t.to_string())
         }
-        CodesigningAuth::ManagedIdentity => {
-            let endpoint = std::env::var("PSIGN_CODESIGNING_IMDS_ENDPOINT").unwrap_or_else(|_| {
-                "http://169.254.169.254/metadata/identity/oauth2/token".to_string()
-            });
-            let http = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .map_err(|e| anyhow!("HTTP client: {e}"))?;
-            let rsp = http
-                .get(endpoint)
-                .query(&[("api-version", "2018-02-01"), ("resource", MI_RESOURCE)])
-                .header("Metadata", "true")
-                .send()
-                .context("managed identity token (IMDS) for codesigning.azure.net")?;
-            if !rsp.status().is_success() {
-                return Err(anyhow!(
-                    "managed identity token HTTP {}: {}",
-                    rsp.status(),
-                    rsp.text().unwrap_or_default()
-                ));
-            }
-            #[derive(Deserialize)]
-            struct MiJson {
-                access_token: String,
-            }
-            let j: MiJson = rsp.json().context("managed identity JSON")?;
-            Ok(j.access_token)
-        }
+        CodesigningAuth::ManagedIdentity {
+            client_id,
+            resource_id,
+        } => acquire_managed_identity_token(client_id.as_deref(), resource_id.as_deref()),
         CodesigningAuth::ClientCredentials {
             tenant_id,
             client_id,
             client_secret,
+        } => acquire_client_credentials_token(
+            params.authority.as_deref(),
+            tenant_id,
+            client_id,
+            client_secret,
+        ),
+        CodesigningAuth::WorkloadIdentity {
+            tenant_id,
+            client_id,
+            federated_token_file,
+        } => acquire_workload_identity_token(
+            params.authority.as_deref(),
+            tenant_id,
+            client_id,
+            federated_token_file,
+        ),
+        CodesigningAuth::DefaultChain {
+            exclude_credentials,
         } => {
-            let tenant = tenant_id.trim();
-            let cid = client_id.trim();
-            let sec = client_secret.trim();
-            if tenant.is_empty() || cid.is_empty() || sec.is_empty() {
-                return Err(anyhow!(
-                    "client credentials require non-empty tenant_id, client_id, client_secret"
-                ));
+            let mut errors = Vec::new();
+            if !credential_excluded(
+                exclude_credentials,
+                &["EnvironmentCredential", "ClientSecretCredential"],
+            ) && let (Some(tenant), Some(client), Some(secret)) = (
+                env_text("AZURE_TENANT_ID"),
+                env_text("AZURE_CLIENT_ID"),
+                env_text("AZURE_CLIENT_SECRET"),
+            ) {
+                match acquire_client_credentials_token(
+                    params.authority.as_deref(),
+                    &tenant,
+                    &client,
+                    &secret,
+                ) {
+                    Ok(token) => return Ok(token),
+                    Err(e) => errors.push(format!("EnvironmentCredential: {e:#}")),
+                }
             }
-            let http = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .map_err(|e| anyhow!("HTTP client: {e}"))?;
-            let token_url = format!(
-                "{}/{tenant}/oauth2/v2.0/token",
-                normalize_authority(params.authority.as_deref())
-            );
-            let rsp = http
-                .post(&token_url)
-                .form(&[
-                    ("client_id", cid),
-                    ("client_secret", sec),
-                    ("grant_type", "client_credentials"),
-                    ("scope", DEFAULT_SCOPE),
-                ])
-                .send()
-                .context("OAuth token request (codesigning.azure.net)")?;
-            if !rsp.status().is_success() {
-                return Err(anyhow!(
-                    "OAuth HTTP {}: {}",
-                    rsp.status(),
-                    rsp.text().unwrap_or_default()
-                ));
+            if !credential_excluded(exclude_credentials, &["WorkloadIdentityCredential"])
+                && let (Some(tenant), Some(client), Some(token_file)) = (
+                    env_text("AZURE_TENANT_ID"),
+                    env_text("AZURE_CLIENT_ID"),
+                    env_text("AZURE_FEDERATED_TOKEN_FILE"),
+                )
+            {
+                match acquire_workload_identity_token(
+                    params.authority.as_deref(),
+                    &tenant,
+                    &client,
+                    &token_file,
+                ) {
+                    Ok(token) => return Ok(token),
+                    Err(e) => errors.push(format!("WorkloadIdentityCredential: {e:#}")),
+                }
             }
-            #[derive(Deserialize)]
-            struct TokenJson {
-                access_token: String,
+            if !credential_excluded(exclude_credentials, &["ManagedIdentityCredential"]) {
+                let client_id = env_text("AZURE_MANAGED_IDENTITY_CLIENT_ID")
+                    .or_else(|| env_text("AZURE_CLIENT_ID"));
+                match acquire_managed_identity_token(client_id.as_deref(), None) {
+                    Ok(token) => return Ok(token),
+                    Err(e) => errors.push(format!("ManagedIdentityCredential: {e:#}")),
+                }
             }
-            let j: TokenJson = rsp.json().context("OAuth JSON")?;
-            Ok(j.access_token)
+            if errors.is_empty() {
+                Err(anyhow!(
+                    "no Artifact Signing credential was available in the Rust default chain"
+                ))
+            } else {
+                Err(anyhow!(
+                    "Artifact Signing Rust default credential chain failed: {}",
+                    errors.join("; ")
+                ))
+            }
         }
     }
 }
@@ -409,5 +759,89 @@ mod tests {
         };
         let err = submit_codesign_hash_blocking(&p, |_| {}).unwrap_err();
         assert!(err.to_string().contains("digest is empty"), "{err}");
+    }
+
+    #[test]
+    fn resolver_accepts_user_assigned_managed_identity() {
+        let auth = resolve_codesigning_auth(&CodesigningAuthInput {
+            managed_identity: true,
+            client_id: Some("client-id".into()),
+            managed_identity_resource_id: Some("/subscriptions/s/resourceGroups/g/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        match auth {
+            CodesigningAuth::ManagedIdentity {
+                client_id,
+                resource_id,
+            } => {
+                assert_eq!(client_id.as_deref(), Some("client-id"));
+                assert_eq!(
+                    resource_id.as_deref(),
+                    Some(
+                        "/subscriptions/s/resourceGroups/g/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id"
+                    )
+                );
+            }
+            other => panic!("unexpected auth: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolver_accepts_workload_identity_inputs() {
+        let auth = resolve_codesigning_auth(&CodesigningAuthInput {
+            tenant_id: Some("tenant".into()),
+            client_id: Some("client".into()),
+            federated_token_file: Some("token.jwt".into()),
+            credential_type: Some(CodesigningCredentialType::WorkloadIdentity),
+            ..Default::default()
+        })
+        .unwrap();
+        match auth {
+            CodesigningAuth::WorkloadIdentity {
+                tenant_id,
+                client_id,
+                federated_token_file,
+            } => {
+                assert_eq!(tenant_id, "tenant");
+                assert_eq!(client_id, "client");
+                assert_eq!(federated_token_file, "token.jwt");
+            }
+            other => panic!("unexpected auth: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolver_keeps_metadata_excludes_on_default_chain() {
+        let auth = resolve_codesigning_auth(&CodesigningAuthInput {
+            exclude_credentials: vec![
+                "EnvironmentCredential".into(),
+                "ManagedIdentityCredential".into(),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        match auth {
+            CodesigningAuth::DefaultChain {
+                exclude_credentials,
+            } => assert_eq!(
+                exclude_credentials,
+                vec!["EnvironmentCredential", "ManagedIdentityCredential"]
+            ),
+            other => panic!("unexpected auth: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolver_rejects_mixed_explicit_credentials() {
+        let err = resolve_codesigning_auth(&CodesigningAuthInput {
+            access_token: Some("token".into()),
+            tenant_id: Some("tenant".into()),
+            client_id: Some("client".into()),
+            client_secret: Some("secret".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("not multiple"), "{err}");
     }
 }

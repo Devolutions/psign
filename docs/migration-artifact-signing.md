@@ -4,7 +4,7 @@ Microsoft **Artifact Signing** (often called **Trusted Signing**) integrates wit
 
 **psign-tool** uses the same Win32 bridge as SignTool: **`SignerSignEx3`** with **`SIGNER_DIGEST_SIGN_INFO`** pointing at the DLL exports (this repo prefers **`AuthenticodeDigestSignExWithFileHandle`** when present, matching Microsoft’s Azure dlib).
 
-**psign-tool portable** cannot load the mixed-mode/.NET dlib or call **`SignerSignEx3`**. For PE/WinMD, it can now avoid Microsoft client-side signing tools entirely by building Authenticode CMS locally, asking Artifact Signing REST to sign the CMS authenticated-attributes digest, optionally adding an RFC3161 timestamp, and embedding the PKCS#7 as a PE `WIN_CERTIFICATE`. Other SIP formats still use Windows mode or the dlib bridge until their portable embedders are implemented.
+**psign-tool portable** cannot load the mixed-mode/.NET dlib or call **`SignerSignEx3`**. For PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX packages, and generic catalogs, it can now avoid Microsoft client-side signing tools entirely by building CMS locally, asking Artifact Signing REST to sign the CMS authenticated-attributes digest, and embedding the returned PKCS#7. Other SIP formats, MSIX/AppX bundles/uploads, and encrypted packages still use Windows mode or the dlib bridge until their portable embedders are implemented.
 
 ### Azure Code Signing **REST** hash signing
 
@@ -40,7 +40,7 @@ cargo build -p psign-digest-cli --features artifact-signing-rest --locked
 
 Optional debug logs: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 
-## Pure REST PE/WinMD signing (no Microsoft client tools)
+## Pure REST portable signing (no Microsoft client tools)
 
 For PE/WinMD, prefer the first-class portable signer instead of manually staging a digest:
 
@@ -66,9 +66,51 @@ psign-tool --mode portable sign \
   ./MyApp.exe
 ```
 
-Authentication choices are mutually exclusive: use **`--artifact-signing-managed-identity`**, **`--artifact-signing-access-token`**, or the service-principal trio **`--artifact-signing-tenant-id`**, **`--artifact-signing-client-id`**, and **`--artifact-signing-client-secret`**. Without metadata, pass **`--artifact-signing-endpoint`** or **`--artifact-signing-region`** plus **`--artifact-signing-account-name`** and **`--artifact-signing-profile-name`**.
+Authentication choices are mutually exclusive when explicit: use **`--artifact-signing-access-token`**, **`--artifact-signing-managed-identity`** (optionally with **`--artifact-signing-client-id`** or **`--artifact-signing-managed-identity-resource-id`** for user-assigned identities), the service-principal trio **`--artifact-signing-tenant-id`**, **`--artifact-signing-client-id`**, and **`--artifact-signing-client-secret`**, or workload identity with **`--artifact-signing-credential-type workload-identity`** plus tenant/client/token-file inputs or the standard **`AZURE_TENANT_ID`**, **`AZURE_CLIENT_ID`**, and **`AZURE_FEDERATED_TOKEN_FILE`** environment variables. If no explicit credential is supplied, the in-tree Rust default chain tries environment client-secret credentials, workload identity, then managed identity while honoring metadata **`ExcludeCredentials`**. Without metadata, pass **`--artifact-signing-endpoint`** or **`--artifact-signing-region`** plus **`--artifact-signing-account-name`** and **`--artifact-signing-profile-name`**.
 
-Artifact Signing certificates are short-lived; include **`--timestamp-url http://timestamp.acs.microsoft.com/ --timestamp-digest sha256`** for production signatures.
+Artifact Signing certificates are short-lived; include **`--timestamp-url http://timestamp.acs.microsoft.com/ --timestamp-digest sha256`** for production signatures. Portable PE/WinMD, CAB, MSI/MSP, generic catalog, and flat MSIX/AppX Artifact Signing paths attach RFC3161 tokens to the generated Authenticode PKCS#7 when the `timestamp-http` feature is enabled.
+
+CAB, MSI/MSP, and generic catalogs can use the same Artifact Signing profile through scoped portable commands:
+
+```bash
+psign-tool portable sign-cab ./setup.cab \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --timestamp-url http://timestamp.acs.microsoft.com/ \
+  --timestamp-digest sha256 \
+  --digest sha256 \
+  --output ./setup.signed.cab
+
+psign-tool portable sign-msi ./installer.msi \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --output ./installer.signed.msi
+
+psign-tool portable sign-catalog \
+  --artifact-signing-metadata ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --output ./files.cat \
+  ./file1.exe ./file2.txt
+```
+
+The native-shaped in-place portable `sign` route also supports CAB, MSI/MSP, and flat `.msix` / `.appx` packages with Artifact Signing options. Catalog authoring still uses `portable sign-catalog` because a `.cat` target alone does not describe the member list to author. MSIX/AppX bundle, upload, and encrypted containers remain explicitly unsupported in portable final signing.
+
+For native-shaped batches, the portable Artifact Signing route accepts the AzureSignTool-style convenience flags:
+
+```bash
+psign-tool --mode portable sign \
+  --dmdf ./artifact-signing-metadata.json \
+  --artifact-signing-managed-identity \
+  --digest sha256 \
+  --input-file-list ./files-to-sign.txt \
+  --skip-signed \
+  --continue-on-error \
+  --max-degree-of-parallelism 4
+```
+
+`--input-file-list` accepts one path or glob per line; blank lines and `#` comments are ignored. `--skip-signed` skips PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX files that already contain embedded signature material. `--continue-on-error` preserves per-file failure diagnostics and returns a non-zero batch exit code when any target fails.
 
 ## Flag mapping (Microsoft sample → psign-tool)
 
@@ -115,7 +157,7 @@ Microsoft recommends **`http://timestamp.acs.microsoft.com/`** with **`SHA256`**
 
 ### Metadata JSON (`--dmdf`)
 
-Follow Microsoft’s documented shape: regional **`Endpoint`**, **`CodeSigningAccountName`**, **`CertificateProfileName`**, and optionally **`ExcludeCredentials`** (array of credential type names to exclude from the Azure credential chain). Keep **`Endpoint`** aligned with your Artifact Signing region.
+Follow Microsoft’s documented shape: regional **`Endpoint`**, **`CodeSigningAccountName`**, **`CertificateProfileName`**, and optionally **`ExcludeCredentials`** (array of credential type names to exclude from the Rust default chain, such as **`EnvironmentCredential`**, **`WorkloadIdentityCredential`**, or **`ManagedIdentityCredential`**). Keep **`Endpoint`** aligned with your Artifact Signing region.
 
 Validate checked-in templates **without signing** using portable **`artifact-signing-metadata-check`**:
 
@@ -226,6 +268,9 @@ Authentication (**one** path):
 |----------|---------|
 | `PSIGN_ARTIFACT_SIGNING_REST_ACCESS_TOKEN` | Bearer token for **`https://codesigning.azure.net/.default`** |
 | `PSIGN_ARTIFACT_SIGNING_REST_MANAGED_IDENTITY` | Set to **`1`** / **`true`** / **`yes`** for IMDS (VMs/containers) |
-| `PSIGN_ARTIFACT_SIGNING_REST_TENANT_ID` | With client credentials |
-| `PSIGN_ARTIFACT_SIGNING_REST_CLIENT_ID` | With client credentials |
+| `PSIGN_ARTIFACT_SIGNING_REST_TENANT_ID` | With client credentials or workload identity |
+| `PSIGN_ARTIFACT_SIGNING_REST_CLIENT_ID` | With client credentials, workload identity, or user-assigned managed identity |
 | `PSIGN_ARTIFACT_SIGNING_REST_CLIENT_SECRET` | With client credentials |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` | Environment credential used by the Rust default chain |
+| `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE` | Workload identity credential used by the Rust default chain |
+| `AZURE_MANAGED_IDENTITY_CLIENT_ID` | User-assigned managed identity client ID used by the Rust default chain |

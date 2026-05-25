@@ -10,7 +10,8 @@
 //! [`parse_pe_pkcs7_spc_indirect_data_at`] / [`parse_pe_pkcs7_spc_indirect_data`] and [`spc_indirect_data_replace_message_digest`] support **Linux-side digest substitution** before a future **`SignedData`** signer assembles countersignatures / PKCS#9 attributes. [`cms_digest_encapsulated_econtent_bytes`] and [`signer_info_pkcs9_message_digest_octets`] pin **RFC 5652 §5.4** **`eContent`** hashing to PKCS#9 **`messageDigest`** on fixtures (RustCrypto **`cms` SignerInfoBuilder** semantics). [`signer_info_signed_attributes_sequence_der`] yields the **`SET OF Attribute`** octets for §5.4 authenticated-attribute signing; [`signed_attributes_replace_pkcs9_message_digest`] refreshes PKCS#9 **`messageDigest`** after **`encapContentInfo`** changes (**`encryptedDigest`** still requires re-sign). [`signer_info_sha256_digest_over_signed_attrs`] and [`signed_data_rsa_sha256_signer_prehash_digest`] **SHA-256**-hash **of** that **`SET`** (staging digest before PKCS#1 **DigestInfo** / **KV `RS256`** validation). [`signer_info_clone_with_signed_attrs`] / [`signer_info_clone_with_signature_octets`] patch **`SignerInfo`** after remote signing; [`signed_data_replace_signer_info_at`] / [`signed_data_replace_first_signer_info`] splice it back into **`SignedData.signerInfos`**. **`WIN_CERTIFICATE`** embedding remains [`crate::pe_embed`].
 
 use anyhow::{Context as _, Result, anyhow};
-use authenticode::{DigestInfo, SpcAttributeTypeAndOptionalValue, SpcIndirectDataContent};
+pub use authenticode::SpcIndirectDataContent;
+use authenticode::{DigestInfo, SpcAttributeTypeAndOptionalValue};
 use base64::Engine as _;
 use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
 use cms::cert::CertificateChoices;

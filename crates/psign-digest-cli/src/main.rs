@@ -23,8 +23,9 @@ use psign_azure_kv_rest::{
 };
 #[cfg(feature = "artifact-signing-rest")]
 use psign_codesigning_rest::{
-    CodesigningAuth, CodesigningSubmitParams, DEFAULT_API_VERSION,
-    submit_codesign_hash_blocking, submit_codesign_hash_signature_blocking,
+    CodesigningAuth, CodesigningAuthInput, CodesigningCredentialType, CodesigningSubmitParams,
+    DEFAULT_API_VERSION, resolve_codesigning_auth, submit_codesign_hash_blocking,
+    submit_codesign_hash_signature_blocking,
 };
 use psign_opc_sign::{nuget, vsix};
 use psign_sip_digest::cab_digest::{self,
@@ -1744,6 +1745,42 @@ fn timestamp_pkcs7_der_rfc3161(
     pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
 }
 
+fn timestamp_authenticode_pkcs7_der_if_requested(
+    pkcs7_der: Vec<u8>,
+    timestamp_url: Option<String>,
+    timestamp_digest: Option<HashAlg>,
+    command_name: &str,
+) -> Result<Vec<u8>> {
+    match (timestamp_url, timestamp_digest) {
+        (Some(url), Some(timestamp_digest)) => {
+            #[cfg(feature = "timestamp-http")]
+            {
+                timestamp_pkcs7_der_rfc3161(
+                    &pkcs7_der,
+                    &url,
+                    timestamp_digest,
+                    Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                )
+                .with_context(|| format!("{command_name}: RFC3161 timestamp signature"))
+            }
+            #[cfg(not(feature = "timestamp-http"))]
+            {
+                let _ = (url, timestamp_digest);
+                Err(anyhow!(
+                    "{command_name} RFC3161 timestamping requires the timestamp-http feature"
+                ))
+            }
+        }
+        (Some(_), None) => Err(anyhow!(
+            "{command_name} requires --timestamp-digest with --timestamp-url"
+        )),
+        (None, Some(_)) => Err(anyhow!(
+            "{command_name} requires --timestamp-url with --timestamp-digest"
+        )),
+        (None, None) => Ok(pkcs7_der),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Rfc3161TimestampAttribute {
     MicrosoftAuthenticode,
@@ -2012,18 +2049,26 @@ enum Command {
         /// Input CAB path.
         #[arg(value_name = "PATH")]
         path: PathBuf,
-        /// Signer certificate as DER or PEM.
+        /// Signer certificate as DER or PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        cert: PathBuf,
-        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        cert: Option<PathBuf>,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Additional certificate to include in the PKCS#7 certificate set.
         #[arg(long = "chain-cert", value_name = "PATH")]
         chain_certs: Vec<PathBuf>,
         /// File digest algorithm for the CAB Authenticode indirect digest and CMS signer.
         #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
         digest: PortableSignDigest,
+        /// RFC3161 timestamp URL to timestamp the CAB Authenticode signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[command(flatten)]
+        artifact_signing: Box<ArtifactSigningPortableOptions>,
         /// Output signed CAB path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -2033,18 +2078,26 @@ enum Command {
         /// Input MSI/MSP path.
         #[arg(value_name = "PATH")]
         path: PathBuf,
-        /// Signer certificate as DER or PEM.
+        /// Signer certificate as DER or PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        cert: PathBuf,
-        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        cert: Option<PathBuf>,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Additional certificate to include in the PKCS#7 certificate set.
         #[arg(long = "chain-cert", value_name = "PATH")]
         chain_certs: Vec<PathBuf>,
         /// File digest algorithm for the MSI Authenticode indirect digest and CMS signer.
         #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
         digest: PortableSignDigest,
+        /// RFC3161 timestamp URL to timestamp the MSI Authenticode signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[command(flatten)]
+        artifact_signing: Box<ArtifactSigningPortableOptions>,
         /// Output signed MSI/MSP path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -2057,18 +2110,26 @@ enum Command {
         /// Subject file(s) to include as catalog members.
         #[arg(required = true, value_name = "PATH")]
         files: Vec<PathBuf>,
-        /// Signer certificate as DER or PEM.
+        /// Signer certificate as DER or PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        cert: PathBuf,
-        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM.
+        cert: Option<PathBuf>,
+        /// RSA private key as PKCS#8 or PKCS#1, DER or unencrypted PEM. Omit when using --artifact-signing-*.
         #[arg(long, value_name = "PATH")]
-        key: PathBuf,
+        key: Option<PathBuf>,
         /// Additional certificate to include in the PKCS#7 certificate set.
         #[arg(long = "chain-cert", value_name = "PATH")]
         chain_certs: Vec<PathBuf>,
         /// File digest algorithm for catalog member digests and CMS signer.
         #[arg(long, value_enum, default_value_t = PortableSignDigest::Sha256)]
         digest: PortableSignDigest,
+        /// RFC3161 timestamp URL to timestamp the catalog signature after signing.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
+        #[command(flatten)]
+        artifact_signing: Box<ArtifactSigningPortableOptions>,
         /// Output signed catalog path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -3053,6 +3114,15 @@ fn write_digest_output(
     Ok(())
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ArtifactSigningCredentialType {
+    Default,
+    ManagedIdentity,
+    AccessToken,
+    ClientSecret,
+    WorkloadIdentity,
+}
+
 #[cfg(feature = "artifact-signing-rest")]
 #[derive(Args, Debug, Clone)]
 struct ArtifactSigningSubmitPortableArgs {
@@ -3075,11 +3145,17 @@ struct ArtifactSigningSubmitPortableArgs {
     #[arg(long)]
     managed_identity: bool,
     #[arg(long)]
+    managed_identity_resource_id: Option<String>,
+    #[arg(long, value_enum)]
+    credential_type: Option<ArtifactSigningCredentialType>,
+    #[arg(long)]
     tenant_id: Option<String>,
     #[arg(long)]
     client_id: Option<String>,
     #[arg(long)]
     client_secret: Option<String>,
+    #[arg(long)]
+    federated_token_file: Option<String>,
     #[arg(long)]
     authority: Option<String>,
     /// Override data-plane origin for deterministic local tests.
@@ -3112,12 +3188,18 @@ struct ArtifactSigningPortableOptions {
     access_token: Option<String>,
     #[arg(long = "artifact-signing-managed-identity")]
     managed_identity: bool,
+    #[arg(long = "artifact-signing-managed-identity-resource-id")]
+    managed_identity_resource_id: Option<String>,
+    #[arg(long = "artifact-signing-credential-type", value_enum)]
+    credential_type: Option<ArtifactSigningCredentialType>,
     #[arg(long = "artifact-signing-tenant-id")]
     tenant_id: Option<String>,
     #[arg(long = "artifact-signing-client-id")]
     client_id: Option<String>,
     #[arg(long = "artifact-signing-client-secret")]
     client_secret: Option<String>,
+    #[arg(long = "artifact-signing-federated-token-file")]
+    federated_token_file: Option<String>,
     #[arg(long = "artifact-signing-authority")]
     authority: Option<String>,
     /// Override data-plane origin for deterministic local tests.
@@ -3127,75 +3209,23 @@ struct ArtifactSigningPortableOptions {
 
 #[cfg(feature = "artifact-signing-rest")]
 fn validate_portable_submit_args(args: &ArtifactSigningSubmitPortableArgs) -> Result<()> {
-    let has_tok = args
-        .access_token
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
-    let sp_count = (args
-        .tenant_id
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false) as u8)
-        + (args
-            .client_id
-            .as_ref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false) as u8)
-        + (args
-            .client_secret
-            .as_ref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false) as u8);
-    if args.managed_identity {
-        if has_tok || sp_count != 0 {
-            return Err(anyhow!(
-                "use either --managed-identity or access token / client credentials, not multiple"
-            ));
-        }
-        return Ok(());
-    }
-    if has_tok {
-        if sp_count != 0 {
-            return Err(anyhow!(
-                "use either --access-token or client credentials tenant/id/secret, not both"
-            ));
-        }
-        return Ok(());
-    }
-    if sp_count != 0 && sp_count != 3 {
-        return Err(anyhow!(
-            "client credentials require all of --tenant-id, --client-id, and --client-secret"
-        ));
-    }
-    if sp_count == 0 {
-        return Err(anyhow!(
-            "choose authentication: --managed-identity, --access-token, or tenant/client-id/client-secret"
-        ));
-    }
+    portable_submit_auth(args)?;
     Ok(())
 }
 
 #[cfg(feature = "artifact-signing-rest")]
 fn portable_submit_auth(args: &ArtifactSigningSubmitPortableArgs) -> Result<CodesigningAuth> {
-    let has_tok = args
-        .access_token
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
-    if args.managed_identity {
-        return Ok(CodesigningAuth::ManagedIdentity);
-    }
-    if has_tok {
-        return Ok(CodesigningAuth::Bearer(
-            args.access_token.as_ref().unwrap().trim().to_string(),
-        ));
-    }
-    Ok(CodesigningAuth::ClientCredentials {
-        tenant_id: args.tenant_id.as_ref().unwrap().trim().to_string(),
-        client_id: args.client_id.as_ref().unwrap().trim().to_string(),
-        client_secret: args.client_secret.as_ref().unwrap().trim().to_string(),
-    })
+    portable_submit_auth_parts(
+        args.access_token.as_deref(),
+        args.managed_identity,
+        args.managed_identity_resource_id.as_deref(),
+        args.credential_type,
+        args.tenant_id.as_deref(),
+        args.client_id.as_deref(),
+        args.client_secret.as_deref(),
+        args.federated_token_file.as_deref(),
+        Vec::new(),
+    )
 }
 
 #[cfg(feature = "artifact-signing-rest")]
@@ -3516,56 +3546,52 @@ fn artifact_signing_requested(args: &ArtifactSigningPortableOptions) -> bool {
         || text_opt(args.correlation_id.as_deref()).is_some()
         || text_opt(args.access_token.as_deref()).is_some()
         || args.managed_identity
+        || text_opt(args.managed_identity_resource_id.as_deref()).is_some()
+        || args.credential_type.is_some()
         || text_opt(args.tenant_id.as_deref()).is_some()
         || text_opt(args.client_id.as_deref()).is_some()
         || text_opt(args.client_secret.as_deref()).is_some()
+        || text_opt(args.federated_token_file.as_deref()).is_some()
         || text_opt(args.authority.as_deref()).is_some()
         || text_opt(args.endpoint_base_url.as_deref()).is_some()
 }
 
 #[cfg(feature = "artifact-signing-rest")]
+fn codesigning_credential_type(
+    value: Option<ArtifactSigningCredentialType>,
+) -> Option<CodesigningCredentialType> {
+    value.map(|value| match value {
+        ArtifactSigningCredentialType::Default => CodesigningCredentialType::Default,
+        ArtifactSigningCredentialType::ManagedIdentity => CodesigningCredentialType::ManagedIdentity,
+        ArtifactSigningCredentialType::AccessToken => CodesigningCredentialType::AccessToken,
+        ArtifactSigningCredentialType::ClientSecret => CodesigningCredentialType::ClientSecret,
+        ArtifactSigningCredentialType::WorkloadIdentity => CodesigningCredentialType::WorkloadIdentity,
+    })
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+#[allow(clippy::too_many_arguments)]
 fn portable_submit_auth_parts(
     access_token: Option<&str>,
     managed_identity: bool,
+    managed_identity_resource_id: Option<&str>,
+    credential_type: Option<ArtifactSigningCredentialType>,
     tenant_id: Option<&str>,
     client_id: Option<&str>,
     client_secret: Option<&str>,
+    federated_token_file: Option<&str>,
+    exclude_credentials: Vec<String>,
 ) -> Result<CodesigningAuth> {
-    let has_tok = text_opt(access_token).is_some();
-    let tenant = text_opt(tenant_id);
-    let client = text_opt(client_id);
-    let secret = text_opt(client_secret);
-    let sp_count = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
-    if managed_identity {
-        if has_tok || sp_count != 0 {
-            return Err(anyhow!(
-                "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
-            ));
-        }
-        return Ok(CodesigningAuth::ManagedIdentity);
-    }
-    if let Some(tok) = text_opt(access_token) {
-        if sp_count != 0 {
-            return Err(anyhow!(
-                "use either Artifact Signing access token or client credentials, not both"
-            ));
-        }
-        return Ok(CodesigningAuth::Bearer(tok));
-    }
-    if sp_count != 0 && sp_count != 3 {
-        return Err(anyhow!(
-            "Artifact Signing client credentials require all of tenant-id, client-id, and client-secret"
-        ));
-    }
-    if sp_count == 0 {
-        return Err(anyhow!(
-            "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
-        ));
-    }
-    Ok(CodesigningAuth::ClientCredentials {
-        tenant_id: tenant.unwrap(),
-        client_id: client.unwrap(),
-        client_secret: secret.unwrap(),
+    resolve_codesigning_auth(&CodesigningAuthInput {
+        access_token: text_opt(access_token),
+        managed_identity,
+        managed_identity_resource_id: text_opt(managed_identity_resource_id),
+        tenant_id: text_opt(tenant_id),
+        client_id: text_opt(client_id),
+        client_secret: text_opt(client_secret),
+        federated_token_file: text_opt(federated_token_file),
+        credential_type: codesigning_credential_type(credential_type),
+        exclude_credentials,
     })
 }
 
@@ -3605,9 +3631,16 @@ fn artifact_signing_params_for_digest(
     let auth = portable_submit_auth_parts(
         args.access_token.as_deref(),
         args.managed_identity,
+        args.managed_identity_resource_id.as_deref(),
+        args.credential_type,
         args.tenant_id.as_deref(),
         args.client_id.as_deref(),
         args.client_secret.as_deref(),
+        args.federated_token_file.as_deref(),
+        metadata
+            .as_ref()
+            .and_then(|m| m.ExcludeCredentials.clone())
+            .unwrap_or_default(),
     )?;
     Ok(CodesigningSubmitParams {
         region,
@@ -3666,6 +3699,134 @@ fn create_pe_authenticode_pkcs7_der_artifact_signing(
         chain,
         &signed.signature,
     )
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn create_cab_authenticode_pkcs7_der_artifact_signing(
+    cab: &[u8],
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: &ArtifactSigningPortableOptions,
+) -> Result<Vec<u8>> {
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let cab_digest =
+        cab_digest::cab_authenticode_digest_for_signing(cab, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::cab_spc_indirect_data(digest_algorithm, &cab_digest)?;
+    create_authenticode_pkcs7_der_artifact_signing_from_indirect(
+        indirect,
+        digest,
+        chain_certs,
+        args,
+    )
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn create_msi_authenticode_pkcs7_der_artifact_signing(
+    msi: &[u8],
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: &ArtifactSigningPortableOptions,
+) -> Result<Vec<u8>> {
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let msi_digest =
+        msi_digest::compute_msi_authenticode_digest(msi, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, &msi_digest)?;
+    create_authenticode_pkcs7_der_artifact_signing_from_indirect(
+        indirect,
+        digest,
+        chain_certs,
+        args,
+    )
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn create_authenticode_pkcs7_der_artifact_signing_from_indirect(
+    indirect: pkcs7::SpcIndirectDataContent,
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: &ArtifactSigningPortableOptions,
+) -> Result<Vec<u8>> {
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let signer_prehash =
+        pkcs7::authenticode_remote_rsa_signed_attrs_digest(&indirect, digest_algorithm)?;
+    let params = artifact_signing_params_for_digest(
+        args,
+        signer_prehash,
+        artifact_signature_algorithm_for_digest(digest),
+    )?;
+    let debug_portable = std::env::var_os("SIGNTOOL_PORTABLE_DEBUG").is_some();
+    let signed = submit_codesign_hash_signature_blocking(&params, |msg| {
+        if debug_portable {
+            eprintln!("[debug] {msg}");
+        }
+    })?;
+    let (signer_cert, mut chain) =
+        pkcs7::parse_artifact_signing_certificates(&signed.signing_certificate)?;
+    chain.extend(load_chain_certs(chain_certs)?);
+    pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+        indirect,
+        digest_algorithm,
+        signer_cert,
+        chain,
+        &signed.signature,
+    )
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn create_catalog_pkcs7_der_artifact_signing(
+    subjects: &[catalog_digest::CatalogSubjectInput],
+    digest: PortableSignDigest,
+    chain_certs: Vec<PathBuf>,
+    args: &ArtifactSigningPortableOptions,
+) -> Result<catalog_digest::CatalogSignResult> {
+    let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+    let (econtent_der, members) =
+        catalog_digest::create_catalog_ctl_econtent_der(subjects, digest_algorithm)?;
+    let id_ms_ctl = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.311.10.1");
+    let signer_prehash = pkcs7::pkcs7_remote_rsa_signed_attrs_digest_with_profile(
+        id_ms_ctl,
+        &econtent_der,
+        digest_algorithm,
+        pkcs7::Pkcs7SignedAttributeProfile::Basic,
+        None,
+    )?;
+    let params = artifact_signing_params_for_digest(
+        args,
+        signer_prehash,
+        artifact_signature_algorithm_for_digest(digest),
+    )?;
+    let debug_portable = std::env::var_os("SIGNTOOL_PORTABLE_DEBUG").is_some();
+    let signed = submit_codesign_hash_signature_blocking(&params, |msg| {
+        if debug_portable {
+            eprintln!("[debug] {msg}");
+        }
+    })?;
+    let (signer_cert, mut chain) =
+        pkcs7::parse_artifact_signing_certificates(&signed.signing_certificate)?;
+    chain.extend(load_chain_certs(chain_certs)?);
+    let pkcs7_der = pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+        id_ms_ctl,
+        &econtent_der,
+        digest_algorithm,
+        signer_cert,
+        chain,
+        &signed.signature,
+        pkcs7::Pkcs7ContentMode::Attached,
+    )?;
+    Ok(catalog_digest::CatalogSignResult { pkcs7_der, members })
+}
+
+fn load_chain_certs(chain_certs: Vec<PathBuf>) -> Result<Vec<x509_cert::Certificate>> {
+    let mut chain = Vec::with_capacity(chain_certs.len());
+    for chain_cert in chain_certs {
+        let bytes =
+            std::fs::read(&chain_cert).with_context(|| format!("read {}", chain_cert.display()))?;
+        chain.push(
+            rdp::parse_certificate(&bytes)
+                .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
+        );
+    }
+    Ok(chain)
 }
 
 fn read_json_input(path: Option<&Path>) -> Result<Vec<u8>> {
@@ -4329,38 +4490,73 @@ where
             key,
             chain_certs,
             digest,
+            timestamp_url,
+            timestamp_digest,
+            artifact_signing,
             output,
         } => {
             let cab = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let cert_bytes =
-                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            let signer_cert = rdp::parse_certificate(&cert_bytes)
-                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-            let key_bytes = std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
-            let private_key = rdp::parse_rsa_private_key(&key_bytes)
-                .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let mut chain = Vec::with_capacity(chain_certs.len());
-            for chain_cert in chain_certs {
-                let bytes = std::fs::read(&chain_cert)
-                    .with_context(|| format!("read {}", chain_cert.display()))?;
-                chain.push(
-                    rdp::parse_certificate(&bytes)
-                        .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
-                );
+            let has_artifact = artifact_signing_requested(&artifact_signing);
+            if has_artifact && (cert.is_some() || key.is_some()) {
+                return Err(anyhow!(
+                    "portable sign-cab accepts either --cert/--key or --artifact-signing-*, not both"
+                ));
             }
-            let pkcs7 = pkcs7::create_cab_authenticode_pkcs7_der_rsa(
-                &cab,
-                digest.into(),
-                signer_cert,
-                chain,
-                private_key,
-            )
-            .with_context(|| {
-                format!(
-                    "create portable CAB Authenticode signature for {}",
-                    path.display()
+            let pkcs7 = if has_artifact {
+                #[cfg(feature = "artifact-signing-rest")]
+                {
+                    create_cab_authenticode_pkcs7_der_artifact_signing(
+                        &cab,
+                        digest,
+                        chain_certs,
+                        &artifact_signing,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "create portable Artifact Signing CAB Authenticode signature for {}",
+                            path.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "artifact-signing-rest"))]
+                {
+                    return Err(anyhow!(
+                        "portable sign-cab Artifact Signing support requires the artifact-signing-rest feature"
+                    ));
+                }
+            } else {
+                let (cert, key) = match (cert, key) {
+                    (Some(cert), Some(key)) => (cert, key),
+                    _ => return Err(anyhow!("portable sign-cab requires --cert and --key, or --artifact-signing-* options")),
+                };
+                let cert_bytes =
+                    std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+                let signer_cert = rdp::parse_certificate(&cert_bytes)
+                    .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+                let key_bytes =
+                    std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+                let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                    .with_context(|| format!("parse RSA private key {}", key.display()))?;
+                pkcs7::create_cab_authenticode_pkcs7_der_rsa(
+                    &cab,
+                    digest.into(),
+                    signer_cert,
+                    load_chain_certs(chain_certs)?,
+                    private_key,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "create portable CAB Authenticode signature for {}",
+                        path.display()
+                    )
+                })?
+            };
+            let pkcs7 = timestamp_authenticode_pkcs7_der_if_requested(
+                pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "portable sign-cab",
+            )?;
             let signed = cab_digest::cab_append_authenticode_pkcs7_signature(&cab, &pkcs7)
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             std::fs::write(&output, signed).with_context(|| format!("write {}", output.display()))?;
@@ -4377,38 +4573,73 @@ where
             key,
             chain_certs,
             digest,
+            timestamp_url,
+            timestamp_digest,
+            artifact_signing,
             output,
         } => {
             let msi = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let cert_bytes =
-                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            let signer_cert = rdp::parse_certificate(&cert_bytes)
-                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-            let key_bytes = std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
-            let private_key = rdp::parse_rsa_private_key(&key_bytes)
-                .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let mut chain = Vec::with_capacity(chain_certs.len());
-            for chain_cert in chain_certs {
-                let bytes = std::fs::read(&chain_cert)
-                    .with_context(|| format!("read {}", chain_cert.display()))?;
-                chain.push(
-                    rdp::parse_certificate(&bytes)
-                        .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
-                );
+            let has_artifact = artifact_signing_requested(&artifact_signing);
+            if has_artifact && (cert.is_some() || key.is_some()) {
+                return Err(anyhow!(
+                    "portable sign-msi accepts either --cert/--key or --artifact-signing-*, not both"
+                ));
             }
-            let pkcs7 = pkcs7::create_msi_authenticode_pkcs7_der_rsa(
-                &msi,
-                digest.into(),
-                signer_cert,
-                chain,
-                private_key,
-            )
-            .with_context(|| {
-                format!(
-                    "create portable MSI Authenticode signature for {}",
-                    path.display()
+            let pkcs7 = if has_artifact {
+                #[cfg(feature = "artifact-signing-rest")]
+                {
+                    create_msi_authenticode_pkcs7_der_artifact_signing(
+                        &msi,
+                        digest,
+                        chain_certs,
+                        &artifact_signing,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "create portable Artifact Signing MSI Authenticode signature for {}",
+                            path.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "artifact-signing-rest"))]
+                {
+                    return Err(anyhow!(
+                        "portable sign-msi Artifact Signing support requires the artifact-signing-rest feature"
+                    ));
+                }
+            } else {
+                let (cert, key) = match (cert, key) {
+                    (Some(cert), Some(key)) => (cert, key),
+                    _ => return Err(anyhow!("portable sign-msi requires --cert and --key, or --artifact-signing-* options")),
+                };
+                let cert_bytes =
+                    std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+                let signer_cert = rdp::parse_certificate(&cert_bytes)
+                    .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+                let key_bytes =
+                    std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+                let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                    .with_context(|| format!("parse RSA private key {}", key.display()))?;
+                pkcs7::create_msi_authenticode_pkcs7_der_rsa(
+                    &msi,
+                    digest.into(),
+                    signer_cert,
+                    load_chain_certs(chain_certs)?,
+                    private_key,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "create portable MSI Authenticode signature for {}",
+                        path.display()
+                    )
+                })?
+            };
+            let pkcs7 = timestamp_authenticode_pkcs7_der_if_requested(
+                pkcs7,
+                timestamp_url,
+                timestamp_digest,
+                "portable sign-msi",
+            )?;
             msi_digest::msi_embed_authenticode_pkcs7_signature(&path, &output, &pkcs7)
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             println!(
@@ -4424,24 +4655,11 @@ where
             key,
             chain_certs,
             digest,
+            timestamp_url,
+            timestamp_digest,
+            artifact_signing,
             output,
         } => {
-            let cert_bytes =
-                std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            let signer_cert = rdp::parse_certificate(&cert_bytes)
-                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-            let key_bytes = std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
-            let private_key = rdp::parse_rsa_private_key(&key_bytes)
-                .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let mut chain = Vec::with_capacity(chain_certs.len());
-            for chain_cert in chain_certs {
-                let bytes = std::fs::read(&chain_cert)
-                    .with_context(|| format!("read {}", chain_cert.display()))?;
-                chain.push(
-                    rdp::parse_certificate(&bytes)
-                        .with_context(|| format!("parse chain certificate {}", chain_cert.display()))?,
-                );
-            }
             let mut subjects = Vec::with_capacity(files.len());
             for file in &files {
                 let name = file
@@ -4453,14 +4671,62 @@ where
                     std::fs::read(file).with_context(|| format!("read {}", file.display()))?;
                 subjects.push(catalog_digest::CatalogSubjectInput { name, bytes });
             }
-            let catalog = catalog_digest::create_catalog_pkcs7_der_rsa(
-                &subjects,
-                digest.into(),
-                signer_cert,
-                chain,
-                private_key,
-            )
-            .with_context(|| format!("create portable catalog {}", output.display()))?;
+            let has_artifact = artifact_signing_requested(&artifact_signing);
+            if has_artifact && (cert.is_some() || key.is_some()) {
+                return Err(anyhow!(
+                    "portable sign-catalog accepts either --cert/--key or --artifact-signing-*, not both"
+                ));
+            }
+            let mut catalog = if has_artifact {
+                #[cfg(feature = "artifact-signing-rest")]
+                {
+                    create_catalog_pkcs7_der_artifact_signing(
+                        &subjects,
+                        digest,
+                        chain_certs,
+                        &artifact_signing,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "create portable Artifact Signing catalog {}",
+                            output.display()
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "artifact-signing-rest"))]
+                {
+                    return Err(anyhow!(
+                        "portable sign-catalog Artifact Signing support requires the artifact-signing-rest feature"
+                    ));
+                }
+            } else {
+                let (cert, key) = match (cert, key) {
+                    (Some(cert), Some(key)) => (cert, key),
+                    _ => return Err(anyhow!("portable sign-catalog requires --cert and --key, or --artifact-signing-* options")),
+                };
+                let cert_bytes =
+                    std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
+                let signer_cert = rdp::parse_certificate(&cert_bytes)
+                    .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+                let key_bytes =
+                    std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
+                let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                    .with_context(|| format!("parse RSA private key {}", key.display()))?;
+                catalog_digest::create_catalog_pkcs7_der_rsa(
+                    &subjects,
+                    digest.into(),
+                    signer_cert,
+                    load_chain_certs(chain_certs)?,
+                    private_key,
+                )
+                .with_context(|| format!("create portable catalog {}", output.display()))?
+            };
+            catalog.pkcs7_der = timestamp_authenticode_pkcs7_der_if_requested(
+                catalog.pkcs7_der,
+                timestamp_url,
+                timestamp_digest,
+                "portable sign-catalog",
+            )?;
             std::fs::write(&output, &catalog.pkcs7_der)
                 .with_context(|| format!("write {}", output.display()))?;
             println!(
