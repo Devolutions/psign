@@ -86,7 +86,7 @@ pwsh -File .\PowerShell\package.ps1 -Configuration Release -NativeArtifactsRoot 
 
 The native artifact root should contain directories such as `psign-core-win-x64`, `psign-core-linux-x64`, and `psign-core-osx-arm64`, each containing the packaged native library name for that RID.
 
-Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies, then verifies them through the built `Devolutions.Psign` module, while preserving the separately signed Windows native `psign-core.dll` artifacts imported from the native signing job. Azure Key Vault signing uses the workflow-built `psign-tool` because the module API does not yet expose the Key Vault signer directly. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
+Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies with `Set-PsignSignature`, then verifies them through the built `Devolutions.Psign` module, while preserving the separately signed Windows native `psign-core.dll` artifacts imported from the native signing job. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
 
 ## Migrating from built-in Authenticode cmdlets
 

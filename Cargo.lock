@@ -2127,6 +2127,7 @@ name = "psign-portable-core"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "authenticode",
  "base64",
  "der 0.7.10",
  "picky",

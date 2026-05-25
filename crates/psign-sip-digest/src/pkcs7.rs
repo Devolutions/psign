@@ -404,12 +404,7 @@ pub fn create_script_authenticode_pkcs7_der_rsa(
     chain_certs: Vec<Certificate>,
     private_key: RsaPrivateKey,
 ) -> Result<Vec<u8>> {
-    let units = crate::ps_script::file_utf16_units(script);
-    let script_digest = crate::ps_script::hash_payload(
-        digest_algorithm.pe_hash_kind(),
-        &crate::ps_script::utf16le_bytes(&units),
-    )?;
-    let indirect = script_spc_indirect_data(digest_algorithm, &script_digest)?;
+    let indirect = script_authenticode_spc_indirect_data(script, digest_algorithm)?;
     create_authenticode_pkcs7_der_rsa(
         indirect,
         digest_algorithm,
@@ -417,6 +412,19 @@ pub fn create_script_authenticode_pkcs7_der_rsa(
         chain_certs,
         private_key,
     )
+}
+
+/// Build the Authenticode `SpcIndirectDataContent` for a PowerShell-class script.
+pub fn script_authenticode_spc_indirect_data(
+    script: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> Result<SpcIndirectDataContent> {
+    let units = crate::ps_script::file_utf16_units(script);
+    let script_digest = crate::ps_script::hash_payload(
+        digest_algorithm.pe_hash_kind(),
+        &crate::ps_script::utf16le_bytes(&units),
+    )?;
+    script_spc_indirect_data(digest_algorithm, &script_digest)
 }
 
 /// Create PKCS#7 `ContentInfo(SignedData)` DER for an Authenticode `SpcIndirectDataContent`.

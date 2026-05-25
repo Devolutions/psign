@@ -4,6 +4,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use authenticode::SpcIndirectDataContent;
 use base64::Engine as _;
 use der::Encode as _;
 use picky::key::PrivateKey;
@@ -21,7 +22,7 @@ use psign_authenticode_trust::{
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
 use psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency;
 use psign_sip_digest::{
-    cab_digest, msi_digest, msix_digest, pe_embed, pkcs7, ps_script, rdp, timestamp,
+    cab_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script, rdp, timestamp,
     verify_script_digest_consistency, zip_authenticode,
 };
 use serde::{Deserialize, Serialize};
@@ -483,23 +484,518 @@ pub fn portable_error_response(
     }
 }
 
+enum SigningProvider {
+    Local(Box<LocalSigningProvider>),
+    #[cfg(feature = "azure-kv-sign")]
+    AzureKeyVault(Box<AzureKeyVaultSigningProvider>),
+    #[cfg(feature = "artifact-signing-rest")]
+    ArtifactSigning(Box<ArtifactSigningProvider>),
+}
+
+struct LocalSigningProvider {
+    signer_cert: x509_cert::Certificate,
+    private_key: rsa::RsaPrivateKey,
+    chain: Vec<x509_cert::Certificate>,
+}
+
+#[cfg(feature = "azure-kv-sign")]
+struct AzureKeyVaultSigningProvider {
+    http: reqwest::blocking::Client,
+    token: String,
+    key_vault_certificate: psign_azure_kv_rest::KeyVaultCertificate,
+    signer_cert: x509_cert::Certificate,
+    chain: Vec<x509_cert::Certificate>,
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+struct ArtifactSigningProvider {
+    endpoint: String,
+    account_name: String,
+    profile_name: String,
+    auth: psign_codesigning_rest::CodesigningAuth,
+    chain: Vec<x509_cert::Certificate>,
+}
+
+#[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
+struct RemoteSignature {
+    signature: Vec<u8>,
+    signer_cert: x509_cert::Certificate,
+    chain: Vec<x509_cert::Certificate>,
+}
+
+impl SigningProvider {
+    fn create_authenticode_pkcs7(
+        &self,
+        indirect: SpcIndirectDataContent,
+        digest_algorithm: AuthenticodeSigningDigest,
+    ) -> Result<Vec<u8>> {
+        match self {
+            SigningProvider::Local(local) => pkcs7::create_authenticode_pkcs7_der_rsa(
+                indirect,
+                digest_algorithm,
+                local.signer_cert.clone(),
+                local.chain.clone(),
+                local.private_key.clone(),
+            ),
+            #[cfg(feature = "azure-kv-sign")]
+            SigningProvider::AzureKeyVault(_) => {
+                let prehash = pkcs7::authenticode_remote_rsa_signed_attrs_digest(
+                    &indirect,
+                    digest_algorithm,
+                )?;
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+                    indirect,
+                    digest_algorithm,
+                    signed.signer_cert,
+                    signed.chain,
+                    &signed.signature,
+                )
+            }
+            #[cfg(feature = "artifact-signing-rest")]
+            SigningProvider::ArtifactSigning(_) => {
+                let prehash = pkcs7::authenticode_remote_rsa_signed_attrs_digest(
+                    &indirect,
+                    digest_algorithm,
+                )?;
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                pkcs7::create_authenticode_pkcs7_der_with_rsa_signature(
+                    indirect,
+                    digest_algorithm,
+                    signed.signer_cert,
+                    signed.chain,
+                    &signed.signature,
+                )
+            }
+        }
+    }
+
+    fn create_pkcs7_signed_data(
+        &self,
+        econtent_type: der::asn1::ObjectIdentifier,
+        econtent_der: &[u8],
+        digest_algorithm: AuthenticodeSigningDigest,
+        content_mode: pkcs7::Pkcs7ContentMode,
+    ) -> Result<Vec<u8>> {
+        match self {
+            SigningProvider::Local(local) => {
+                let pkcs7_bytes = pkcs7::create_pkcs7_signed_data_der_rsa(
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm,
+                    local.signer_cert.clone(),
+                    local.chain.clone(),
+                    local.private_key.clone(),
+                )?;
+                if content_mode == pkcs7::Pkcs7ContentMode::Attached {
+                    return Ok(pkcs7_bytes);
+                }
+                let mut sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_bytes)
+                    .context("parse generated CMS before detaching eContent")?;
+                sd.encap_content_info.econtent = None;
+                pkcs7::encode_pkcs7_content_info_signed_data_der(&sd)
+            }
+            #[cfg(feature = "azure-kv-sign")]
+            SigningProvider::AzureKeyVault(_) => {
+                let prehash = pkcs7::pkcs7_remote_rsa_signed_attrs_digest(
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm,
+                )?;
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm,
+                    signed.signer_cert,
+                    signed.chain,
+                    &signed.signature,
+                    content_mode,
+                )
+            }
+            #[cfg(feature = "artifact-signing-rest")]
+            SigningProvider::ArtifactSigning(_) => {
+                let prehash = pkcs7::pkcs7_remote_rsa_signed_attrs_digest(
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm,
+                )?;
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                pkcs7::create_pkcs7_signed_data_der_with_rsa_signature(
+                    econtent_type,
+                    econtent_der,
+                    digest_algorithm,
+                    signed.signer_cert,
+                    signed.chain,
+                    &signed.signature,
+                    content_mode,
+                )
+            }
+        }
+    }
+
+    fn sign_xml_signed_info(
+        &self,
+        algorithm: psign_opc_sign::vsix::VsixHashAlgorithm,
+        signed_info: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        match self {
+            SigningProvider::Local(local) => {
+                let cert_der = local
+                    .signer_cert
+                    .to_der()
+                    .context("encode signer cert DER")?;
+                let signature =
+                    sign_xml_signed_info_rsa(algorithm, signed_info, &local.private_key)?;
+                Ok((signature, cert_der))
+            }
+            #[cfg(feature = "azure-kv-sign")]
+            SigningProvider::AzureKeyVault(_) => {
+                let digest_algorithm = authenticode_digest_from_vsix_algorithm(algorithm);
+                let prehash = algorithm.hash(signed_info);
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                let cert_der = signed
+                    .signer_cert
+                    .to_der()
+                    .context("encode signer cert DER")?;
+                Ok((signed.signature, cert_der))
+            }
+            #[cfg(feature = "artifact-signing-rest")]
+            SigningProvider::ArtifactSigning(_) => {
+                let digest_algorithm = authenticode_digest_from_vsix_algorithm(algorithm);
+                let prehash = algorithm.hash(signed_info);
+                let signed = self.sign_remote_digest(digest_algorithm, &prehash)?;
+                let cert_der = signed
+                    .signer_cert
+                    .to_der()
+                    .context("encode signer cert DER")?;
+                Ok((signed.signature, cert_der))
+            }
+        }
+    }
+
+    #[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
+    fn sign_remote_digest(
+        &self,
+        digest_algorithm: AuthenticodeSigningDigest,
+        digest: &[u8],
+    ) -> Result<RemoteSignature> {
+        match self {
+            SigningProvider::Local(_) => {
+                bail!("internal error: local signing provider cannot remote-sign a digest")
+            }
+            #[cfg(feature = "azure-kv-sign")]
+            SigningProvider::AzureKeyVault(provider) => {
+                let signature = psign_azure_kv_rest::kv_sign_digest_from_certificate(
+                    &provider.http,
+                    &provider.token,
+                    &provider.key_vault_certificate,
+                    kv_hash_algorithm(digest_algorithm),
+                    digest,
+                )?;
+                Ok(RemoteSignature {
+                    signature,
+                    signer_cert: provider.signer_cert.clone(),
+                    chain: provider.chain.clone(),
+                })
+            }
+            #[cfg(feature = "artifact-signing-rest")]
+            SigningProvider::ArtifactSigning(provider) => {
+                let params = psign_codesigning_rest::CodesigningSubmitParams {
+                    region: "unused".to_string(),
+                    account_name: provider.account_name.clone(),
+                    profile_name: provider.profile_name.clone(),
+                    digest: digest.to_vec(),
+                    signature_algorithm: artifact_signature_algorithm(digest_algorithm).to_string(),
+                    api_version: psign_codesigning_rest::DEFAULT_API_VERSION.to_string(),
+                    correlation_id: None,
+                    authority: None,
+                    auth: provider.auth.clone(),
+                    endpoint_base_url: Some(provider.endpoint.clone()),
+                };
+                let debug_portable = std::env::var_os("SIGNTOOL_PORTABLE_DEBUG").is_some();
+                let signed = psign_codesigning_rest::submit_codesign_hash_signature_blocking(
+                    &params,
+                    |msg| {
+                        if debug_portable {
+                            eprintln!("[debug] {msg}");
+                        }
+                    },
+                )?;
+                let (signer_cert, mut returned_chain) =
+                    pkcs7::parse_artifact_signing_certificates(&signed.signing_certificate)?;
+                returned_chain.extend(provider.chain.clone());
+                Ok(RemoteSignature {
+                    signature: signed.signature,
+                    signer_cert,
+                    chain: returned_chain,
+                })
+            }
+        }
+    }
+}
+
+fn load_signing_provider(request: &PortableSignRequest) -> Result<SigningProvider> {
+    validate_signing_provider_selection(request)?;
+    if has_azure_key_vault_provider(request) {
+        return load_azure_key_vault_signing_provider(request);
+    }
+    if has_artifact_signing_provider(request) {
+        return load_artifact_signing_provider(request);
+    }
+    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    Ok(SigningProvider::Local(Box::new(LocalSigningProvider {
+        signer_cert,
+        private_key,
+        chain,
+    })))
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn load_azure_key_vault_signing_provider(request: &PortableSignRequest) -> Result<SigningProvider> {
+    use std::time::Duration;
+
+    let vault_url = text_opt(request.azure_key_vault_url.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Azure Key Vault signing requires azure_key_vault_url"))?;
+    let certificate =
+        text_opt(request.azure_key_vault_certificate.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("Azure Key Vault signing requires azure_key_vault_certificate")
+        })?;
+    validate_kv_auth_inputs(request)?;
+
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| anyhow::anyhow!("HTTP client: {e}"))?;
+    let auth = psign_azure_kv_rest::KvAuthParams {
+        access_token: request.azure_key_vault_access_token.as_deref(),
+        managed_identity: request.azure_key_vault_managed_identity.unwrap_or(false),
+        tenant_id: request.azure_key_vault_tenant_id.as_deref(),
+        client_id: request.azure_key_vault_client_id.as_deref(),
+        client_secret: request.azure_key_vault_client_secret.as_deref(),
+        authority: None,
+    };
+    let token = psign_azure_kv_rest::acquire_kv_access_token(&auth)?;
+    let key_vault_certificate =
+        psign_azure_kv_rest::fetch_kv_certificate(&http, &vault_url, &certificate, None, &token)?;
+    let signer_cert_der = psign_azure_kv_rest::kv_decode_cer_b64(&key_vault_certificate.cer)?;
+    let signer_cert =
+        rdp::parse_certificate(&signer_cert_der).context("parse Key Vault signer certificate")?;
+    let chain = load_chain_certificates(request)?;
+    Ok(SigningProvider::AzureKeyVault(Box::new(
+        AzureKeyVaultSigningProvider {
+            http,
+            token,
+            key_vault_certificate,
+            signer_cert,
+            chain,
+        },
+    )))
+}
+
+#[cfg(not(feature = "azure-kv-sign"))]
+fn load_azure_key_vault_signing_provider(
+    _request: &PortableSignRequest,
+) -> Result<SigningProvider> {
+    bail!(
+        "Azure Key Vault signing support is not compiled into this build (feature: azure-kv-sign)"
+    )
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn load_artifact_signing_provider(request: &PortableSignRequest) -> Result<SigningProvider> {
+    let endpoint = text_opt(request.artifact_signing_endpoint.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Artifact Signing requires artifact_signing_endpoint"))?;
+    let account_name =
+        text_opt(request.artifact_signing_account_name.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("Artifact Signing requires artifact_signing_account_name")
+        })?;
+    let profile_name =
+        text_opt(request.artifact_signing_profile_name.as_deref()).ok_or_else(|| {
+            anyhow::anyhow!("Artifact Signing requires artifact_signing_profile_name")
+        })?;
+    let auth = artifact_signing_auth(request)?;
+    let chain = load_chain_certificates(request)?;
+    Ok(SigningProvider::ArtifactSigning(Box::new(
+        ArtifactSigningProvider {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            account_name,
+            profile_name,
+            auth,
+            chain,
+        },
+    )))
+}
+
+#[cfg(not(feature = "artifact-signing-rest"))]
+fn load_artifact_signing_provider(_request: &PortableSignRequest) -> Result<SigningProvider> {
+    bail!(
+        "Artifact Signing support is not compiled into this build (feature: artifact-signing-rest)"
+    )
+}
+
+fn validate_signing_provider_selection(request: &PortableSignRequest) -> Result<()> {
+    let has_akv = has_azure_key_vault_provider(request);
+    let has_as = has_artifact_signing_provider(request);
+    let has_local = has_local_signing_material(request);
+
+    if has_akv && has_as {
+        bail!(
+            "provide only one cloud signing provider (Azure Key Vault or Artifact Signing), not both"
+        );
+    }
+    if has_akv && has_local {
+        bail!(
+            "provide either Azure Key Vault cloud signing or local certificate/key material, not both"
+        );
+    }
+    if has_as && has_local {
+        bail!(
+            "provide either Artifact Signing cloud signing or local certificate/key material, not both"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_local_signing_provider(request: &PortableSignRequest) -> Result<()> {
+    validate_signing_provider_selection(request)?;
+    if has_azure_key_vault_provider(request) {
+        bail!("Azure Key Vault cloud signing is not wired for this portable signing format yet");
+    }
+    if has_artifact_signing_provider(request) {
+        bail!("Artifact Signing cloud signing is not wired for this portable signing format yet");
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
+fn text_opt(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn validate_kv_auth_inputs(request: &PortableSignRequest) -> Result<()> {
+    let has_sp = text_opt(request.azure_key_vault_client_secret.as_deref()).is_some();
+    let has_tenant = text_opt(request.azure_key_vault_tenant_id.as_deref()).is_some();
+    let has_client = text_opt(request.azure_key_vault_client_id.as_deref()).is_some();
+    let has_token = text_opt(request.azure_key_vault_access_token.as_deref()).is_some();
+    let managed_identity = request.azure_key_vault_managed_identity.unwrap_or(false);
+
+    let sp_count = has_sp as u8 + has_tenant as u8 + has_client as u8;
+    if sp_count != 0 && sp_count != 3 {
+        bail!(
+            "Azure AD client credentials require azure_key_vault_client_id, azure_key_vault_client_secret, and azure_key_vault_tenant_id"
+        );
+    }
+    if has_token && (managed_identity || sp_count == 3) {
+        bail!(
+            "use either Azure Key Vault access token or managed identity / client credentials, not multiple"
+        );
+    }
+    if managed_identity && (has_token || sp_count == 3) {
+        bail!(
+            "Azure Key Vault managed identity cannot be combined with access tokens or client secrets"
+        );
+    }
+    if !has_token && !managed_identity && sp_count != 3 {
+        bail!(
+            "choose Azure Key Vault authentication: access token, managed identity, or client id/secret/tenant"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn artifact_signing_auth(
+    request: &PortableSignRequest,
+) -> Result<psign_codesigning_rest::CodesigningAuth> {
+    let has_token = text_opt(request.artifact_signing_access_token.as_deref()).is_some();
+    let tenant = text_opt(request.artifact_signing_tenant_id.as_deref());
+    let client = text_opt(request.artifact_signing_client_id.as_deref());
+    let secret = text_opt(request.artifact_signing_client_secret.as_deref());
+    let managed_identity = request.artifact_signing_managed_identity.unwrap_or(false);
+    let sp_count = tenant.is_some() as u8 + client.is_some() as u8 + secret.is_some() as u8;
+
+    if managed_identity {
+        if has_token || sp_count != 0 {
+            bail!(
+                "use either Artifact Signing managed identity, access token, or client credentials, not multiple"
+            );
+        }
+        return Ok(psign_codesigning_rest::CodesigningAuth::ManagedIdentity);
+    }
+    if let Some(token) = text_opt(request.artifact_signing_access_token.as_deref()) {
+        if sp_count != 0 {
+            bail!("use either Artifact Signing access token or client credentials, not both");
+        }
+        return Ok(psign_codesigning_rest::CodesigningAuth::Bearer(token));
+    }
+    if sp_count != 0 && sp_count != 3 {
+        bail!(
+            "Artifact Signing client credentials require artifact_signing_tenant_id, artifact_signing_client_id, and artifact_signing_client_secret"
+        );
+    }
+    if sp_count == 0 {
+        bail!(
+            "choose Artifact Signing authentication: managed identity, access token, or tenant/client-id/client-secret"
+        );
+    }
+    Ok(psign_codesigning_rest::CodesigningAuth::ClientCredentials {
+        tenant_id: tenant.unwrap(),
+        client_id: client.unwrap(),
+        client_secret: secret.unwrap(),
+    })
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn kv_hash_algorithm(
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> psign_azure_kv_rest::KvHashAlg {
+    match digest_algorithm {
+        AuthenticodeSigningDigest::Sha256 => psign_azure_kv_rest::KvHashAlg::Sha256,
+        AuthenticodeSigningDigest::Sha384 => psign_azure_kv_rest::KvHashAlg::Sha384,
+        AuthenticodeSigningDigest::Sha512 => psign_azure_kv_rest::KvHashAlg::Sha512,
+    }
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn artifact_signature_algorithm(digest_algorithm: AuthenticodeSigningDigest) -> &'static str {
+    match digest_algorithm {
+        AuthenticodeSigningDigest::Sha256 => "RS256",
+        AuthenticodeSigningDigest::Sha384 => "RS384",
+        AuthenticodeSigningDigest::Sha512 => "RS512",
+    }
+}
+
+#[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
+fn authenticode_digest_from_vsix_algorithm(
+    algorithm: psign_opc_sign::vsix::VsixHashAlgorithm,
+) -> AuthenticodeSigningDigest {
+    match algorithm {
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha256 => AuthenticodeSigningDigest::Sha256,
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha384 => AuthenticodeSigningDigest::Sha384,
+        psign_opc_sign::vsix::VsixHashAlgorithm::Sha512 => AuthenticodeSigningDigest::Sha512,
+    }
+}
+
 fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let pe =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_pe_authenticode_pkcs7_der_rsa(
-        &pe,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| {
-        format!(
-            "create portable PE Authenticode signature for {}",
-            request.path.display()
-        )
-    })?;
+    let provider = load_signing_provider(request)?;
+    let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
+    let pe_digest = pe_digest::pe_authenticode_digest(&pe, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
+    let pkcs7 = provider
+        .create_authenticode_pkcs7(indirect, digest_algorithm)
+        .with_context(|| {
+            format!(
+                "create portable PE Authenticode signature for {}",
+                request.path.display()
+            )
+        })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
@@ -510,20 +1006,19 @@ fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
 fn sign_cab(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let cab =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_cab_authenticode_pkcs7_der_rsa(
-        &cab,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| {
-        format!(
-            "create portable CAB Authenticode signature for {}",
-            request.path.display()
-        )
-    })?;
+    let provider = load_signing_provider(request)?;
+    let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
+    let cab_digest =
+        cab_digest::cab_authenticode_digest_for_signing(&cab, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::cab_spc_indirect_data(digest_algorithm, &cab_digest)?;
+    let pkcs7 = provider
+        .create_authenticode_pkcs7(indirect, digest_algorithm)
+        .with_context(|| {
+            format!(
+                "create portable CAB Authenticode signature for {}",
+                request.path.display()
+            )
+        })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let signed = cab_digest::cab_append_authenticode_pkcs7_signature(&cab, &pkcs7)
@@ -534,20 +1029,19 @@ fn sign_cab(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
 fn sign_msi(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let msi =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_msi_authenticode_pkcs7_der_rsa(
-        &msi,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| {
-        format!(
-            "create portable MSI Authenticode signature for {}",
-            request.path.display()
-        )
-    })?;
+    let provider = load_signing_provider(request)?;
+    let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
+    let msi_digest =
+        msi_digest::compute_msi_authenticode_digest(&msi, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, &msi_digest)?;
+    let pkcs7 = provider
+        .create_authenticode_pkcs7(indirect, digest_algorithm)
+        .with_context(|| {
+            format!(
+                "create portable MSI Authenticode signature for {}",
+                request.path.display()
+            )
+        })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     msi_digest::msi_embed_authenticode_pkcs7_signature(&request.path, output_path, &pkcs7)
@@ -603,13 +1097,11 @@ fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         )
     })?;
     let script = zip_authenticode::unsigned_signature_script_bytes(&digest);
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_script_authenticode_pkcs7_der_rsa(
+    let provider = load_signing_provider(request)?;
+    let pkcs7 = create_script_authenticode_pkcs7_with_provider(
+        &provider,
         &script,
         request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
     )
     .with_context(|| {
         format!(
@@ -633,7 +1125,7 @@ fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
 fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let data =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    let provider = load_signing_provider(request)?;
     let nuget_alg = match request.hash_algorithm {
         PortableDigestAlgorithm::Sha256 => psign_opc_sign::nuget::NuGetHashAlgorithm::Sha256,
         PortableDigestAlgorithm::Sha384 => psign_opc_sign::nuget::NuGetHashAlgorithm::Sha384,
@@ -651,20 +1143,14 @@ fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     // Create a CMS SignedData with id-data content type, then detach eContent
     let econtent_der = der_encode_octet_string(&content)?;
     let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
-    let pkcs7_bytes = pkcs7::create_pkcs7_signed_data_der_rsa(
-        id_data,
-        &econtent_der,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| format!("create NuGet CMS signature for {}", request.path.display()))?;
-    // Detach eContent (NuGet signatures are detached CMS)
-    let mut sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_bytes)
-        .context("parse generated CMS before detaching eContent")?;
-    sd.encap_content_info.econtent = None;
-    let pkcs7_detached = pkcs7::encode_pkcs7_content_info_signed_data_der(&sd)?;
+    let pkcs7_detached = provider
+        .create_pkcs7_signed_data(
+            id_data,
+            &econtent_der,
+            request.hash_algorithm.into(),
+            pkcs7::Pkcs7ContentMode::Detached,
+        )
+        .with_context(|| format!("create NuGet CMS signature for {}", request.path.display()))?;
     let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7_detached)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut out = Cursor::new(Vec::new());
@@ -677,7 +1163,7 @@ fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
 fn sign_vsix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let data =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    let provider = load_signing_provider(request)?;
     let vsix_alg = match request.hash_algorithm {
         PortableDigestAlgorithm::Sha256 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
         PortableDigestAlgorithm::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
@@ -685,9 +1171,7 @@ fn sign_vsix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     };
     let signed_info = psign_opc_sign::vsix::signed_info_xml(Cursor::new(data.clone()), vsix_alg)
         .with_context(|| format!("create VSIX SignedInfo XML for {}", request.path.display()))?;
-    let cert_der = signer_cert.to_der().context("encode signer cert DER")?;
-    let signature = sign_xml_signed_info_rsa(vsix_alg, &signed_info, &private_key)?;
-    let _chain = chain; // chain included in KeyInfo is just the signer cert for VSIX
+    let (signature, cert_der) = provider.sign_xml_signed_info(vsix_alg, &signed_info)?;
     let xml = psign_opc_sign::vsix::signature_xml_from_signed_info(
         &signed_info,
         &signature,
@@ -710,7 +1194,7 @@ fn sign_clickonce_manifest(request: &PortableSignRequest, output_path: &Path) ->
             request.path.display()
         )
     })?;
-    let (signer_cert, private_key, _chain) = load_signing_material(request)?;
+    let provider = load_signing_provider(request)?;
     let vsix_alg = match request.hash_algorithm {
         PortableDigestAlgorithm::Sha256 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
         PortableDigestAlgorithm::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
@@ -718,8 +1202,7 @@ fn sign_clickonce_manifest(request: &PortableSignRequest, output_path: &Path) ->
     };
     let unsigned = remove_clickonce_xml_signature(text);
     let signed_info = clickonce_manifest_signed_info_xml_bytes(&unsigned, vsix_alg);
-    let cert_der = signer_cert.to_der().context("encode signer cert DER")?;
-    let signature = sign_xml_signed_info_rsa(vsix_alg, &signed_info, &private_key)?;
+    let (signature, cert_der) = provider.sign_xml_signed_info(vsix_alg, &signed_info)?;
     let signature_xml = build_clickonce_signature_xml(&signed_info, &signature, &cert_der);
     let signed = insert_clickonce_signature_in_manifest(&unsigned, &signature_xml)?;
     std::fs::write(output_path, signed.as_bytes())
@@ -729,29 +1212,23 @@ fn sign_clickonce_manifest(request: &PortableSignRequest, output_path: &Path) ->
 fn sign_appinstaller(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let data =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
+    let provider = load_signing_provider(request)?;
     // Create a detached CMS over the descriptor content
     let econtent_der = der_encode_octet_string(&data)?;
     let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
-    let pkcs7_bytes = pkcs7::create_pkcs7_signed_data_der_rsa(
-        id_data,
-        &econtent_der,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| {
-        format!(
-            "create detached PKCS#7 companion signature for {}",
-            request.path.display()
+    let pkcs7_detached = provider
+        .create_pkcs7_signed_data(
+            id_data,
+            &econtent_der,
+            request.hash_algorithm.into(),
+            pkcs7::Pkcs7ContentMode::Detached,
         )
-    })?;
-    // Detach eContent
-    let mut sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_bytes)
-        .context("parse generated CMS before detaching eContent")?;
-    sd.encap_content_info.econtent = None;
-    let pkcs7_detached = pkcs7::encode_pkcs7_content_info_signed_data_der(&sd)?;
+        .with_context(|| {
+            format!(
+                "create detached PKCS#7 companion signature for {}",
+                request.path.display()
+            )
+        })?;
     let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7_detached)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     // Write the .p7 companion alongside the output descriptor
@@ -870,13 +1347,11 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
 
     let script =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_script_authenticode_pkcs7_der_rsa(
+    let provider = load_signing_provider(request)?;
+    let pkcs7 = create_script_authenticode_pkcs7_with_provider(
+        &provider,
         &script,
         request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
     )
     .with_context(|| {
         format!(
@@ -890,6 +1365,15 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
     let mut signed = script;
     signed.extend_from_slice(block.as_bytes());
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
+}
+
+fn create_script_authenticode_pkcs7_with_provider(
+    provider: &SigningProvider,
+    script: &[u8],
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> Result<Vec<u8>> {
+    let indirect = pkcs7::script_authenticode_spc_indirect_data(script, digest_algorithm)?;
+    provider.create_authenticode_pkcs7(indirect, digest_algorithm)
 }
 
 fn has_azure_key_vault_provider(request: &PortableSignRequest) -> bool {
@@ -915,54 +1399,7 @@ fn load_signing_material(
     rsa::RsaPrivateKey,
     Vec<x509_cert::Certificate>,
 )> {
-    // Reject mixed local + cloud providers
-    let has_akv = has_azure_key_vault_provider(request);
-    let has_as = has_artifact_signing_provider(request);
-    let has_local = has_local_signing_material(request);
-
-    if has_akv && has_as {
-        bail!(
-            "provide only one cloud signing provider (Azure Key Vault or Artifact Signing), not both"
-        );
-    }
-    if has_akv && has_local {
-        bail!(
-            "provide either Azure Key Vault cloud signing or local certificate/key material, not both"
-        );
-    }
-    if has_as && has_local {
-        bail!(
-            "provide either Artifact Signing cloud signing or local certificate/key material, not both"
-        );
-    }
-    if has_akv {
-        #[cfg(feature = "azure-kv-sign")]
-        {
-            bail!(
-                "Azure Key Vault portable signing is not yet available through this API — use psign-tool code azure-key-vault"
-            );
-        }
-        #[cfg(not(feature = "azure-kv-sign"))]
-        {
-            bail!(
-                "Azure Key Vault signing support is not compiled into this build (feature: azure-kv-sign)"
-            );
-        }
-    }
-    if has_as {
-        #[cfg(feature = "artifact-signing-rest")]
-        {
-            bail!(
-                "Artifact Signing portable signing is not yet available through this API — use psign-tool code artifact-signing"
-            );
-        }
-        #[cfg(not(feature = "artifact-signing-rest"))]
-        {
-            bail!(
-                "Artifact Signing support is not compiled into this build (feature: artifact-signing-rest)"
-            );
-        }
-    }
+    ensure_local_signing_provider(request)?;
 
     let uses_pfx = request.pfx_path.is_some();
     if uses_pfx
@@ -1014,6 +1451,12 @@ fn load_signing_material(
 
     let signer_cert = rdp::parse_certificate(&cert_bytes).context("parse signer certificate")?;
     let private_key = rdp::parse_rsa_private_key(&key_bytes).context("parse RSA private key")?;
+    let chain = load_chain_certificates(request)?;
+
+    Ok((signer_cert, private_key, chain))
+}
+
+fn load_chain_certificates(request: &PortableSignRequest) -> Result<Vec<x509_cert::Certificate>> {
     let mut chain = Vec::new();
     for path in &request.chain_certificate_paths {
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
@@ -1031,8 +1474,7 @@ fn load_signing_material(
                 .with_context(|| format!("parse chain certificate {index}"))?,
         );
     }
-
-    Ok((signer_cert, private_key, chain))
+    Ok(chain)
 }
 
 fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, Vec<u8>)> {

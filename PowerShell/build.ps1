@@ -28,7 +28,7 @@ try {
         return
     }
 
-    cargo build -p psign-portable-ffi --profile ($Configuration -eq 'Release' ? 'release' : 'dev')
+    cargo build -p psign-portable-ffi --features azure-kv-sign,artifact-signing-rest --profile ($Configuration -eq 'Release' ? 'release' : 'dev')
 
     $rid = if ($IsWindows) {
         'win'
