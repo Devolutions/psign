@@ -22,6 +22,22 @@ param(
 
     [string] $AzureKeyVaultTenantId,
 
+    [string] $ArtifactSigningEndpoint,
+
+    [string] $ArtifactSigningAccountName,
+
+    [string] $ArtifactSigningProfileName,
+
+    [string] $ArtifactSigningAccessToken,
+
+    [switch] $ArtifactSigningManagedIdentity,
+
+    [string] $ArtifactSigningTenantId,
+
+    [string] $ArtifactSigningClientId,
+
+    [string] $ArtifactSigningClientSecret,
+
     [string] $TimestampServer,
 
     [ValidateSet('Sha256', 'Sha384', 'Sha512')]
@@ -84,6 +100,14 @@ if ($SignModule) {
         -AzureKeyVaultClientId $AzureKeyVaultClientId `
         -AzureKeyVaultClientSecret $AzureKeyVaultClientSecret `
         -AzureKeyVaultTenantId $AzureKeyVaultTenantId `
+        -ArtifactSigningEndpoint $ArtifactSigningEndpoint `
+        -ArtifactSigningAccountName $ArtifactSigningAccountName `
+        -ArtifactSigningProfileName $ArtifactSigningProfileName `
+        -ArtifactSigningAccessToken $ArtifactSigningAccessToken `
+        -ArtifactSigningManagedIdentity:$ArtifactSigningManagedIdentity `
+        -ArtifactSigningTenantId $ArtifactSigningTenantId `
+        -ArtifactSigningClientId $ArtifactSigningClientId `
+        -ArtifactSigningClientSecret $ArtifactSigningClientSecret `
         -TimestampServer $TimestampServer `
         -HashAlgorithm $HashAlgorithm `
         -TimestampHashAlgorithm $TimestampHashAlgorithm | Out-Host

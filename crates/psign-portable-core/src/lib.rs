@@ -1063,21 +1063,17 @@ fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
     let staged = stage_flat_msix_for_signature(&package, request.hash_algorithm)
         .with_context(|| format!("stage {} for MSIX signing", request.path.display()))?;
-    let (signer_cert, private_key, chain) = load_signing_material(request)?;
-    let pkcs7 = pkcs7::create_msix_authenticode_pkcs7_der_rsa(
-        &staged,
-        &ext,
-        request.hash_algorithm.into(),
-        signer_cert,
-        chain,
-        private_key,
-    )
-    .with_context(|| {
-        format!(
-            "create portable MSIX Authenticode signature for {}",
-            request.path.display()
-        )
-    })?;
+    let provider = load_signing_provider(request)?;
+    let digest_algorithm = request.hash_algorithm.into();
+    let indirect = pkcs7::msix_spc_indirect_data(&staged, &ext, digest_algorithm)?;
+    let pkcs7 = provider
+        .create_authenticode_pkcs7(indirect, digest_algorithm)
+        .with_context(|| {
+            format!(
+                "create portable MSIX Authenticode signature for {}",
+                request.path.display()
+            )
+        })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut p7x = b"PKCX".to_vec();

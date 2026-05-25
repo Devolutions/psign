@@ -33,6 +33,8 @@ The portable cert store follows the same layout as `psign-tool cert-store`: `<ba
 
 `Set-PsignSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
 
+Cloud signing is available through Azure Key Vault parameters (`-AzureKeyVaultUrl`, `-AzureKeyVaultCertificate`, and access token, managed identity, or client credentials) or Azure Artifact Signing / Trusted Signing parameters (`-ArtifactSigningEndpoint`, account/profile, and access token, managed identity, or client credentials). The portable module native library is built with both cloud-signing feature sets.
+
 ## Explicit trust
 
 `Get-PsignSignature` validates digest binding by default and does not claim OS trust. Explicit portable trust can be requested with anchors:
@@ -86,7 +88,7 @@ pwsh -File .\PowerShell\package.ps1 -Configuration Release -NativeArtifactsRoot 
 
 The native artifact root should contain directories such as `psign-core-win-x64`, `psign-core-linux-x64`, and `psign-core-osx-arm64`, each containing the packaged native library name for that RID.
 
-Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies with `Set-PsignSignature`, then verifies them through the built `Devolutions.Psign` module, while preserving the separately signed Windows native `psign-core.dll` artifacts imported from the native signing job. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
+Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies with `Set-PsignSignature`, then verifies them through the built `Devolutions.Psign` module, while preserving the separately signed Windows native `psign-core.dll` artifacts imported from the native signing job. The packaging helper accepts Azure Key Vault or Azure Artifact Signing parameters; the release workflow currently supplies Azure Key Vault secrets. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
 
 ## Migrating from built-in Authenticode cmdlets
 

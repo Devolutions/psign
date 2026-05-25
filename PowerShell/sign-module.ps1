@@ -16,6 +16,22 @@ param(
 
     [string] $AzureKeyVaultTenantId,
 
+    [string] $ArtifactSigningEndpoint,
+
+    [string] $ArtifactSigningAccountName,
+
+    [string] $ArtifactSigningProfileName,
+
+    [string] $ArtifactSigningAccessToken,
+
+    [switch] $ArtifactSigningManagedIdentity,
+
+    [string] $ArtifactSigningTenantId,
+
+    [string] $ArtifactSigningClientId,
+
+    [string] $ArtifactSigningClientSecret,
+
     [string] $TimestampServer,
 
     [ValidateSet('Sha256', 'Sha384', 'Sha512')]
@@ -54,19 +70,51 @@ function Get-PsignModuleSigningTargets {
     return $targets.ToArray()
 }
 
-function Assert-PsignModuleSigningParameters {
-    foreach ($name in @(
-        'AzureKeyVaultUrl',
-        'AzureKeyVaultCertificate',
-        'AzureKeyVaultClientId',
-        'AzureKeyVaultClientSecret',
-        'AzureKeyVaultTenantId',
-        'TimestampServer'
-    )) {
+function Test-TextValue {
+    param([string] $Value)
+
+    return -not [string]::IsNullOrWhiteSpace($Value)
+}
+
+function Assert-RequiredTextParameters {
+    param([string[]] $Names)
+
+    foreach ($name in $Names) {
         if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
             throw "$name is required when signing a PowerShell module release payload."
         }
     }
+}
+
+function Assert-PsignModuleSigningParameters {
+    Assert-RequiredTextParameters -Names @('TimestampServer')
+
+    $hasAzureKeyVault = (Test-TextValue $AzureKeyVaultUrl) -or
+        (Test-TextValue $AzureKeyVaultCertificate)
+    $hasArtifactSigning = (Test-TextValue $ArtifactSigningEndpoint) -or
+        (Test-TextValue $ArtifactSigningAccountName) -or
+        (Test-TextValue $ArtifactSigningProfileName)
+
+    if ($hasAzureKeyVault -eq $hasArtifactSigning) {
+        throw "Provide exactly one cloud signing provider for the PowerShell module release payload: Azure Key Vault or Artifact Signing."
+    }
+
+    if ($hasAzureKeyVault) {
+        Assert-RequiredTextParameters -Names @(
+            'AzureKeyVaultUrl',
+            'AzureKeyVaultCertificate',
+            'AzureKeyVaultClientId',
+            'AzureKeyVaultClientSecret',
+            'AzureKeyVaultTenantId'
+        )
+        return
+    }
+
+    Assert-RequiredTextParameters -Names @(
+        'ArtifactSigningEndpoint',
+        'ArtifactSigningAccountName',
+        'ArtifactSigningProfileName'
+    )
 }
 
 function Invoke-PsignModuleSigning {
@@ -75,18 +123,43 @@ function Invoke-PsignModuleSigning {
         [string] $Target
     )
 
-    Set-PsignSignature `
-        -LiteralPath $Target `
-        -AzureKeyVaultUrl $AzureKeyVaultUrl `
-        -AzureKeyVaultCertificate $AzureKeyVaultCertificate `
-        -AzureKeyVaultClientId $AzureKeyVaultClientId `
-        -AzureKeyVaultClientSecret $AzureKeyVaultClientSecret `
-        -AzureKeyVaultTenantId $AzureKeyVaultTenantId `
-        -TimestampServer $TimestampServer `
-        -TimestampHashAlgorithm $TimestampHashAlgorithm `
-        -HashAlgorithm $HashAlgorithm `
-        -Force `
-        -ErrorAction Stop | Out-Null
+    $signArgs = @{
+        LiteralPath = $Target
+        TimestampServer = $TimestampServer
+        TimestampHashAlgorithm = $TimestampHashAlgorithm
+        HashAlgorithm = $HashAlgorithm
+        Force = $true
+        ErrorAction = 'Stop'
+    }
+
+    if (Test-TextValue $AzureKeyVaultUrl) {
+        $signArgs.AzureKeyVaultUrl = $AzureKeyVaultUrl
+        $signArgs.AzureKeyVaultCertificate = $AzureKeyVaultCertificate
+        $signArgs.AzureKeyVaultClientId = $AzureKeyVaultClientId
+        $signArgs.AzureKeyVaultClientSecret = $AzureKeyVaultClientSecret
+        $signArgs.AzureKeyVaultTenantId = $AzureKeyVaultTenantId
+    } else {
+        $signArgs.ArtifactSigningEndpoint = $ArtifactSigningEndpoint
+        $signArgs.ArtifactSigningAccountName = $ArtifactSigningAccountName
+        $signArgs.ArtifactSigningProfileName = $ArtifactSigningProfileName
+        if (Test-TextValue $ArtifactSigningAccessToken) {
+            $signArgs.ArtifactSigningAccessToken = $ArtifactSigningAccessToken
+        }
+        if ($ArtifactSigningManagedIdentity.IsPresent) {
+            $signArgs.ArtifactSigningManagedIdentity = $true
+        }
+        if (Test-TextValue $ArtifactSigningTenantId) {
+            $signArgs.ArtifactSigningTenantId = $ArtifactSigningTenantId
+        }
+        if (Test-TextValue $ArtifactSigningClientId) {
+            $signArgs.ArtifactSigningClientId = $ArtifactSigningClientId
+        }
+        if (Test-TextValue $ArtifactSigningClientSecret) {
+            $signArgs.ArtifactSigningClientSecret = $ArtifactSigningClientSecret
+        }
+    }
+
+    Set-PsignSignature @signArgs | Out-Null
 }
 
 function Assert-PsignModuleSignatures {
