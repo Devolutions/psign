@@ -253,7 +253,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           $target = '${{ matrix.target }}'
-          cargo build --locked --release -p psign-portable-ffi --target $target
+          cargo build --locked --release -p psign-portable-ffi --features azure-kv-sign --target $target
 
       - name: Stage psign-core native library
         shell: pwsh
