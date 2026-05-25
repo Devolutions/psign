@@ -79,7 +79,9 @@ goblin = "0.9"
 picky = { version = "7.0.0-rc.23", default-features = false, features = ["pkcs12"] }
 cms = { version = "0.2.3", features = ["builder"], optional = true }
 der = { version = "0.7", features = ["derive"], optional = true }
+glob = "0.3"
 rand = { version = "0.8", optional = true }
+rayon = "1.10"
 rsa = { version = "0.9.10", features = ["sha2"] }
 x509-cert = "0.2.5"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
@@ -88,8 +90,6 @@ psign-azure-kv-rest = { path = "crates/psign-azure-kv-rest", optional = true }
 psign-codesigning-rest = { path = "crates/psign-codesigning-rest", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-glob = "0.3"
-rayon = "1.10"
 uuid = "1"
 windows = { version = "0.59", features = [
     "Win32_Foundation",

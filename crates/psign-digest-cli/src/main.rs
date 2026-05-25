@@ -3114,7 +3114,6 @@ fn write_digest_output(
     Ok(())
 }
 
-#[cfg(feature = "artifact-signing-rest")]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum ArtifactSigningCredentialType {
     Default,
