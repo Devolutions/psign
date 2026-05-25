@@ -4,6 +4,8 @@ param(
 
     [string] $SignerModuleRoot,
 
+    [string] $PsignToolPath,
+
     [switch] $VerifyOnly,
 
     [string] $AzureKeyVaultUrl,
@@ -69,6 +71,37 @@ function Assert-PsignModuleSigningParameters {
     }
 }
 
+function Invoke-PsignToolModuleSigning {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Target,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ToolPath
+    )
+
+    $toolArguments = @(
+        '--mode', 'portable',
+        '--verbose',
+        'sign',
+        '--azure-key-vault-tenant-id', $AzureKeyVaultTenantId,
+        '--azure-key-vault-url', $AzureKeyVaultUrl,
+        '--azure-key-vault-client-id', $AzureKeyVaultClientId,
+        '--azure-key-vault-client-secret', $AzureKeyVaultClientSecret,
+        '--azure-key-vault-certificate', $AzureKeyVaultCertificate,
+        '--timestamp-url', $TimestampServer,
+        '--timestamp-digest', $TimestampHashAlgorithm.ToLowerInvariant(),
+        '--digest', $HashAlgorithm.ToLowerInvariant(),
+        '--exit-codes', 'azure',
+        $Target
+    )
+
+    & $ToolPath @toolArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "psign-tool signing failed for '$Target' with exit code $LASTEXITCODE."
+    }
+}
+
 function Assert-PsignModuleSignatures {
     param(
         [Parameter(Mandatory = $true)]
@@ -110,20 +143,18 @@ Import-Module $signerManifestPath -Force -ErrorAction Stop
 if (-not $VerifyOnly.IsPresent) {
     Assert-PsignModuleSigningParameters
 
-    $signingArguments = @{
-        AzureKeyVaultUrl = $AzureKeyVaultUrl
-        AzureKeyVaultCertificate = $AzureKeyVaultCertificate
-        AzureKeyVaultClientId = $AzureKeyVaultClientId
-        AzureKeyVaultClientSecret = $AzureKeyVaultClientSecret
-        AzureKeyVaultTenantId = $AzureKeyVaultTenantId
-        TimestampServer = $TimestampServer
-        HashAlgorithm = $HashAlgorithm
-        TimestampHashAlgorithm = $TimestampHashAlgorithm
-        Force = $true
+    $resolvedPsignToolPath = if ([string]::IsNullOrWhiteSpace($PsignToolPath)) {
+        $command = Get-Command psign-tool -ErrorAction SilentlyContinue
+        if ($null -eq $command) {
+            throw "PsignToolPath is required because Azure Key Vault signing is not available through Set-PsignSignature."
+        }
+        $command.Source
+    } else {
+        (Resolve-Path -LiteralPath $PsignToolPath).Path
     }
 
     foreach ($target in $targets) {
-        Set-PsignSignature -LiteralPath $target @signingArguments -ErrorAction Stop | Out-Null
+        Invoke-PsignToolModuleSigning -Target $target -ToolPath $resolvedPsignToolPath
     }
 }
 

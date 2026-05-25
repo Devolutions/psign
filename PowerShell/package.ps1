@@ -24,6 +24,8 @@ param(
 
     [string] $TimestampServer,
 
+    [string] $PsignToolPath,
+
     [ValidateSet('Sha256', 'Sha384', 'Sha512')]
     [string] $HashAlgorithm = 'Sha256',
 
@@ -85,6 +87,7 @@ if ($SignModule) {
         -AzureKeyVaultClientSecret $AzureKeyVaultClientSecret `
         -AzureKeyVaultTenantId $AzureKeyVaultTenantId `
         -TimestampServer $TimestampServer `
+        -PsignToolPath $PsignToolPath `
         -HashAlgorithm $HashAlgorithm `
         -TimestampHashAlgorithm $TimestampHashAlgorithm | Out-Host
 

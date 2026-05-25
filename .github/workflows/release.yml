@@ -253,7 +253,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           $target = '${{ matrix.target }}'
-          cargo build --locked --release -p psign-portable-ffi --features azure-kv-sign --target $target
+          cargo build --locked --release -p psign-portable-ffi --target $target
 
       - name: Stage psign-core native library
         shell: pwsh
@@ -673,6 +673,12 @@ jobs:
           pattern: psign-core-*
           path: dist/native
 
+      - name: Download Linux x64 psign-tool
+        uses: actions/download-artifact@v8
+        with:
+          name: psign-tool-linux-x64.zip
+          path: work/linux-x64
+
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v5
         with:
@@ -748,6 +754,18 @@ jobs:
           }
 
           if ([System.Boolean]::Parse($env:SIGN_POWERSHELL_MODULE)) {
+            $toolDir = Join-Path $env:RUNNER_TEMP 'psign-tool-module-signing'
+            if (Test-Path -LiteralPath $toolDir) {
+              Remove-Item -LiteralPath $toolDir -Recurse -Force
+            }
+            New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+            Expand-Archive -Path 'work/linux-x64/psign-tool-linux-x64.zip' -DestinationPath $toolDir -Force
+            $psignToolPath = Join-Path $toolDir 'psign-tool'
+            if (-not (Test-Path -LiteralPath $psignToolPath)) {
+              throw "Built Linux psign-tool executable was not found at $psignToolPath"
+            }
+            chmod +x $psignToolPath
+
             $packageArgs.SignModule = $true
             $packageArgs.AzureKeyVaultUrl = $env:CODE_SIGNING_KEYVAULT_URL
             $packageArgs.AzureKeyVaultCertificate = $env:CODE_SIGNING_CERTIFICATE_NAME
@@ -755,6 +773,7 @@ jobs:
             $packageArgs.AzureKeyVaultClientSecret = $env:CODE_SIGNING_CLIENT_SECRET
             $packageArgs.AzureKeyVaultTenantId = $env:AZURE_TENANT_ID
             $packageArgs.TimestampServer = $env:CODE_SIGNING_TIMESTAMP_SERVER
+            $packageArgs.PsignToolPath = $psignToolPath
           }
 
           ./PowerShell/package.ps1 @packageArgs
