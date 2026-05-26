@@ -4,7 +4,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use psign_portable_core::{
     PortableErrorCode, PortableErrorResponse, portable_clear_signature, portable_error_response,
-    portable_get_signature, portable_sign, portable_validate_powershell_script, version,
+    portable_get_signature, portable_new_file_catalog, portable_sign, portable_test_file_catalog,
+    portable_validate_powershell_script, version,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,6 +64,42 @@ pub unsafe extern "C" fn psign_core_get_signature(
     request_json_len: usize,
 ) -> PsignFfiResult {
     invoke_json(request_json_ptr, request_json_len, portable_get_signature)
+}
+
+/// Create an unsigned portable Windows file catalog.
+///
+/// # Safety
+///
+/// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
+/// of the call. The returned buffer must be released with `psign_core_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psign_core_new_file_catalog(
+    request_json_ptr: *const u8,
+    request_json_len: usize,
+) -> PsignFfiResult {
+    invoke_json(
+        request_json_ptr,
+        request_json_len,
+        portable_new_file_catalog,
+    )
+}
+
+/// Validate files against a portable Windows file catalog.
+///
+/// # Safety
+///
+/// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
+/// of the call. The returned buffer must be released with `psign_core_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psign_core_test_file_catalog(
+    request_json_ptr: *const u8,
+    request_json_len: usize,
+) -> PsignFfiResult {
+    invoke_json(
+        request_json_ptr,
+        request_json_len,
+        portable_test_file_catalog,
+    )
 }
 
 /// Validate a PowerShell script/module signature from in-memory content.
@@ -232,5 +269,48 @@ mod tests {
         let json = unsafe { result_json(result) };
         assert!(json.contains("PowerShellScript"));
         assert!(json.contains("NotSigned"));
+    }
+
+    #[test]
+    fn file_catalog_create_and_test_return_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "psign-ffi-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        std::fs::write(dir.join("a.txt"), b"alpha").expect("write file");
+        let catalog = dir.join("catalog.cat");
+        let dir_string = dir.to_string_lossy().to_string();
+        let catalog_string = catalog.to_string_lossy().to_string();
+
+        let create_request = serde_json::json!({
+            "catalog_file_path": catalog_string.clone(),
+            "paths": [dir_string.clone()],
+            "catalog_version": 2
+        })
+        .to_string();
+        let result =
+            unsafe { psign_core_new_file_catalog(create_request.as_ptr(), create_request.len()) };
+        assert_eq!(result.status_code, STATUS_OK);
+        let json = unsafe { result_json(result) };
+        assert!(json.contains("SHA256"));
+
+        let test_request = serde_json::json!({
+            "catalog_file_path": catalog_string,
+            "paths": [dir_string],
+            "files_to_skip": []
+        })
+        .to_string();
+        let result =
+            unsafe { psign_core_test_file_catalog(test_request.as_ptr(), test_request.len()) };
+        assert_eq!(result.status_code, STATUS_OK);
+        let json = unsafe { result_json(result) };
+        assert!(json.contains("Valid"));
+
+        std::fs::remove_dir_all(dir).expect("remove temp dir");
     }
 }

@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use authenticode::{DigestInfo, SpcAttributeTypeAndOptionalValue, SpcIndirectDataContent};
 use cms::signed_data::SignedData;
 use der::asn1::{Any, ObjectIdentifier, OctetString};
-use der::{Decode, Encode, SliceReader};
+use der::{Decode, Encode, SliceReader, Tag};
 use digest::Digest;
 use rsa::RsaPrivateKey;
 use std::collections::HashSet;
@@ -39,6 +39,11 @@ const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.10
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
 
 const CATALOG_GENERIC_LINK_VALUE_DER: &[u8] = &[0xa2, 0x02, 0x80, 0x00];
+const CATALOG_PE_IMAGE_DATA_VALUE: &[u8] = &[
+    0x03, 0x01, 0x00, 0xa0, 0x20, 0xa2, 0x1e, 0x80, 0x1c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c, 0x00,
+    0x4f, 0x00, 0x62, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x6c, 0x00, 0x65, 0x00, 0x74, 0x00, 0x65, 0x00,
+    0x3e, 0x00, 0x3e, 0x00, 0x3e,
+];
 const CATALOG_THIS_UPDATE_UTC: &[u8] = b"700101000000Z";
 
 const TAG_SEQUENCE: u8 = 0x30;
@@ -74,6 +79,51 @@ pub struct CatalogSignResult {
     pub members: Vec<CatalogMember>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogHashAlgorithm {
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl CatalogHashAlgorithm {
+    pub fn digest_algorithm_oid(self) -> ObjectIdentifier {
+        match self {
+            Self::Sha1 => OID_SHA1,
+            Self::Sha256 => OID_SHA256,
+            Self::Sha384 => OID_SHA384,
+            Self::Sha512 => OID_SHA512,
+        }
+    }
+
+    fn pe_hash_kind(self) -> PeAuthenticodeHashKind {
+        match self {
+            Self::Sha1 => PeAuthenticodeHashKind::Sha1,
+            Self::Sha256 => PeAuthenticodeHashKind::Sha256,
+            Self::Sha384 => PeAuthenticodeHashKind::Sha384,
+            Self::Sha512 => PeAuthenticodeHashKind::Sha512,
+        }
+    }
+
+    fn digest_algorithm_identifier(self) -> AlgorithmIdentifierOwned {
+        AlgorithmIdentifierOwned {
+            oid: self.digest_algorithm_oid(),
+            parameters: None,
+        }
+    }
+}
+
+impl From<AuthenticodeSigningDigest> for CatalogHashAlgorithm {
+    fn from(value: AuthenticodeSigningDigest) -> Self {
+        match value {
+            AuthenticodeSigningDigest::Sha256 => Self::Sha256,
+            AuthenticodeSigningDigest::Sha384 => Self::Sha384,
+            AuthenticodeSigningDigest::Sha512 => Self::Sha512,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Tlv<'a> {
     tag: u8,
@@ -107,25 +157,12 @@ fn hash_econtent(kind: PeAuthenticodeHashKind, econtent: &[u8]) -> Vec<u8> {
     }
 }
 
-fn hash_subject_bytes(kind: PeAuthenticodeHashKind, bytes: &[u8]) -> Vec<u8> {
-    match kind {
-        PeAuthenticodeHashKind::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
-        PeAuthenticodeHashKind::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
-        PeAuthenticodeHashKind::Sha384 => sha2::Sha384::digest(bytes).to_vec(),
-        PeAuthenticodeHashKind::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
-    }
-}
-
-fn digest_algorithm_identifier(
-    digest_algorithm: AuthenticodeSigningDigest,
-) -> AlgorithmIdentifierOwned {
-    AlgorithmIdentifierOwned {
-        oid: match digest_algorithm {
-            AuthenticodeSigningDigest::Sha256 => OID_SHA256,
-            AuthenticodeSigningDigest::Sha384 => OID_SHA384,
-            AuthenticodeSigningDigest::Sha512 => OID_SHA512,
-        },
-        parameters: None,
+fn hash_subject_bytes(algorithm: CatalogHashAlgorithm, bytes: &[u8]) -> Vec<u8> {
+    match algorithm {
+        CatalogHashAlgorithm::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
+        CatalogHashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
+        CatalogHashAlgorithm::Sha384 => sha2::Sha384::digest(bytes).to_vec(),
+        CatalogHashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
     }
 }
 
@@ -193,10 +230,8 @@ fn catalog_subject_identifier(name: &str) -> Result<Vec<u8>> {
     if name.is_empty() {
         return Err(anyhow!("catalog subject name must not be empty"));
     }
-    if name.contains(['/', '\\', '\0']) {
-        return Err(anyhow!(
-            "catalog subject name must be a file name, not a path: {name}"
-        ));
+    if name.contains('\0') {
+        return Err(anyhow!("catalog subject name must not contain NUL bytes"));
     }
     let decorated = format!("<{name}>\0");
     let mut out = Vec::with_capacity(decorated.len() * 2);
@@ -216,7 +251,7 @@ fn catalog_list_identifier(members: &[CatalogMember]) -> Vec<u8> {
 }
 
 fn catalog_generic_spc_indirect_data(
-    digest_algorithm: AuthenticodeSigningDigest,
+    digest_algorithm: CatalogHashAlgorithm,
     subject_digest: &[u8],
 ) -> Result<SpcIndirectDataContent> {
     let expected = digest_algorithm.pe_hash_kind().digest_output_len();
@@ -236,22 +271,49 @@ fn catalog_generic_spc_indirect_data(
                 .map_err(|e| anyhow!("catalog generic SPC link Any: {e}"))?,
         },
         message_digest: DigestInfo {
-            digest_algorithm: digest_algorithm_identifier(digest_algorithm),
+            digest_algorithm: digest_algorithm.digest_algorithm_identifier(),
+            digest,
+        },
+    })
+}
+
+fn catalog_pe_spc_indirect_data(
+    digest_algorithm: CatalogHashAlgorithm,
+    pe_digest: &[u8],
+) -> Result<SpcIndirectDataContent> {
+    let expected = digest_algorithm.pe_hash_kind().digest_output_len();
+    if pe_digest.len() != expected {
+        return Err(anyhow!(
+            "catalog PE digest length {} does not match {:?} ({expected} octets)",
+            pe_digest.len(),
+            digest_algorithm
+        ));
+    }
+    let digest = OctetString::new(pe_digest.to_vec())
+        .map_err(|e| anyhow!("catalog PE SpcIndirectData digest OCTET STRING: {e}"))?;
+    Ok(SpcIndirectDataContent {
+        data: SpcAttributeTypeAndOptionalValue {
+            value_type: ID_SPC_PE_IMAGE_DATA,
+            value: Any::new(Tag::Sequence, CATALOG_PE_IMAGE_DATA_VALUE)
+                .map_err(|e| anyhow!("catalog PE image data Any: {e}"))?,
+        },
+        message_digest: DigestInfo {
+            digest_algorithm: digest_algorithm.digest_algorithm_identifier(),
             digest,
         },
     })
 }
 
 fn catalog_subject_indirect_data(
-    digest_algorithm: AuthenticodeSigningDigest,
+    digest_algorithm: CatalogHashAlgorithm,
     subject: &[u8],
 ) -> Result<(SpcIndirectDataContent, ObjectIdentifier, Vec<u8>)> {
     let kind = digest_algorithm.pe_hash_kind();
     if let Ok(pe_digest) = crate::pe_digest::pe_authenticode_digest(subject, kind) {
-        let indirect = crate::pkcs7::pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
+        let indirect = catalog_pe_spc_indirect_data(digest_algorithm, &pe_digest)?;
         return Ok((indirect, ID_SPC_PE_IMAGE_DATA, pe_digest));
     }
-    let digest = hash_subject_bytes(kind, subject);
+    let digest = hash_subject_bytes(digest_algorithm, subject);
     let indirect = catalog_generic_spc_indirect_data(digest_algorithm, &digest)?;
     Ok((indirect, ID_SPC_CAB_DATA, digest))
 }
@@ -274,9 +336,9 @@ fn catalog_ctl_entry_der(
 }
 
 /// Build Microsoft CTL `eContent` DER for a portable generic catalog.
-pub fn create_catalog_ctl_econtent_der(
+pub fn create_catalog_ctl_econtent_der_with_hash(
     subjects: &[CatalogSubjectInput],
-    digest_algorithm: AuthenticodeSigningDigest,
+    digest_algorithm: CatalogHashAlgorithm,
 ) -> Result<(Vec<u8>, Vec<CatalogMember>)> {
     if subjects.is_empty() {
         return Err(anyhow!(
@@ -303,7 +365,7 @@ pub fn create_catalog_ctl_econtent_der(
             subject_name: decode_utf16le_subject_identifier(&subject_identifier),
             subject_identifier,
             data_oid,
-            digest_algorithm_oid: digest_algorithm_identifier(digest_algorithm).oid,
+            digest_algorithm_oid: digest_algorithm.digest_algorithm_oid(),
             digest,
         });
     }
@@ -318,6 +380,29 @@ pub fn create_catalog_ctl_econtent_der(
         trusted_subjects,
     ]);
     Ok((ctl_info, members))
+}
+
+/// Build Microsoft CTL `eContent` DER for a portable generic catalog.
+pub fn create_catalog_ctl_econtent_der(
+    subjects: &[CatalogSubjectInput],
+    digest_algorithm: AuthenticodeSigningDigest,
+) -> Result<(Vec<u8>, Vec<CatalogMember>)> {
+    create_catalog_ctl_econtent_der_with_hash(subjects, digest_algorithm.into())
+}
+
+/// Create an unsigned portable generic catalog (`.cat`) from CTL members.
+pub fn create_unsigned_catalog_pkcs7_der(
+    subjects: &[CatalogSubjectInput],
+    digest_algorithm: CatalogHashAlgorithm,
+) -> Result<CatalogSignResult> {
+    let (econtent_der, members) =
+        create_catalog_ctl_econtent_der_with_hash(subjects, digest_algorithm)?;
+    let pkcs7_der = crate::pkcs7::create_pkcs7_unsigned_signed_data_der(
+        ID_MS_CTL,
+        &econtent_der,
+        digest_algorithm.digest_algorithm_identifier(),
+    )?;
+    Ok(CatalogSignResult { pkcs7_der, members })
 }
 
 /// Create a signed portable generic catalog (`.cat`) from CTL members using an RSA private key.
@@ -418,7 +503,12 @@ fn decode_utf16le_subject_identifier(bytes: &[u8]) -> Option<String> {
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .take_while(|u| *u != 0)
         .collect();
-    String::from_utf16(&units).ok()
+    String::from_utf16(&units).ok().map(|s| {
+        match s.strip_prefix('<').and_then(|v| v.strip_suffix('>')) {
+            Some(inner) => inner.to_string(),
+            None => s,
+        }
+    })
 }
 
 fn spc_indirect_from_attribute_sequence(
@@ -621,13 +711,25 @@ pub fn catalog_members_bytes(data: &[u8]) -> Result<Vec<CatalogMember>> {
     Ok(members)
 }
 
-fn catalog_member_digest_for_subject(member: &CatalogMember, subject: &[u8]) -> Result<Vec<u8>> {
+pub fn catalog_member_digest_for_subject(
+    member: &CatalogMember,
+    subject: &[u8],
+) -> Result<Vec<u8>> {
     let kind = digest_kind_from_digest_alg_oid(member.digest_algorithm_oid)?;
     if member.data_oid == ID_SPC_PE_IMAGE_DATA {
         crate::pe_digest::pe_authenticode_digest(subject, kind)
             .context("compute PE Authenticode digest for catalog member")
     } else {
-        Ok(hash_subject_bytes(kind, subject))
+        let algorithm = if kind == PeAuthenticodeHashKind::Sha1 {
+            CatalogHashAlgorithm::Sha1
+        } else if kind == PeAuthenticodeHashKind::Sha256 {
+            CatalogHashAlgorithm::Sha256
+        } else if kind == PeAuthenticodeHashKind::Sha384 {
+            CatalogHashAlgorithm::Sha384
+        } else {
+            CatalogHashAlgorithm::Sha512
+        };
+        Ok(hash_subject_bytes(algorithm, subject))
     }
 }
 

@@ -1,6 +1,6 @@
 @{
     RootModule = 'Devolutions.Psign.psm1'
-    ModuleVersion = '0.4.0'
+    ModuleVersion = '0.5.0'
     GUID = 'e6e50e4b-bf25-4ed6-a343-49f904e79f8f'
     Author = 'Devolutions'
     CompanyName = 'Devolutions'
@@ -12,7 +12,9 @@
     FormatsToProcess = @('Devolutions.Psign.Format.ps1xml')
     CmdletsToExport = @(
         'Get-PsignSignature',
+        'New-PsignFileCatalog',
         'Set-PsignSignature',
+        'Test-PsignFileCatalog',
         'Test-PsignModule',
         'Protect-PsignModule',
         'Unprotect-PsignSignature'

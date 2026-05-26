@@ -130,6 +130,60 @@ internal sealed class PortableSignRequest
     public string? ArtifactSigningClientSecret { get; init; }
 }
 
+internal sealed class PortableNewFileCatalogRequest
+{
+    [JsonPropertyName("catalog_file_path")]
+    public required string CatalogFilePath { get; init; }
+
+    [JsonPropertyName("paths")]
+    public string[] Paths { get; init; } = [];
+
+    [JsonPropertyName("catalog_version")]
+    public int CatalogVersion { get; init; } = 2;
+}
+
+internal sealed class PortableTestFileCatalogRequest
+{
+    [JsonPropertyName("catalog_file_path")]
+    public required string CatalogFilePath { get; init; }
+
+    [JsonPropertyName("paths")]
+    public string[] Paths { get; init; } = [];
+
+    [JsonPropertyName("files_to_skip")]
+    public string[] FilesToSkip { get; init; } = [];
+
+    [JsonPropertyName("trusted_certificate_paths")]
+    public string[] TrustedCertificatePaths { get; init; } = [];
+
+    [JsonPropertyName("trusted_certificates_der_base64")]
+    public string[] TrustedCertificatesDerBase64 { get; init; } = [];
+
+    [JsonPropertyName("anchor_directory")]
+    public string? AnchorDirectory { get; init; }
+
+    [JsonPropertyName("authroot_cab")]
+    public string? AuthRootCab { get; init; }
+
+    [JsonPropertyName("as_of")]
+    public string? AsOf { get; init; }
+
+    [JsonPropertyName("prefer_timestamp_signing_time")]
+    public bool PreferTimestampSigningTime { get; init; }
+
+    [JsonPropertyName("require_valid_timestamp")]
+    public bool RequireValidTimestamp { get; init; }
+
+    [JsonPropertyName("online_aia")]
+    public bool OnlineAia { get; init; }
+
+    [JsonPropertyName("online_ocsp")]
+    public bool OnlineOcsp { get; init; }
+
+    [JsonPropertyName("revocation_mode")]
+    public string RevocationMode { get; init; } = "Off";
+}
+
 internal sealed class PortableClearSignatureRequest
 {
     [JsonPropertyName("path")]
