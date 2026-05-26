@@ -42,8 +42,14 @@ BeforeAll {
         [System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, $script:PfxPassword))
 
     function script:New-TestModule {
-        param([string]$Name, [switch]$WithManifest, [int]$ExtraFiles = 0)
-        $modDir = Join-Path $script:TestDir $Name
+        param(
+            [string]$Name,
+            [switch]$WithManifest,
+            [int]$ExtraFiles = 0,
+            [string]$ModuleVersion = '1.0.0',
+            [string]$Directory
+        )
+        $modDir = if ($Directory) { $Directory } else { Join-Path $script:TestDir $Name }
         New-Item -ItemType Directory -Path $modDir -Force | Out-Null
 
         Set-Content -LiteralPath (Join-Path $modDir "$Name.psm1") -Value "function Get-$Name { '$Name' }" -Encoding UTF8
@@ -51,7 +57,7 @@ BeforeAll {
         if ($WithManifest) {
             $psdContent = @"
 @{
-    ModuleVersion = '1.0.0'
+    ModuleVersion = '$ModuleVersion'
     RootModule = '$Name.psm1'
     FunctionsToExport = @('Get-$Name')
 }
@@ -128,6 +134,52 @@ Describe 'Protect-PsignModule -IncludeUnreferenced' {
         $result | Should -Not -BeNull
         # Only manifest-referenced files: .psd1 + .psm1
         $result.TotalFiles | Should -Be 2
+    }
+}
+
+Describe 'Protect-PsignModule pipeline input' {
+    It 'accepts Get-Module output and signs the piped module version' {
+        $moduleName = 'PipeProtect'
+        $modulePathRoot = Join-Path $script:TestDir 'psmodulepath-protect'
+        $moduleVersionRoot = Join-Path $modulePathRoot $moduleName
+        $oldModuleDir = Join-Path $moduleVersionRoot '1.0.0'
+        $newModuleDir = Join-Path $moduleVersionRoot '2.0.0'
+        $null = New-TestModule -Name $moduleName -WithManifest -Directory $oldModuleDir
+        $null = New-TestModule -Name $moduleName -WithManifest -ModuleVersion '2.0.0' -Directory $newModuleDir
+
+        $originalPSModulePath = $env:PSModulePath
+        try {
+            $env:PSModulePath = "$modulePathRoot$([System.IO.Path]::PathSeparator)$originalPSModulePath"
+
+            $module = Get-Module -ListAvailable -Name $moduleName |
+                Where-Object Version -eq ([version]'1.0.0')
+            $result = $module | Protect-PsignModule -CertificatePath $script:CertPath -PrivateKeyPath $script:KeyPath
+            $result.ModuleName | Should -Be $moduleName
+            $result.ModulePath | Should -Be $oldModuleDir
+            $result.Succeeded | Should -Be $result.TotalFiles
+
+            (Test-PsignModule -Path $oldModuleDir -Policy AllSigned -SkipTrust).Valid | Should -BeTrue
+            (Test-PsignModule -Path $newModuleDir -Policy AllSigned -SkipTrust).Valid | Should -BeFalse
+        } finally {
+            $env:PSModulePath = $originalPSModulePath
+        }
+    }
+
+    It 'accepts Get-InstalledModule-style output with InstalledLocation' {
+        $moduleName = 'InstalledProtect'
+        $modDir = New-TestModule -Name $moduleName -WithManifest -ModuleVersion '2.0.0'
+        $installedModule = [pscustomobject]@{
+            Name = $moduleName
+            Version = '2.0.0'
+            InstalledLocation = $modDir
+            Repository = 'TestRepository'
+        }
+
+        $result = $installedModule | Protect-PsignModule -CertificatePath $script:CertPath -PrivateKeyPath $script:KeyPath
+        $result.ModuleName | Should -Be $moduleName
+        $result.ModulePath | Should -Be $modDir
+        $result.Succeeded | Should -Be $result.TotalFiles
+        (Test-PsignModule -Path $modDir -Policy AllSigned -SkipTrust).Valid | Should -BeTrue
     }
 }
 

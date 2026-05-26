@@ -86,6 +86,12 @@ fn verify_trust_chain_verbose(
         );
     }
 
+    if leaf.subject_name() == leaf.issuer_name()
+        && cert_sha1_thumbprint(leaf).as_ref().ok() == Some(root_thumb)
+    {
+        return Ok(());
+    }
+
     leaf.verifier()
         .chain(chain_vec.iter().copied())
         .exact_date(verification_instant)

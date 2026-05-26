@@ -1,11 +1,10 @@
 Set-StrictMode -Version Latest
 
 function script:Ensure-PortableSignatureModule {
-    if (-not (Get-Command Get-PsignSignature -ErrorAction SilentlyContinue)) {
-        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-        $modulePath = Join-Path (Join-Path $repoRoot 'PowerShell\Devolutions.Psign') 'Devolutions.Psign.psd1'
-        Import-Module $modulePath -Force
-    }
+    Remove-Module Devolutions.Psign -Force -ErrorAction SilentlyContinue
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $modulePath = Join-Path (Join-Path $repoRoot 'PowerShell\Devolutions.Psign') 'Devolutions.Psign.psd1'
+    Import-Module $modulePath -Force
 }
 
 Describe 'Portable PowerShell Authenticode compatibility' {
@@ -39,9 +38,9 @@ Describe 'Portable PowerShell Authenticode compatibility' {
         }
     }
 
-    It 'preserves backward-compatible aliases Get-PortableSignature and Set-PortableSignature' {
-        Get-Command Get-PortableSignature -ErrorAction Stop | Should -Not -BeNullOrEmpty
-        Get-Command Set-PortableSignature -ErrorAction Stop | Should -Not -BeNullOrEmpty
+    It 'does not export legacy PortableSignature aliases' {
+        Get-Command Get-PortableSignature -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        Get-Command Set-PortableSignature -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
     It 'exposes built-in enum types on compatibility properties' {

@@ -12,7 +12,7 @@ internal static class CertStorePathHelper
 {
     internal static readonly string[] WellKnownScopes = ["CurrentUser", "LocalMachine"];
 
-    internal static readonly string[] WellKnownStores = ["MY", "Root", "CA", "Trust", "Disallowed"];
+    internal static readonly string[] WellKnownStores = ["MY", "Root", "CA", "Trust", "TrustedPublisher", "Disallowed"];
 
     /// <summary>
     /// Resolve the base directory for the portable certificate store.
@@ -60,6 +60,7 @@ internal static class CertStorePathHelper
             "root" => "Root",
             "ca" => "CA",
             "trust" => "Trust",
+            "trustedpublisher" => "TrustedPublisher",
             "disallowed" => "Disallowed",
             _ => trimmed,
         };
