@@ -739,7 +739,7 @@ pub fn portable_test_file_catalog(
         });
     }
 
-    path_items.sort_by(|a, b| catalog_path_sort_key(&a.path).cmp(&catalog_path_sort_key(&b.path)));
+    path_items.sort_by_key(|item| catalog_path_sort_key(&item.path));
     skipped_items.sort_by_key(|item| catalog_path_sort_key(item));
     let signature = portable_get_signature(request.signature_request())?;
     let status = if path_items
@@ -962,10 +962,11 @@ fn collect_catalog_subjects(
             }
         }
     }
-    subjects.sort_by(|a, b| {
-        catalog_path_sort_key(&a.member_name)
-            .cmp(&catalog_path_sort_key(&b.member_name))
-            .then_with(|| a.path.cmp(&b.path))
+    subjects.sort_by_key(|subject| {
+        (
+            catalog_path_sort_key(&subject.member_name),
+            subject.path.clone(),
+        )
     });
     reject_duplicate_catalog_member_names(&subjects)?;
     if subjects.is_empty() {
