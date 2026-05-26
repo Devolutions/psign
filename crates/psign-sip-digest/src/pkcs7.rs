@@ -693,6 +693,37 @@ pub fn create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
     encode_pkcs7_content_info_signed_data_der(&sd)
 }
 
+/// Create unsigned PKCS#7 `ContentInfo(SignedData)` DER for an arbitrary attached content type.
+///
+/// Windows file catalogs created for later signing are CMS `SignedData` documents that can carry
+/// Microsoft CTL content before any `SignerInfo` has been added.
+pub fn create_pkcs7_unsigned_signed_data_der(
+    econtent_type: ObjectIdentifier,
+    econtent_der: &[u8],
+    digest_algorithm: AlgorithmIdentifierOwned,
+) -> Result<Vec<u8>> {
+    let mut rd = SliceReader::new(econtent_der)
+        .map_err(|e| anyhow!("encapsulated content DER reader: {e}"))?;
+    let econtent =
+        Any::decode(&mut rd).map_err(|e| anyhow!("encapsulated content as CMS Any: {e}"))?;
+    rd.finish(())
+        .map_err(|e| anyhow!("trailing octets after encapsulated content DER: {e}"))?;
+    let digest_algorithms = SetOfVec::try_from(vec![digest_algorithm])
+        .map_err(|e| anyhow!("DigestAlgorithmIdentifiers SET: {e}"))?;
+    let sd = SignedData {
+        version: CmsVersion::V1,
+        digest_algorithms,
+        encap_content_info: EncapsulatedContentInfo {
+            econtent_type,
+            econtent: Some(econtent),
+        },
+        certificates: None,
+        crls: None,
+        signer_infos: SignerInfos(SetOfVec::new()),
+    };
+    encode_pkcs7_content_info_signed_data_der(&sd)
+}
+
 /// Attach a raw RFC3161 `timeStampToken` `ContentInfo` as a Microsoft Authenticode unsigned attribute.
 pub fn signed_data_add_rfc3161_timestamp_token(
     sd: &SignedData,

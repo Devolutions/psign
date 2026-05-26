@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use authenticode::SpcIndirectDataContent;
 use base64::Engine as _;
 use der::Encode as _;
+use der::asn1::ObjectIdentifier;
 use picky::key::PrivateKey;
 use picky::pkcs12::{
     Pfx, Pkcs12CryptoContext, Pkcs12ParsingParams, SafeBag, SafeBagKind, SafeContentsKind,
@@ -24,8 +25,8 @@ use psign_sip_digest::verify_pe::{
     pe_nth_pkcs7_signed_data_der, verify_pe_authenticode_digest_consistency,
 };
 use psign_sip_digest::{
-    cab_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script, rdp, timestamp,
-    verify_script_digest_consistency, zip_authenticode,
+    cab_digest, catalog_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script,
+    rdp, timestamp, verify_script_digest_consistency, zip_authenticode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -92,6 +93,23 @@ pub enum PortableRevocationMode {
     Require,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PortableCatalogValidationStatus {
+    Valid,
+    ValidationFailed,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PortableCatalogItemStatus {
+    Valid,
+    Missing,
+    HashMismatch,
+    NotInCatalog,
+    Skipped,
+}
+
 impl From<PortableRevocationMode> for RevocationMode {
     fn from(value: PortableRevocationMode) -> Self {
         match value {
@@ -151,6 +169,62 @@ impl PortableGetSignatureRequest {
             online_aia: false,
             online_ocsp: false,
             revocation_mode: PortableRevocationMode::Off,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableNewFileCatalogRequest {
+    pub catalog_file_path: PathBuf,
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub catalog_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableTestFileCatalogRequest {
+    pub catalog_file_path: PathBuf,
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub files_to_skip: Vec<String>,
+    #[serde(default)]
+    pub trusted_certificate_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub trusted_certificates_der_base64: Vec<String>,
+    #[serde(default)]
+    pub anchor_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub authroot_cab: Option<PathBuf>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+    #[serde(default)]
+    pub prefer_timestamp_signing_time: bool,
+    #[serde(default)]
+    pub require_valid_timestamp: bool,
+    #[serde(default)]
+    pub online_aia: bool,
+    #[serde(default)]
+    pub online_ocsp: bool,
+    #[serde(default)]
+    pub revocation_mode: PortableRevocationMode,
+}
+
+impl PortableTestFileCatalogRequest {
+    fn signature_request(&self) -> PortableGetSignatureRequest {
+        PortableGetSignatureRequest {
+            path: self.catalog_file_path.clone(),
+            trusted_certificate_paths: self.trusted_certificate_paths.clone(),
+            trusted_certificates_der_base64: self.trusted_certificates_der_base64.clone(),
+            anchor_directory: self.anchor_directory.clone(),
+            authroot_cab: self.authroot_cab.clone(),
+            as_of: self.as_of.clone(),
+            prefer_timestamp_signing_time: self.prefer_timestamp_signing_time,
+            require_valid_timestamp: self.require_valid_timestamp,
+            online_aia: self.online_aia,
+            online_ocsp: self.online_ocsp,
+            revocation_mode: self.revocation_mode,
         }
     }
 }
@@ -340,6 +414,43 @@ pub struct PortableSignatureResponse {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableCatalogItem {
+    pub path: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableCatalogPathItem {
+    pub path: String,
+    pub hash: Option<String>,
+    pub status: PortableCatalogItemStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableNewFileCatalogResponse {
+    pub schema_version: u32,
+    pub catalog_file_path: PathBuf,
+    pub catalog_version: u32,
+    pub hash_algorithm: String,
+    pub item_count: usize,
+    pub catalog_items: Vec<PortableCatalogItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableTestFileCatalogResponse {
+    pub schema_version: u32,
+    pub catalog_file_path: PathBuf,
+    pub status: PortableCatalogValidationStatus,
+    pub hash_algorithm: String,
+    pub catalog_items: Vec<PortableCatalogItem>,
+    pub path_items: Vec<PortableCatalogPathItem>,
+    pub skipped_items: Vec<String>,
+    pub signature: PortableSignatureResponse,
+}
+
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
@@ -495,6 +606,163 @@ pub fn portable_clear_signature(
     }
 }
 
+pub fn portable_new_file_catalog(
+    request: PortableNewFileCatalogRequest,
+) -> Result<PortableNewFileCatalogResponse> {
+    let catalog_file_path = resolve_catalog_output_path(&request.catalog_file_path);
+    let catalog_version = effective_catalog_version(request.catalog_version)?;
+    let hash_algorithm = catalog_hash_algorithm_for_version(catalog_version)?;
+    let subjects = collect_catalog_subjects(&request.paths, Some(&catalog_file_path))?;
+    let inputs = subjects
+        .into_iter()
+        .map(|subject| {
+            let bytes = std::fs::read(&subject.path)
+                .with_context(|| format!("read catalog subject {}", subject.path.display()))?;
+            Ok(catalog_digest::CatalogSubjectInput {
+                name: subject.member_name,
+                bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let catalog = catalog_digest::create_unsigned_catalog_pkcs7_der(&inputs, hash_algorithm)
+        .with_context(|| format!("create file catalog {}", catalog_file_path.display()))?;
+    std::fs::write(&catalog_file_path, &catalog.pkcs7_der)
+        .with_context(|| format!("write {}", catalog_file_path.display()))?;
+    let catalog_items = catalog
+        .members
+        .iter()
+        .map(portable_catalog_item_from_member)
+        .collect::<Vec<_>>();
+    Ok(PortableNewFileCatalogResponse {
+        schema_version: SCHEMA_VERSION,
+        catalog_file_path,
+        catalog_version,
+        hash_algorithm: catalog_hash_algorithm_label(hash_algorithm).to_string(),
+        item_count: catalog_items.len(),
+        catalog_items,
+    })
+}
+
+pub fn portable_test_file_catalog(
+    request: PortableTestFileCatalogRequest,
+) -> Result<PortableTestFileCatalogResponse> {
+    let catalog_file_path = request.catalog_file_path.clone();
+    let catalog_bytes = std::fs::read(&catalog_file_path)
+        .with_context(|| format!("read catalog {}", catalog_file_path.display()))?;
+    let members = catalog_digest::catalog_members_bytes(&catalog_bytes)
+        .with_context(|| format!("parse catalog members {}", catalog_file_path.display()))?;
+    let catalog_items = members
+        .iter()
+        .map(portable_catalog_item_from_member)
+        .collect::<Vec<_>>();
+    let hash_algorithm = members
+        .first()
+        .map(|m| catalog_hash_algorithm_label_for_oid(m.digest_algorithm_oid).to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let mut member_by_name = std::collections::HashMap::with_capacity(members.len());
+    for member in members {
+        if let Some(name) = member.subject_name.as_ref() {
+            member_by_name.insert(normalize_catalog_member_key(name), member);
+        }
+    }
+
+    let skip_keys = request
+        .files_to_skip
+        .iter()
+        .flat_map(|skip| catalog_skip_keys(skip))
+        .collect::<std::collections::HashSet<_>>();
+    let subjects = collect_catalog_subjects(&request.paths, Some(&catalog_file_path))?;
+    let mut seen_path_keys = std::collections::HashSet::with_capacity(subjects.len());
+    let mut skipped_items = Vec::new();
+    let mut path_items = Vec::new();
+
+    for subject in subjects {
+        let member_key = normalize_catalog_member_key(&subject.member_name);
+        if skip_keys.contains(&member_key)
+            || skip_keys.contains(&normalize_catalog_member_key(
+                &subject.path.to_string_lossy(),
+            ))
+            || subject
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| skip_keys.contains(&normalize_catalog_member_key(name)))
+        {
+            skipped_items.push(subject.member_name);
+            continue;
+        }
+
+        seen_path_keys.insert(member_key.clone());
+        let Some(member) = member_by_name.get(&member_key) else {
+            path_items.push(PortableCatalogPathItem {
+                path: subject.member_name,
+                hash: None,
+                status: PortableCatalogItemStatus::NotInCatalog,
+                message: Some("File is not listed in the catalog.".to_string()),
+            });
+            continue;
+        };
+        let bytes = std::fs::read(&subject.path).with_context(|| {
+            format!("read catalog validation subject {}", subject.path.display())
+        })?;
+        let actual = catalog_digest::catalog_member_digest_for_subject(member, &bytes)
+            .with_context(|| {
+                format!("hash catalog validation subject {}", subject.path.display())
+            })?;
+        let actual_hex = hex_lower(&actual);
+        let status = if actual == member.digest {
+            PortableCatalogItemStatus::Valid
+        } else {
+            PortableCatalogItemStatus::HashMismatch
+        };
+        let message = (status == PortableCatalogItemStatus::HashMismatch)
+            .then(|| "File hash does not match the catalog.".to_string());
+        path_items.push(PortableCatalogPathItem {
+            path: subject.member_name,
+            hash: Some(actual_hex),
+            status,
+            message,
+        });
+    }
+
+    for (key, member) in member_by_name {
+        if seen_path_keys.contains(&key) || skip_keys.contains(&key) {
+            continue;
+        }
+        path_items.push(PortableCatalogPathItem {
+            path: member
+                .subject_name
+                .unwrap_or_else(|| hex_lower(&member.subject_identifier)),
+            hash: None,
+            status: PortableCatalogItemStatus::Missing,
+            message: Some("Catalog member was not found under the supplied path.".to_string()),
+        });
+    }
+
+    path_items.sort_by(|a, b| catalog_path_sort_key(&a.path).cmp(&catalog_path_sort_key(&b.path)));
+    skipped_items.sort_by_key(|item| catalog_path_sort_key(item));
+    let signature = portable_get_signature(request.signature_request())?;
+    let status = if path_items
+        .iter()
+        .all(|item| item.status == PortableCatalogItemStatus::Valid)
+    {
+        PortableCatalogValidationStatus::Valid
+    } else {
+        PortableCatalogValidationStatus::ValidationFailed
+    };
+
+    Ok(PortableTestFileCatalogResponse {
+        schema_version: SCHEMA_VERSION,
+        catalog_file_path,
+        status,
+        hash_algorithm,
+        catalog_items,
+        path_items,
+        skipped_items,
+        signature,
+    })
+}
+
 pub fn portable_validate_powershell_script(
     request: PortableValidatePowerShellRequest,
 ) -> Result<PortableSignatureResponse> {
@@ -587,6 +855,247 @@ fn script_extension_for(path: &Path) -> String {
         .and_then(|e| e.to_str())
         .map(|s| s.to_ascii_lowercase())
         .unwrap_or_else(|| "ps1".to_string())
+}
+
+#[derive(Debug, Clone)]
+struct CatalogSubjectPlan {
+    path: PathBuf,
+    member_name: String,
+}
+
+fn resolve_catalog_output_path(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.join("catalog.cat")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn effective_catalog_version(version: u32) -> Result<u32> {
+    match version {
+        0 => Ok(2),
+        1 | 2 => Ok(version),
+        _ => bail!("catalog_version must be 1 or 2"),
+    }
+}
+
+fn catalog_hash_algorithm_for_version(
+    version: u32,
+) -> Result<catalog_digest::CatalogHashAlgorithm> {
+    match version {
+        1 => Ok(catalog_digest::CatalogHashAlgorithm::Sha1),
+        2 => Ok(catalog_digest::CatalogHashAlgorithm::Sha256),
+        _ => bail!("catalog_version must be 1 or 2"),
+    }
+}
+
+fn catalog_hash_algorithm_label(algorithm: catalog_digest::CatalogHashAlgorithm) -> &'static str {
+    match algorithm {
+        catalog_digest::CatalogHashAlgorithm::Sha1 => "SHA1",
+        catalog_digest::CatalogHashAlgorithm::Sha256 => "SHA256",
+        catalog_digest::CatalogHashAlgorithm::Sha384 => "SHA384",
+        catalog_digest::CatalogHashAlgorithm::Sha512 => "SHA512",
+    }
+}
+
+fn catalog_hash_algorithm_label_for_oid(oid: ObjectIdentifier) -> &'static str {
+    if oid == ObjectIdentifier::new_unwrap("1.3.14.3.2.26") {
+        "SHA1"
+    } else if oid == ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1") {
+        "SHA256"
+    } else if oid == ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2") {
+        "SHA384"
+    } else if oid == ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3") {
+        "SHA512"
+    } else {
+        "Unknown"
+    }
+}
+
+fn portable_catalog_item_from_member(
+    member: &catalog_digest::CatalogMember,
+) -> PortableCatalogItem {
+    PortableCatalogItem {
+        path: member
+            .subject_name
+            .clone()
+            .unwrap_or_else(|| hex_lower(&member.subject_identifier)),
+        hash: hex_lower(&member.digest),
+    }
+}
+
+fn collect_catalog_subjects(
+    paths: &[PathBuf],
+    catalog_file_path: Option<&Path>,
+) -> Result<Vec<CatalogSubjectPlan>> {
+    let effective_paths = if paths.is_empty() {
+        vec![std::env::current_dir().context("resolve current directory for catalog paths")?]
+    } else {
+        paths.to_vec()
+    };
+    let single_root_directory = effective_paths.len() == 1 && effective_paths[0].is_dir();
+    let mut subjects = Vec::new();
+    if single_root_directory {
+        collect_catalog_directory_subjects(
+            &effective_paths[0],
+            Some(&effective_paths[0]),
+            catalog_file_path,
+            &mut subjects,
+        )?;
+    } else {
+        for path in &effective_paths {
+            if path.is_dir() {
+                collect_catalog_directory_subjects(path, None, catalog_file_path, &mut subjects)?;
+            } else if path.is_file() {
+                if is_same_existing_path(path, catalog_file_path) {
+                    continue;
+                }
+                subjects.push(CatalogSubjectPlan {
+                    path: path.clone(),
+                    member_name: catalog_file_name(path)?,
+                });
+            } else {
+                bail!(
+                    "catalog path does not exist or is not a file/directory: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    subjects.sort_by(|a, b| {
+        catalog_path_sort_key(&a.member_name)
+            .cmp(&catalog_path_sort_key(&b.member_name))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    reject_duplicate_catalog_member_names(&subjects)?;
+    if subjects.is_empty() {
+        bail!("catalog requires at least one subject file");
+    }
+    Ok(subjects)
+}
+
+fn collect_catalog_directory_subjects(
+    directory: &Path,
+    relative_base: Option<&Path>,
+    catalog_file_path: Option<&Path>,
+    subjects: &mut Vec<CatalogSubjectPlan>,
+) -> Result<()> {
+    let mut entries = std::fs::read_dir(directory)
+        .with_context(|| format!("read directory {}", directory.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("read directory entry {}", directory.display()))?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("stat directory entry {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_catalog_directory_subjects(&path, relative_base, catalog_file_path, subjects)?;
+        } else if file_type.is_file() {
+            if is_same_existing_path(&path, catalog_file_path) {
+                continue;
+            }
+            let member_name = match relative_base {
+                Some(base) => catalog_relative_name(base, &path)?,
+                None => catalog_file_name(&path)?,
+            };
+            subjects.push(CatalogSubjectPlan { path, member_name });
+        }
+    }
+    Ok(())
+}
+
+fn catalog_file_name(path: &Path) -> Result<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "catalog subject path has no UTF-8 file name: {}",
+                path.display()
+            )
+        })
+}
+
+fn catalog_relative_name(base: &Path, path: &Path) -> Result<String> {
+    let relative = path
+        .strip_prefix(base)
+        .with_context(|| format!("make {} relative to {}", path.display(), base.display()))?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            continue;
+        };
+        let Some(part) = part.to_str() else {
+            bail!(
+                "catalog relative path contains non-UTF-8 component: {}",
+                path.display()
+            );
+        };
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        bail!("catalog relative path is empty for {}", path.display());
+    }
+    Ok(parts.join("/"))
+}
+
+fn reject_duplicate_catalog_member_names(subjects: &[CatalogSubjectPlan]) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(subjects.len());
+    for subject in subjects {
+        let key = normalize_catalog_member_key(&subject.member_name);
+        if !seen.insert(key) {
+            bail!(
+                "catalog contains duplicate subject file name {}",
+                subject.member_name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_same_existing_path(path: &Path, other: Option<&Path>) -> bool {
+    let Some(other) = other else {
+        return false;
+    };
+    let Ok(left) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(right) = other.canonicalize() else {
+        return false;
+    };
+    left == right
+}
+
+fn normalize_catalog_member_key(path: &str) -> String {
+    path.replace('\\', "/").to_ascii_lowercase()
+}
+
+fn catalog_skip_keys(skip: &str) -> Vec<String> {
+    let normalized = normalize_catalog_member_key(skip);
+    let file_name = normalized
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    match file_name {
+        Some(file_name) if file_name != normalized => vec![normalized, file_name],
+        _ => vec![normalized],
+    }
+}
+
+fn catalog_path_sort_key(path: &str) -> String {
+    normalize_catalog_member_key(path)
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
 }
 
 pub fn portable_error_response(
@@ -2304,6 +2813,19 @@ fn inspect_pkcs7_file(
     format: PortableFileFormat,
 ) -> Result<PortableSignatureResponse> {
     let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if pkcs7::parse_pkcs7_signed_data_der(&data)
+        .ok()
+        .is_some_and(|sd| sd.signer_infos.0.is_empty())
+    {
+        let mut response = base_response(
+            path.to_path_buf(),
+            format,
+            PortableSignatureStatus::NotSigned,
+            "PKCS#7 SignedData has no SignerInfo.",
+        );
+        response.pkcs7_der_base64 = Some(base64::engine::general_purpose::STANDARD.encode(&data));
+        return Ok(response);
+    }
     match inspect_authenticode_pkcs7_der(&data) {
         Ok(report) => {
             let mut summary = summarize_pkcs7_reports(std::iter::once(report));
@@ -2496,6 +3018,7 @@ fn looks_unsigned(message: &str) -> bool {
         || lower.contains("not signed")
         || lower.contains("no certificate table")
         || lower.contains("no pkcs#7")
+        || lower.contains("no signerinfo")
         || lower.contains("digital signature stream")
         || lower.contains("signature comment not found")
         || lower.contains("appxsignature.p7x")
@@ -2818,6 +3341,126 @@ mod tests {
         let response = portable_validate_powershell_script(request).expect("validate content");
         assert_eq!(response.status, PortableSignatureStatus::NotSigned);
         assert_eq!(response.format, PortableFileFormat::PowerShellScript);
+    }
+
+    #[test]
+    fn creates_and_tests_portable_file_catalog_with_relative_paths() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-file-catalog-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(temp_dir.join("sub")).expect("create temp dir");
+        std::fs::write(temp_dir.join("a.txt"), b"alpha").expect("write a");
+        std::fs::write(temp_dir.join("sub").join("b.txt"), b"bravo").expect("write b");
+        let catalog_path = temp_dir.join("catalog.cat");
+
+        let created = portable_new_file_catalog(PortableNewFileCatalogRequest {
+            catalog_file_path: catalog_path.clone(),
+            paths: vec![temp_dir.clone()],
+            catalog_version: 2,
+        })
+        .expect("create catalog");
+        assert_eq!(created.catalog_version, 2);
+        assert_eq!(created.hash_algorithm, "SHA256");
+        assert_eq!(created.item_count, 2);
+        assert!(
+            created
+                .catalog_items
+                .iter()
+                .any(|item| item.path == "a.txt")
+        );
+        assert!(
+            created
+                .catalog_items
+                .iter()
+                .any(|item| item.path == "sub/b.txt")
+        );
+
+        let tested = portable_test_file_catalog(default_catalog_test_request(
+            catalog_path.clone(),
+            vec![temp_dir.clone()],
+            Vec::new(),
+        ))
+        .expect("test catalog");
+        assert_eq!(tested.status, PortableCatalogValidationStatus::Valid);
+        assert_eq!(tested.signature.status, PortableSignatureStatus::NotSigned);
+        assert_eq!(tested.path_items.len(), 2);
+
+        std::fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn file_catalog_reports_tamper_and_supports_skip() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-file-catalog-tamper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let file_path = temp_dir.join("a.txt");
+        std::fs::write(&file_path, b"alpha").expect("write a");
+        let catalog_path = temp_dir.join("catalog.cat");
+        portable_new_file_catalog(PortableNewFileCatalogRequest {
+            catalog_file_path: catalog_path.clone(),
+            paths: vec![temp_dir.clone()],
+            catalog_version: 2,
+        })
+        .expect("create catalog");
+        std::fs::write(&file_path, b"tampered").expect("tamper a");
+
+        let failed = portable_test_file_catalog(default_catalog_test_request(
+            catalog_path.clone(),
+            vec![temp_dir.clone()],
+            Vec::new(),
+        ))
+        .expect("test tampered catalog");
+        assert_eq!(
+            failed.status,
+            PortableCatalogValidationStatus::ValidationFailed
+        );
+        assert!(failed.path_items.iter().any(|item| {
+            item.path == "a.txt" && item.status == PortableCatalogItemStatus::HashMismatch
+        }));
+
+        let skipped = portable_test_file_catalog(default_catalog_test_request(
+            catalog_path.clone(),
+            vec![temp_dir.clone()],
+            vec!["a.txt".to_string()],
+        ))
+        .expect("test skipped catalog");
+        assert_eq!(skipped.status, PortableCatalogValidationStatus::Valid);
+        assert_eq!(skipped.skipped_items, vec!["a.txt".to_string()]);
+
+        std::fs::remove_dir_all(temp_dir).expect("remove temp dir");
+    }
+
+    fn default_catalog_test_request(
+        catalog_file_path: PathBuf,
+        paths: Vec<PathBuf>,
+        files_to_skip: Vec<String>,
+    ) -> PortableTestFileCatalogRequest {
+        PortableTestFileCatalogRequest {
+            catalog_file_path,
+            paths,
+            files_to_skip,
+            trusted_certificate_paths: Vec::new(),
+            trusted_certificates_der_base64: Vec::new(),
+            anchor_directory: None,
+            authroot_cab: None,
+            as_of: None,
+            prefer_timestamp_signing_time: false,
+            require_valid_timestamp: false,
+            online_aia: false,
+            online_ocsp: false,
+            revocation_mode: PortableRevocationMode::Off,
+        }
     }
 
     #[test]

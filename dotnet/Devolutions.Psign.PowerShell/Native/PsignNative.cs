@@ -20,6 +20,16 @@ internal static unsafe class PsignNative
         return Invoke<PortableGetSignatureRequest, PortableSignature>(request, psign_core_get_signature);
     }
 
+    internal static PortableNewFileCatalogResponse NewFileCatalog(PortableNewFileCatalogRequest request)
+    {
+        return Invoke<PortableNewFileCatalogRequest, PortableNewFileCatalogResponse>(request, psign_core_new_file_catalog);
+    }
+
+    internal static PortableTestFileCatalogResponse TestFileCatalog(PortableTestFileCatalogRequest request)
+    {
+        return Invoke<PortableTestFileCatalogRequest, PortableTestFileCatalogResponse>(request, psign_core_test_file_catalog);
+    }
+
     internal static PortableSignResponse Sign(PortableSignRequest request)
     {
         return Invoke<PortableSignRequest, PortableSignResponse>(request, psign_core_sign);
@@ -76,6 +86,12 @@ internal static unsafe class PsignNative
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern PsignFfiResult psign_core_get_signature(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern PsignFfiResult psign_core_new_file_catalog(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern PsignFfiResult psign_core_test_file_catalog(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern PsignFfiResult psign_core_sign(IntPtr requestJsonPtr, UIntPtr requestJsonLen);

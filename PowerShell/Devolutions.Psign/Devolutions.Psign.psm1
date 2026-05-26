@@ -69,3 +69,10 @@ Register-ArgumentCompleter -CommandName Test-PsignModule -ParameterName Policy -
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
+
+Register-ArgumentCompleter -CommandName New-PsignFileCatalog -ParameterName CatalogVersion -ScriptBlock {
+    param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
+    @('1', '2') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
