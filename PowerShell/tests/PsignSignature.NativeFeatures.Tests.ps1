@@ -72,4 +72,20 @@ Describe 'Psign native signature features' {
         $after = Get-PsignSignature -LiteralPath $path -SkipTrust
         $after.SignatureCount | Should -Be 2
     }
+
+    It 'replaces PE signatures by default through Set-PsignSignature' {
+        $source = Join-Path $script:RepoRoot 'tests\fixtures\pe-authenticode-upstream\tiny32.signed.efi'
+        $pfxPath = Join-Path $script:RepoRoot 'tests\fixtures\devolutions-authenticode\authenticode-test-cert.pfx'
+        $path = Join-Path $script:TempRoot 'tiny32.replace.efi'
+        Copy-Item -LiteralPath $source -Destination $path
+
+        $before = Get-PsignSignature -LiteralPath $path -SkipTrust
+        $before.SignatureCount | Should -Be 1
+
+        Set-PsignSignature -LiteralPath $path -PfxPath $pfxPath -Password (ConvertTo-SecureString 'CodeSign123!' -AsPlainText -Force) | Out-Null
+
+        $after = Get-PsignSignature -LiteralPath $path -SkipTrust
+        $after.SignatureCount | Should -Be 1
+        $after.SignedCms | Should -Not -BeNullOrEmpty
+    }
 }
