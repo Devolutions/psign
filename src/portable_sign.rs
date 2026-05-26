@@ -57,7 +57,7 @@ pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput>
         if idx > 0 {
             combined.push('\n');
         }
-        let signed = sign_one_target(target, &identity)
+        let signed = sign_one_target(target, &identity, args.append_signature)
             .with_context(|| format!("portable sign '{}'", target.display()))?;
         std::fs::write(target, signed)
             .with_context(|| format!("write signed file '{}'", target.display()))?;
@@ -190,7 +190,6 @@ fn validate_supported_options(args: &SignArgs) -> Result<()> {
     reject_string_option("--i/--issuer-name", &args.issuer_name)?;
     reject_string_option("--csp", &args.csp)?;
     reject_string_option("--kc/--key-container", &args.key_container)?;
-    reject_bool_option("--as/--append-signature", args.append_signature)?;
     reject_bool_option("--ph/--page-hashes", args.page_hashes)?;
     reject_bool_option("--nph/--no-page-hashes", args.no_page_hashes)?;
     reject_path_option("--dlib", &args.dlib)?;
@@ -386,7 +385,6 @@ fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
     reject_bool_option("--sm/--machine-store", args.machine_store)?;
     reject_option("--s/--store", args.store_name != "MY")?;
     reject_path_option("--cert-store-dir", &args.cert_store_dir)?;
-    reject_bool_option("--as/--append-signature", args.append_signature)?;
     reject_bool_option("--ph/--page-hashes", args.page_hashes)?;
     reject_bool_option("--nph/--no-page-hashes", args.no_page_hashes)?;
     reject_path_option("--dlib", &args.dlib)?;
@@ -476,7 +474,6 @@ fn validate_artifact_signing_supported_options(args: &SignArgs) -> Result<()> {
     reject_bool_option("--sm/--machine-store", args.machine_store)?;
     reject_option("--s/--store", args.store_name != "MY")?;
     reject_path_option("--cert-store-dir", &args.cert_store_dir)?;
-    reject_bool_option("--as/--append-signature", args.append_signature)?;
     reject_bool_option("--ph/--page-hashes", args.page_hashes)?;
     reject_bool_option("--nph/--no-page-hashes", args.no_page_hashes)?;
     reject_path_option("--dlib", &args.dlib)?;
@@ -545,6 +542,7 @@ fn validate_artifact_signing_supported_options(args: &SignArgs) -> Result<()> {
 fn sign_one_target(
     target: &Path,
     identity: &crate::cert_store::SigningIdentity,
+    append_signature: bool,
 ) -> Result<Vec<u8>> {
     let ext = target
         .extension()
@@ -560,7 +558,18 @@ fn sign_one_target(
             target.display()
         ));
     }
-    let bytes = std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+    let mut bytes =
+        std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+    if !append_signature {
+        bytes = psign_sip_digest::pe_embed::pe_remove_authenticode_certificates(bytes)
+            .with_context(|| {
+                format!(
+                    "remove existing PE Authenticode signatures from '{}'",
+                    target.display()
+                )
+            })?
+            .0;
+    }
     psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(
         &bytes,
         &identity.cert_der,
@@ -612,6 +621,9 @@ fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()
         "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd" => {
             run_portable_sign_pe_artifact_signing(target, &tmp, args)
         }
+        _ if args.append_signature => Err(anyhow!(
+            "--as/--append-signature is only supported for portable PE/WinMD signing"
+        )),
         "cab" => run_portable_sign_cab_artifact_signing(target, &tmp, args),
         "msi" | "msp" => run_portable_sign_msi_artifact_signing(target, &tmp, args),
         "appx" | "msix" => run_portable_sign_msix_artifact_signing(target, &tmp, args),
@@ -650,6 +662,9 @@ fn run_portable_sign_pe_azure_key_vault(
         OsString::from("--digest"),
         OsString::from(portable_digest_name(args.digest)?),
     ];
+    if args.append_signature {
+        argv.push(OsString::from("--append-signature"));
+    }
     for chain_cert in &args.additional_certs {
         argv.push(OsString::from("--chain-cert"));
         argv.push(chain_cert.as_os_str().to_os_string());
@@ -722,6 +737,9 @@ fn run_portable_sign_pe_artifact_signing(
         OsString::from("--digest"),
         OsString::from(portable_digest_name(args.digest)?),
     ];
+    if args.append_signature {
+        argv.push(OsString::from("--append-signature"));
+    }
     for chain_cert in &args.additional_certs {
         argv.push(OsString::from("--chain-cert"));
         argv.push(chain_cert.as_os_str().to_os_string());

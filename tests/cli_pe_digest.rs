@@ -2952,6 +2952,56 @@ fn sign_pe_creates_portable_authenticode_signature() {
 }
 
 #[test]
+fn sign_pe_replaces_existing_signature_by_default_and_appends_with_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pk8");
+    let replaced_pe = dir.path().join("tiny32.replaced.exe");
+    let appended_pe = dir.path().join("tiny32.appended.exe");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut replace = portable_cmd();
+    replace
+        .arg("sign-pe")
+        .arg(tiny32_fixture())
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&replaced_pe);
+    replace.assert().success();
+
+    let mut append = portable_cmd();
+    append
+        .arg("sign-pe")
+        .arg(tiny32_fixture())
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--append-signature")
+        .arg("--output")
+        .arg(&appended_pe);
+    append.assert().success();
+
+    let replaced = std::fs::read(&replaced_pe).expect("read replaced PE");
+    let appended = std::fs::read(&appended_pe).expect("read appended PE");
+    verify_pe::verify_pe_authenticode_digest_consistency(&replaced)
+        .expect("replaced PE digest consistency");
+    verify_pe::verify_pe_authenticode_digest_consistency(&appended)
+        .expect("appended PE digest consistency");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&replaced).expect("replaced PE entry count"),
+        1
+    );
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended).expect("appended PE entry count"),
+        2
+    );
+}
+
+#[test]
 fn sign_cab_creates_portable_authenticode_signature() {
     let dir = tempfile::tempdir().expect("tempdir");
     let cert = dir.path().join("signer.der");
