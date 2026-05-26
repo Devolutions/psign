@@ -22,14 +22,6 @@ pub fn issuer_chain_excluding_leaf<'a>(
         return Ok(Vec::new());
     }
 
-    // Check if the leaf itself is already trusted (thumbprint in anchor store)
-    if let Some(store) = anchors
-        && let Ok(thumb) = cert_sha1_thumbprint(leaf)
-        && store.contains_thumbprint(&thumb)
-    {
-        return Ok(Vec::new());
-    }
-
     let mut out: Vec<&'a Cert> = Vec::new();
     let mut issuer_dn = leaf.issuer_name();
     let mut steps = 0usize;
@@ -94,14 +86,6 @@ pub fn issuer_chain_excluding_leaf_online(
     anchors: Option<&AnchorStore>,
 ) -> Result<Vec<Cert>> {
     if leaf.subject_name() == leaf.issuer_name() {
-        return Ok(Vec::new());
-    }
-
-    // Check if the leaf itself is already trusted
-    if let Some(store) = anchors
-        && let Ok(thumb) = cert_sha1_thumbprint(leaf)
-        && store.contains_thumbprint(&thumb)
-    {
         return Ok(Vec::new());
     }
 
@@ -233,6 +217,20 @@ mod tests {
         let (ca, leaf) = synthetic_ca_and_leaf();
         let pool = vec![ca.clone(), leaf.clone()];
         let chain = issuer_chain_excluding_leaf(&leaf, &pool, None).expect("chain");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].subject_name(), ca.subject_name());
+    }
+
+    #[test]
+    fn non_self_signed_leaf_anchor_does_not_terminate_chain() {
+        let (ca, leaf) = synthetic_ca_and_leaf();
+        let mut anchors = AnchorStore::empty();
+        anchors
+            .merge_cert_thumbprints(std::slice::from_ref(&leaf))
+            .expect("anchors");
+
+        let pool = vec![ca.clone(), leaf.clone()];
+        let chain = issuer_chain_excluding_leaf(&leaf, &pool, Some(&anchors)).expect("chain");
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].subject_name(), ca.subject_name());
     }

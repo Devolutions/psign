@@ -9,7 +9,6 @@ using Devolutions.Psign.PowerShell.Utilities;
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
 [Cmdlet(VerbsCommon.Get, "PsignSignature", DefaultParameterSetName = FilePathParameterSet)]
-[Alias("Get-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
 public sealed class GetPsignSignatureCommand : PSCmdlet
 {

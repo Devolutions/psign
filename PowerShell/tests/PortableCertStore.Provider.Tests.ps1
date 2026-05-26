@@ -64,6 +64,7 @@ Describe 'pcert:\ Provider - Navigation' {
         $names | Should -Contain 'MY'
         $names | Should -Contain 'Root'
         $names | Should -Contain 'CA'
+        $names | Should -Contain 'TrustedPublisher'
     }
 
     It 'can cd into scope and store' {
@@ -116,6 +117,13 @@ Describe 'pcert:\ Provider - Certificate CRUD' {
         Copy-Item "pcert:\CurrentUser\MY\$($script:TestCert.Thumbprint)" pcert:\CurrentUser\Root
         Test-Path "pcert:\CurrentUser\Root\$($script:TestCert.Thumbprint)" | Should -BeTrue
         $copied = Get-Item "pcert:\CurrentUser\Root\$($script:TestCert.Thumbprint)"
+        $copied.Thumbprint | Should -Be $script:TestCert.Thumbprint
+    }
+
+    It 'can use TrustedPublisher as a well-known store' {
+        Copy-Item "pcert:\CurrentUser\MY\$($script:TestCert.Thumbprint)" pcert:\CurrentUser\TrustedPublisher
+        Test-Path "pcert:\CurrentUser\TrustedPublisher\$($script:TestCert.Thumbprint)" | Should -BeTrue
+        $copied = Get-Item "pcert:\CurrentUser\TrustedPublisher\$($script:TestCert.Thumbprint)"
         $copied.Thumbprint | Should -Be $script:TestCert.Thumbprint
     }
 

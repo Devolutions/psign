@@ -2,7 +2,7 @@
 
 # Argument completers for common parameters
 
-Register-ArgumentCompleter -CommandName Get-PsignSignature, Get-PortableSignature, Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName Thumbprint -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-PsignSignature, Set-PsignSignature, Protect-PsignModule -ParameterName Thumbprint -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     $baseDir = if ($fakeBoundParameters.ContainsKey('CertStoreDirectory')) {
         $fakeBoundParameters['CertStoreDirectory']
@@ -28,35 +28,35 @@ Register-ArgumentCompleter -CommandName Get-PsignSignature, Get-PortableSignatur
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName StoreName -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Protect-PsignModule -ParameterName StoreName -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
-    @('MY', 'Root', 'CA', 'Trust', 'Disallowed') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    @('MY', 'Root', 'CA', 'Trust', 'TrustedPublisher', 'Disallowed') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName HashAlgorithm -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Protect-PsignModule -ParameterName HashAlgorithm -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Sha256', 'Sha384', 'Sha512') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName IncludeChain -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Protect-PsignModule -ParameterName IncludeChain -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Signer', 'NotRoot', 'All') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Set-PsignSignature, Set-PortableSignature, Protect-PsignModule -ParameterName TimestampHashAlgorithm -ScriptBlock {
+Register-ArgumentCompleter -CommandName Set-PsignSignature, Protect-PsignModule -ParameterName TimestampHashAlgorithm -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Sha1', 'Sha256', 'Sha384', 'Sha512') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
 }
 
-Register-ArgumentCompleter -CommandName Get-PsignSignature, Get-PortableSignature -ParameterName RevocationMode -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-PsignSignature -ParameterName RevocationMode -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Off', 'BestEffort', 'Require') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)

@@ -69,8 +69,11 @@ public sealed class PsignModuleFileResult
     /// <summary>Thumbprint of the signing certificate leaf.</summary>
     public string? SignerThumbprint { get; init; }
 
-    /// <summary>Whether the signer is in the TrustedPublisher (Trust) store.</summary>
+    /// <summary>Whether the signer is in the TrustedPublisher store.</summary>
     public bool IsTrustedPublisher { get; init; }
+
+    /// <summary>Whether the signer is in the Disallowed store.</summary>
+    public bool IsDisallowedPublisher { get; init; }
 
     /// <summary>Whether this file passes the policy check.</summary>
     public bool Passes { get; init; }

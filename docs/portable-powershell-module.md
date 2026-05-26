@@ -52,6 +52,19 @@ When trust is requested, the output object's `TrustStatus` is `Valid` or `NotTru
 
 Trust verification is offline by default. `-OnlineAia` enables issuer retrieval, `-OnlineOcsp` enables OCSP checks, and `-RevocationMode Off|BestEffort|Require` controls revocation enforcement in the portable trust engine.
 
+## PowerShell execution-policy publisher trust
+
+`Test-PsignModule -RequireTrustedPublisher` models the Windows PowerShell execution-policy behavior documented in Jordan Borean's [PowerShell code-signing notes](https://gist.github.com/jborean93/f9029a6561916e368bd23fc47757b4c8). In portable mode, the file-backed certificate store maps the relevant Windows stores as:
+
+| Windows store | Portable store | Purpose |
+| --- | --- | --- |
+| `Cert:\CurrentUser\TrustedPublisher` | `pcert:\CurrentUser\TrustedPublisher` | Trusted leaf signing certificates |
+| `Cert:\LocalMachine\TrustedPublisher` | `pcert:\LocalMachine\TrustedPublisher` | Machine-wide trusted leaf signing certificates |
+| `Cert:\CurrentUser\Disallowed` | `pcert:\CurrentUser\Disallowed` | Leaf signers rejected by "Never run" |
+| `Cert:\LocalMachine\Disallowed` | `pcert:\LocalMachine\Disallowed` | Machine-wide disallowed signers |
+
+Publisher trust and chain trust are separate, matching the Windows behavior in those notes: the final signing certificate must be in `TrustedPublisher`, and the signature chain must still terminate in a trusted root supplied through `-TrustedCertificate`, `-TrustedCertificatePath`, `-AnchorDirectory`, `-AuthRootCab`, or the AuthRoot cache. `pcert:\...\Trust` is not used as a trusted-publisher fallback.
+
 ## Supported portable formats
 
 The current PowerShell test suite covers command metadata compatibility plus signing and validation through the module surface for:

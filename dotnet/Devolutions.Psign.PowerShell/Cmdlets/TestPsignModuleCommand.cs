@@ -14,13 +14,19 @@ namespace Devolutions.Psign.PowerShell.Cmdlets;
 /// to a given execution policy (AllSigned or RemoteSigned). Simulates the checks
 /// that PowerShell's engine would perform during Import-Module.
 /// </summary>
-[Cmdlet(VerbsDiagnostic.Test, "PsignModule")]
+[Cmdlet(VerbsDiagnostic.Test, "PsignModule", DefaultParameterSetName = PathParameterSet)]
 [OutputType(typeof(PsignModuleValidationResult))]
 public sealed class TestPsignModuleCommand : PSCmdlet
 {
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, HelpMessage = "Path to the PowerShell module directory to validate.")]
-    [Alias("ModulePath", "PSPath")]
+    private const string PathParameterSet = "Path";
+    private const string InputObjectParameterSet = "InputObject";
+
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipelineByPropertyName = true, ParameterSetName = PathParameterSet, HelpMessage = "Path to the PowerShell module directory to validate.")]
+    [Alias("ModulePath", "PSPath", "InstalledLocation", "ModuleBase")]
     public string Path { get; set; } = string.Empty;
+
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ParameterSetName = InputObjectParameterSet, HelpMessage = "PowerShell module information returned by Get-Module or Get-InstalledModule.")]
+    public object InputObject { get; set; } = null!;
 
     [Parameter(Position = 1)]
     [ValidateSet("AllSigned", "RemoteSigned")]
@@ -28,7 +34,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
 
     /// <summary>
     /// When set, also verifies that each signer's leaf certificate is in the
-    /// TrustedPublisher store (pcert:\CurrentUser\Trust or pcert:\LocalMachine\Trust).
+    /// TrustedPublisher store (pcert:\CurrentUser\TrustedPublisher or pcert:\LocalMachine\TrustedPublisher).
     /// </summary>
     [Parameter]
     public SwitchParameter RequireTrustedPublisher { get; set; }
@@ -69,31 +75,10 @@ public sealed class TestPsignModuleCommand : PSCmdlet
 
     protected override void ProcessRecord()
     {
-        string resolvedPath = SessionState.Path.GetUnresolvedProviderPathFromPSPath(Path);
-
-        // Find the manifest
-        string moduleDir;
-        string? manifestPath;
-
-        if (Directory.Exists(resolvedPath))
+        if (!TryResolveModule(out string moduleDir, out string? manifestPath, out string moduleName))
         {
-            moduleDir = resolvedPath;
-            manifestPath = FindManifest(moduleDir);
-        }
-        else if (File.Exists(resolvedPath) && resolvedPath.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase))
-        {
-            manifestPath = resolvedPath;
-            moduleDir = System.IO.Path.GetDirectoryName(resolvedPath)!;
-        }
-        else
-        {
-            WriteError(new ErrorRecord(
-                new DirectoryNotFoundException($"Module path not found: {resolvedPath}"),
-                "ModulePathNotFound", ErrorCategory.ObjectNotFound, resolvedPath));
             return;
         }
-
-        string moduleName = System.IO.Path.GetFileName(moduleDir);
 
         // Parse manifest to discover referenced files
         var fileRoles = new Dictionary<string, ModuleFileRole>(StringComparer.OrdinalIgnoreCase);
@@ -138,6 +123,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
 
         // Load trusted publisher thumbprints
         var trustedPublishers = LoadTrustedPublishers();
+        var disallowedPublishers = LoadDisallowedPublishers();
 
         // Validate each file
         var results = new List<PsignModuleFileResult>();
@@ -159,7 +145,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
             }
 
             bool requiredByPolicy = IsRequiredByPolicy(role, relativePath);
-            var fileResult = ValidateFile(fullPath, relativePath, role, requiredByPolicy, trustedPublishers);
+            var fileResult = ValidateFile(fullPath, relativePath, role, requiredByPolicy, trustedPublishers, disallowedPublishers);
             results.Add(fileResult);
         }
 
@@ -185,6 +171,161 @@ public sealed class TestPsignModuleCommand : PSCmdlet
             PassedCount = passed,
             SkippedCount = skipped,
         });
+    }
+
+    private bool TryResolveModule(out string moduleDir, out string? manifestPath, out string moduleName)
+    {
+        moduleDir = string.Empty;
+        manifestPath = null;
+        moduleName = string.Empty;
+
+        if (ParameterSetName == InputObjectParameterSet)
+        {
+            return TryResolveInputObject(InputObject, out moduleDir, out manifestPath, out moduleName);
+        }
+
+        return TryResolvePath(Path, targetObject: Path, moduleNameOverride: null, out moduleDir, out manifestPath, out moduleName);
+    }
+
+    private bool TryResolveInputObject(object inputObject, out string moduleDir, out string? manifestPath, out string moduleName)
+    {
+        if (inputObject is PSModuleInfo module)
+        {
+            return TryResolveModuleInfo(module, out moduleDir, out manifestPath, out moduleName);
+        }
+
+        if (inputObject is string path)
+        {
+            return TryResolvePath(path, inputObject, moduleNameOverride: null, out moduleDir, out manifestPath, out moduleName);
+        }
+
+        if (inputObject is FileSystemInfo fileSystemInfo)
+        {
+            return TryResolvePath(fileSystemInfo.FullName, inputObject, moduleNameOverride: null, out moduleDir, out manifestPath, out moduleName);
+        }
+
+        var psObject = PSObject.AsPSObject(inputObject);
+        string? installedLocation = GetStringProperty(psObject, "InstalledLocation");
+        if (!string.IsNullOrWhiteSpace(installedLocation))
+        {
+            return TryResolvePath(
+                installedLocation,
+                inputObject,
+                moduleNameOverride: GetStringProperty(psObject, "Name"),
+                out moduleDir,
+                out manifestPath,
+                out moduleName);
+        }
+
+        string? moduleBase = GetStringProperty(psObject, "ModuleBase");
+        if (!string.IsNullOrWhiteSpace(moduleBase))
+        {
+            return TryResolvePath(
+                moduleBase,
+                inputObject,
+                moduleNameOverride: GetStringProperty(psObject, "Name"),
+                out moduleDir,
+                out manifestPath,
+                out moduleName);
+        }
+
+        moduleDir = string.Empty;
+        manifestPath = null;
+        moduleName = string.Empty;
+        WriteError(new ErrorRecord(
+            new ArgumentException("Pipeline input must be a module path, PSModuleInfo, or an object with InstalledLocation or ModuleBase."),
+            "UnsupportedModuleInputObject", ErrorCategory.InvalidArgument, inputObject));
+        return false;
+    }
+
+    private bool TryResolvePath(
+        string input,
+        object targetObject,
+        string? moduleNameOverride,
+        out string moduleDir,
+        out string? manifestPath,
+        out string moduleName)
+    {
+        moduleDir = string.Empty;
+        manifestPath = null;
+        moduleName = string.Empty;
+        string? resolvedPath = null;
+        Exception? pathResolutionException = null;
+
+        try
+        {
+            resolvedPath = SessionState.Path.GetUnresolvedProviderPathFromPSPath(input);
+        }
+        catch (Exception ex) when (ex is ItemNotFoundException
+            or System.Management.Automation.DriveNotFoundException
+            or ProviderNotFoundException
+            or PSArgumentException
+            or NotSupportedException)
+        {
+            pathResolutionException = ex;
+        }
+
+        if (resolvedPath is not null)
+        {
+            if (Directory.Exists(resolvedPath))
+            {
+                moduleDir = resolvedPath;
+                manifestPath = FindManifest(moduleDir);
+                moduleName = moduleNameOverride ?? GetModuleName(moduleDir, manifestPath);
+                return true;
+            }
+
+            if (File.Exists(resolvedPath) && resolvedPath.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase))
+            {
+                manifestPath = resolvedPath;
+                moduleDir = System.IO.Path.GetDirectoryName(resolvedPath)!;
+                moduleName = moduleNameOverride ?? GetModuleName(moduleDir, manifestPath);
+                return true;
+            }
+        }
+
+        string message = pathResolutionException is null
+            ? $"Module path not found: {resolvedPath ?? input}"
+            : $"Module path not found: {input}. {pathResolutionException.Message}";
+
+        WriteError(new ErrorRecord(
+            new DirectoryNotFoundException(message),
+            "ModulePathNotFound", ErrorCategory.ObjectNotFound, targetObject));
+        return false;
+    }
+
+    private bool TryResolveModuleInfo(PSModuleInfo module, out string moduleDir, out string? manifestPath, out string moduleName)
+    {
+        moduleDir = module.ModuleBase;
+        moduleName = module.Name;
+        manifestPath = null;
+
+        if (!Directory.Exists(moduleDir))
+        {
+            WriteError(new ErrorRecord(
+                new DirectoryNotFoundException($"Module path not found: {moduleDir}"),
+                "ModulePathNotFound", ErrorCategory.ObjectNotFound, module));
+            return false;
+        }
+
+        manifestPath = module.Path.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase)
+            ? module.Path
+            : FindManifest(moduleDir);
+        return true;
+    }
+
+    private static string? GetStringProperty(PSObject psObject, string name)
+    {
+        object? value = psObject.Properties[name]?.Value;
+        return value as string;
+    }
+
+    private static string GetModuleName(string moduleDir, string? manifestPath)
+    {
+        if (manifestPath is not null)
+            return System.IO.Path.GetFileNameWithoutExtension(manifestPath);
+
+        return System.IO.Path.GetFileName(moduleDir);
     }
 
     private bool IsRequiredByPolicy(ModuleFileRole role, string relativePath)
@@ -215,7 +356,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
 
     private PsignModuleFileResult ValidateFile(
         string fullPath, string relativePath, ModuleFileRole role,
-        bool requiredByPolicy, HashSet<string> trustedPublishers)
+        bool requiredByPolicy, HashSet<string> trustedPublishers, HashSet<string> disallowedPublishers)
     {
         string ext = System.IO.Path.GetExtension(fullPath);
 
@@ -258,6 +399,8 @@ public sealed class TestPsignModuleCommand : PSCmdlet
         string? signerThumbprint = sig.SignerCertificate?.Thumbprint;
         bool isTrustedPublisher = signerThumbprint is not null
             && trustedPublishers.Contains(signerThumbprint);
+        bool isDisallowedPublisher = signerThumbprint is not null
+            && disallowedPublishers.Contains(signerThumbprint);
 
         bool passes;
         string? failureReason = null;
@@ -278,6 +421,13 @@ public sealed class TestPsignModuleCommand : PSCmdlet
                 SignatureStatus.Incompatible => "Unsupported signature algorithm",
                 _ => $"Signature validation failed: {effectiveStatus}",
             };
+        }
+        else if (isDisallowedPublisher)
+        {
+            passes = false;
+            failureReason = signerThumbprint is not null
+                ? $"Signer {sig.SignerCertificate?.Subject} ({signerThumbprint}) is in Disallowed store"
+                : "No signer certificate found";
         }
         else if (RequireTrustedPublisher.IsPresent && !isTrustedPublisher)
         {
@@ -301,6 +451,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
             SignerSubject = sig.SignerCertificate?.Subject,
             SignerThumbprint = signerThumbprint,
             IsTrustedPublisher = isTrustedPublisher,
+            IsDisallowedPublisher = isDisallowedPublisher,
             Passes = passes,
             FailureReason = failureReason,
         };
@@ -345,16 +496,28 @@ public sealed class TestPsignModuleCommand : PSCmdlet
 
     private HashSet<string> LoadTrustedPublishers()
     {
-        var thumbprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (!RequireTrustedPublisher.IsPresent)
-            return thumbprints;
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Match Windows PowerShell publisher trust: Cert:\CurrentUser\TrustedPublisher
+        // and Cert:\LocalMachine\TrustedPublisher contain the trusted leaf signing certs.
+        return LoadStoreThumbprints("TrustedPublisher");
+    }
+
+    private static HashSet<string> LoadDisallowedPublishers()
+    {
+        // Match PowerShell's "Never run" behavior: the leaf signer is added to
+        // Cert:\CurrentUser\Disallowed and subsequent policy checks are blocked.
+        return LoadStoreThumbprints("Disallowed");
+    }
+
+    private static HashSet<string> LoadStoreThumbprints(string storeName)
+    {
+        var thumbprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string baseDir = CertStorePathHelper.ResolveBaseDirectory();
-
-        // Check both CurrentUser and LocalMachine Trust stores
         foreach (string scope in new[] { "CurrentUser", "LocalMachine" })
         {
-            string storePath = System.IO.Path.Combine(baseDir, scope, "Trust");
+            string storePath = System.IO.Path.Combine(baseDir, scope, storeName);
             if (!Directory.Exists(storePath))
                 continue;
 

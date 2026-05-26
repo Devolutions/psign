@@ -18,10 +18,7 @@
         'Unprotect-PsignSignature'
     )
     FunctionsToExport = @()
-    AliasesToExport = @(
-        'Get-PortableSignature',
-        'Set-PortableSignature'
-    )
+    AliasesToExport = @()
     PrivateData = @{
         PSData = @{
             Tags = @('Authenticode', 'CodeSigning', 'Portable', 'psign')

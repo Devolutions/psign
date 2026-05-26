@@ -11,7 +11,6 @@ using Devolutions.Psign.PowerShell.Utilities;
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
 [Cmdlet(VerbsCommon.Set, "PsignSignature", SupportsShouldProcess = true, DefaultParameterSetName = FilePathParameterSet)]
-[Alias("Set-PortableSignature")]
 [OutputType(typeof(PortableSignature))]
 public sealed class SetPsignSignatureCommand : PSCmdlet
 {
@@ -208,42 +207,42 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                 return;
             }
 
-                PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
-                {
-                    Path = tempPath,
-                    HashAlgorithm = HashAlgorithm,
-                    CertificatePath = CertificatePath is null
-                        ? null
-                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath),
-                    PrivateKeyPath = PrivateKeyPath is null
-                        ? null
-                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
-                    CertificateDerBase64 = GetCertificateDerBase64(),
-                    PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
-                    PfxPath = PfxPath is null
-                        ? null
-                        : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
-                    PfxPassword = Password is null ? null : SecureStringToString(Password),
-                    ChainCertificatePaths = GetChainCertificatePaths(),
-                    ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
-                    TimestampServer = TimestampServer,
-                    TimestampHashAlgorithm = TimestampServer is null ? null : TimestampHashAlgorithm,
-                    AzureKeyVaultUrl = AzureKeyVaultUrl,
-                    AzureKeyVaultCertificate = AzureKeyVaultCertificate,
-                    AzureKeyVaultAccessToken = AzureKeyVaultAccessToken,
-                    AzureKeyVaultClientId = AzureKeyVaultClientId,
-                    AzureKeyVaultClientSecret = AzureKeyVaultClientSecret,
-                    AzureKeyVaultTenantId = AzureKeyVaultTenantId,
-                    AzureKeyVaultManagedIdentity = AzureKeyVaultManagedIdentity.IsPresent ? true : null,
-                    ArtifactSigningEndpoint = ArtifactSigningEndpoint,
-                    ArtifactSigningAccountName = ArtifactSigningAccountName,
-                    ArtifactSigningProfileName = ArtifactSigningProfileName,
-                    ArtifactSigningAccessToken = ArtifactSigningAccessToken,
-                    ArtifactSigningManagedIdentity = ArtifactSigningManagedIdentity.IsPresent ? true : null,
-                    ArtifactSigningTenantId = ArtifactSigningTenantId,
-                    ArtifactSigningClientId = ArtifactSigningClientId,
-                    ArtifactSigningClientSecret = ArtifactSigningClientSecret,
-                });
+            PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
+            {
+                Path = tempPath,
+                HashAlgorithm = HashAlgorithm,
+                CertificatePath = CertificatePath is null
+                    ? null
+                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(CertificatePath),
+                PrivateKeyPath = PrivateKeyPath is null
+                    ? null
+                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PrivateKeyPath),
+                CertificateDerBase64 = GetCertificateDerBase64(),
+                PrivateKeyDerBase64 = GetPrivateKeyDerBase64(),
+                PfxPath = PfxPath is null
+                    ? null
+                    : SessionState.Path.GetUnresolvedProviderPathFromPSPath(PfxPath),
+                PfxPassword = Password is null ? null : SecureStringToString(Password),
+                ChainCertificatePaths = GetChainCertificatePaths(),
+                ChainCertificatesDerBase64 = GetChainCertificatesDerBase64(),
+                TimestampServer = TimestampServer,
+                TimestampHashAlgorithm = TimestampServer is null ? null : TimestampHashAlgorithm,
+                AzureKeyVaultUrl = AzureKeyVaultUrl,
+                AzureKeyVaultCertificate = AzureKeyVaultCertificate,
+                AzureKeyVaultAccessToken = AzureKeyVaultAccessToken,
+                AzureKeyVaultClientId = AzureKeyVaultClientId,
+                AzureKeyVaultClientSecret = AzureKeyVaultClientSecret,
+                AzureKeyVaultTenantId = AzureKeyVaultTenantId,
+                AzureKeyVaultManagedIdentity = AzureKeyVaultManagedIdentity.IsPresent ? true : null,
+                ArtifactSigningEndpoint = ArtifactSigningEndpoint,
+                ArtifactSigningAccountName = ArtifactSigningAccountName,
+                ArtifactSigningProfileName = ArtifactSigningProfileName,
+                ArtifactSigningAccessToken = ArtifactSigningAccessToken,
+                ArtifactSigningManagedIdentity = ArtifactSigningManagedIdentity.IsPresent ? true : null,
+                ArtifactSigningTenantId = ArtifactSigningTenantId,
+                ArtifactSigningClientId = ArtifactSigningClientId,
+                ArtifactSigningClientSecret = ArtifactSigningClientSecret,
+            });
             response.Signature.SourcePathOrExtension = sourcePathOrExtension;
             response.Signature.Content = File.ReadAllBytes(tempPath);
             WriteObject(response.Signature);

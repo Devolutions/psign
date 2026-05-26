@@ -17,9 +17,15 @@ namespace Devolutions.Psign.PowerShell.Cmdlets;
 [OutputType(typeof(PsignModuleSigningResult))]
 public sealed class ProtectPsignModuleCommand : PSCmdlet
 {
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, HelpMessage = "Path to the PowerShell module directory to sign.")]
-    [Alias("ModulePath", "PSPath")]
+    private const string PathParameterSet = "Path";
+    private const string InputObjectParameterSet = "InputObject";
+
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipelineByPropertyName = true, ParameterSetName = PathParameterSet, HelpMessage = "Path to the PowerShell module directory to sign.")]
+    [Alias("ModulePath", "PSPath", "InstalledLocation", "ModuleBase")]
     public string Path { get; set; } = string.Empty;
+
+    [Parameter(Mandatory = true, ValueFromPipeline = true, ParameterSetName = InputObjectParameterSet, HelpMessage = "PowerShell module information returned by Get-Module.")]
+    public PSModuleInfo InputObject { get; set; } = null!;
 
     // Local certificate signing
     [Parameter]
@@ -136,30 +142,10 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
 
     protected override void ProcessRecord()
     {
-        string resolvedPath = SessionState.Path.GetUnresolvedProviderPathFromPSPath(Path);
-
-        string moduleDir;
-        string? manifestPath;
-
-        if (Directory.Exists(resolvedPath))
+        if (!TryResolveModule(out string moduleDir, out string? manifestPath, out string moduleName))
         {
-            moduleDir = resolvedPath;
-            manifestPath = FindManifest(moduleDir);
-        }
-        else if (File.Exists(resolvedPath) && resolvedPath.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase))
-        {
-            manifestPath = resolvedPath;
-            moduleDir = System.IO.Path.GetDirectoryName(resolvedPath)!;
-        }
-        else
-        {
-            ThrowTerminatingError(new ErrorRecord(
-                new DirectoryNotFoundException($"Module path not found: {resolvedPath}"),
-                "ModulePathNotFound", ErrorCategory.ObjectNotFound, resolvedPath));
             return;
         }
-
-        string moduleName = System.IO.Path.GetFileName(moduleDir);
 
         // Discover files to sign
         var filesToSign = DiscoverSignableFiles(moduleDir, manifestPath);
@@ -224,6 +210,121 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
             Failed = failed,
             Files = results.ToArray(),
         });
+    }
+
+    private bool TryResolveModule(out string moduleDir, out string? manifestPath, out string moduleName)
+    {
+        moduleDir = string.Empty;
+        manifestPath = null;
+        moduleName = string.Empty;
+
+        if (ParameterSetName == InputObjectParameterSet)
+        {
+            return TryResolveModuleInfo(InputObject, out moduleDir, out manifestPath, out moduleName);
+        }
+
+        return TryResolvePath(
+            Path,
+            targetObject: Path,
+            moduleNameOverride: null,
+            writeTerminatingError: true,
+            out moduleDir,
+            out manifestPath,
+            out moduleName);
+    }
+
+    private bool TryResolvePath(
+        string input,
+        object targetObject,
+        string? moduleNameOverride,
+        bool writeTerminatingError,
+        out string moduleDir,
+        out string? manifestPath,
+        out string moduleName)
+    {
+        moduleDir = string.Empty;
+        manifestPath = null;
+        moduleName = string.Empty;
+        string? resolvedPath = null;
+        Exception? pathResolutionException = null;
+
+        try
+        {
+            resolvedPath = SessionState.Path.GetUnresolvedProviderPathFromPSPath(input);
+        }
+        catch (Exception ex) when (ex is ItemNotFoundException
+            or System.Management.Automation.DriveNotFoundException
+            or ProviderNotFoundException
+            or PSArgumentException
+            or NotSupportedException)
+        {
+            pathResolutionException = ex;
+        }
+
+        if (resolvedPath is not null)
+        {
+            if (Directory.Exists(resolvedPath))
+            {
+                moduleDir = resolvedPath;
+                manifestPath = FindManifest(moduleDir);
+                moduleName = moduleNameOverride ?? GetModuleName(moduleDir, manifestPath);
+                return true;
+            }
+
+            if (File.Exists(resolvedPath) && resolvedPath.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase))
+            {
+                manifestPath = resolvedPath;
+                moduleDir = System.IO.Path.GetDirectoryName(resolvedPath)!;
+                moduleName = moduleNameOverride ?? GetModuleName(moduleDir, manifestPath);
+                return true;
+            }
+        }
+
+        string message = pathResolutionException is null
+            ? $"Module path not found: {resolvedPath ?? input}"
+            : $"Module path not found: {input}. {pathResolutionException.Message}";
+        var error = new ErrorRecord(
+            new DirectoryNotFoundException(message),
+            "ModulePathNotFound", ErrorCategory.ObjectNotFound, targetObject);
+
+        if (writeTerminatingError)
+        {
+            ThrowTerminatingError(error);
+        }
+        else
+        {
+            WriteError(error);
+        }
+
+        return false;
+    }
+
+    private bool TryResolveModuleInfo(PSModuleInfo module, out string moduleDir, out string? manifestPath, out string moduleName)
+    {
+        moduleDir = module.ModuleBase;
+        moduleName = module.Name;
+        manifestPath = null;
+
+        if (!Directory.Exists(moduleDir))
+        {
+            WriteError(new ErrorRecord(
+                new DirectoryNotFoundException($"Module path not found: {moduleDir}"),
+                "ModulePathNotFound", ErrorCategory.ObjectNotFound, module));
+            return false;
+        }
+
+        manifestPath = module.Path.EndsWith(".psd1", StringComparison.OrdinalIgnoreCase)
+            ? module.Path
+            : FindManifest(moduleDir);
+        return true;
+    }
+
+    private static string GetModuleName(string moduleDir, string? manifestPath)
+    {
+        if (manifestPath is not null)
+            return System.IO.Path.GetFileNameWithoutExtension(manifestPath);
+
+        return System.IO.Path.GetFileName(moduleDir);
     }
 
     private List<(string RelativePath, ModuleFileRole Role)> DiscoverSignableFiles(string moduleDir, string? manifestPath)
