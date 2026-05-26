@@ -20,7 +20,9 @@ Import-Module ./PowerShell/Devolutions.Psign/Devolutions.Psign.psd1
 | `Set-PsignSignature` | Sign files using local keys, PFX, cert store, Azure KV, or Trusted Signing |
 | `Test-PsignModule` | Validate a module against AllSigned/RemoteSigned execution policy |
 | `Protect-PsignModule` | Batch-sign all policy-checked files in a module |
-| `Unprotect-PsignSignature` | Strip signature blocks from script files |
+| `Unprotect-PsignSignature` | Strip script signature blocks and clear PE signatures |
+
+`Set-PsignSignature -AppendSignature` appends PE Authenticode signatures; without it, PE signing replaces existing signatures. Signature inspection exposes decoded CMS details through the `SignedCms` property when PKCS#7 bytes are available.
 
 ## Quick Start
 

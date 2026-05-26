@@ -88,6 +88,9 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
     [Parameter]
     public SwitchParameter Force { get; set; }
 
+    [Parameter]
+    public SwitchParameter AppendSignature { get; set; }
+
     // Azure Key Vault parameters
     [Parameter]
     public string? AzureKeyVaultUrl { get; set; }
@@ -210,6 +213,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
             PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
             {
                 Path = tempPath,
+                AppendSignature = AppendSignature.IsPresent,
                 HashAlgorithm = HashAlgorithm,
                 CertificatePath = CertificatePath is null
                     ? null
@@ -285,6 +289,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                 PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
                 {
                     Path = path,
+                    AppendSignature = AppendSignature.IsPresent,
                     OutputPath = outputPath,
                     HashAlgorithm = HashAlgorithm,
                     CertificatePath = CertificatePath is null

@@ -3,8 +3,8 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use psign_portable_core::{
-    PortableErrorCode, PortableErrorResponse, portable_error_response, portable_get_signature,
-    portable_sign, portable_validate_powershell_script, version,
+    PortableErrorCode, PortableErrorResponse, portable_clear_signature, portable_error_response,
+    portable_get_signature, portable_sign, portable_validate_powershell_script, version,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -95,6 +95,20 @@ pub unsafe extern "C" fn psign_core_sign(
     request_json_len: usize,
 ) -> PsignFfiResult {
     invoke_json(request_json_ptr, request_json_len, portable_sign)
+}
+
+/// Clear a file's portable Authenticode signature.
+///
+/// # Safety
+///
+/// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
+/// of the call. The returned buffer must be released with `psign_core_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psign_core_clear_signature(
+    request_json_ptr: *const u8,
+    request_json_len: usize,
+) -> PsignFfiResult {
+    invoke_json(request_json_ptr, request_json_len, portable_clear_signature)
 }
 
 fn invoke_json<TRequest, TResponse>(

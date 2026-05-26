@@ -13,5 +13,6 @@
 
   <ItemGroup>
     <PackageReference Include="System.Management.Automation" Version="7.4.6" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.1" />
   </ItemGroup>
 </Project>

@@ -43,6 +43,9 @@ internal sealed class PortableSignRequest
     [JsonPropertyName("path")]
     public required string Path { get; init; }
 
+    [JsonPropertyName("append_signature")]
+    public bool AppendSignature { get; init; }
+
     [JsonPropertyName("output_path")]
     public string? OutputPath { get; init; }
 
@@ -125,4 +128,32 @@ internal sealed class PortableSignRequest
 
     [JsonPropertyName("artifact_signing_client_secret")]
     public string? ArtifactSigningClientSecret { get; init; }
+}
+
+internal sealed class PortableClearSignatureRequest
+{
+    [JsonPropertyName("path")]
+    public required string Path { get; init; }
+
+}
+
+internal sealed class PortableClearSignatureResponse
+{
+    [JsonPropertyName("schema_version")]
+    public int SchemaVersion { get; init; }
+
+    [JsonPropertyName("path")]
+    public string Path { get; init; } = string.Empty;
+
+    [JsonPropertyName("format")]
+    public string Format { get; init; } = string.Empty;
+
+    [JsonPropertyName("signature_removed")]
+    public bool SignatureRemoved { get; init; }
+
+    [JsonPropertyName("bytes_removed")]
+    public int BytesRemoved { get; init; }
+
+    [JsonPropertyName("message")]
+    public string Message { get; init; } = string.Empty;
 }
