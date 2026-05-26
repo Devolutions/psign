@@ -578,6 +578,44 @@ fn code_skip_signed_copies_already_signed_pe() {
 }
 
 #[test]
+fn code_signing_replaces_existing_pe_signature_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("app.signed.exe");
+    let output = base.join("app.resigned.exe");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+    std::fs::copy(
+        repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi"),
+        &input,
+    )
+    .unwrap();
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("app.signed.exe");
+    cmd.assert().success();
+
+    let resigned = std::fs::read(&output).unwrap();
+    verify_pe::verify_pe_authenticode_digest_consistency(&resigned)
+        .expect("resigned PE digest consistency");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&resigned).expect("resigned PE entry count"),
+        1
+    );
+}
+
+#[test]
 fn code_skip_signed_copies_already_signed_nupkg() {
     let repo = repo_root();
     let temp = tempfile::tempdir().unwrap();

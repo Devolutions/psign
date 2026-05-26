@@ -1,12 +1,14 @@
 using System.Management.Automation;
 using System.Text;
 using System.Text.RegularExpressions;
+using Devolutions.Psign.PowerShell.Models;
+using Devolutions.Psign.PowerShell.Native;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
 /// <summary>
-/// Removes Authenticode signature blocks from PowerShell script files (.ps1, .psm1, .psd1, .ps1xml, .cdxml).
-/// This is the reverse of Set-PsignSignature for script files.
+/// Removes Authenticode signatures from supported files.
+/// This is the reverse of Set-PsignSignature for script and PE files.
 /// </summary>
 [Cmdlet(VerbsSecurity.Unprotect, "PsignSignature", SupportsShouldProcess = true)]
 [OutputType(typeof(PsignUnprotectResult))]
@@ -15,17 +17,17 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
     private const string FilePathParameterSet = "FilePath";
     private const string LiteralPathParameterSet = "LiteralPath";
 
-    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to script files to strip signatures from.")]
+    [Parameter(Mandatory = true, Position = 0, ValueFromPipeline = true, ValueFromPipelineByPropertyName = true, ParameterSetName = FilePathParameterSet, HelpMessage = "Path(s) to files to strip signatures from.")]
     [Alias("Path")]
     public string[] FilePath { get; set; } = [];
 
-    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to script files. No wildcard expansion.")]
+    [Parameter(Mandatory = true, ValueFromPipelineByPropertyName = true, ParameterSetName = LiteralPathParameterSet, HelpMessage = "Literal path(s) to files. No wildcard expansion.")]
     [Alias("PSPath", "LP")]
     public string[] LiteralPath { get; set; } = [];
 
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".ps1", ".psm1", ".psd1", ".ps1xml", ".cdxml", ".mof",
+        ".ps1", ".psm1", ".psd1", ".ps1xml", ".psc1", ".cdxml", ".mof",
     };
 
     // PowerShell SIG block pattern:
@@ -55,15 +57,6 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
 
     private void RemoveSignature(string path)
     {
-        string ext = System.IO.Path.GetExtension(path);
-        if (!SupportedExtensions.Contains(ext))
-        {
-            WriteError(new ErrorRecord(
-                new PSInvalidOperationException($"Unsupported file type '{ext}'. Only PowerShell script files are supported."),
-                "UnsupportedFileType", ErrorCategory.InvalidArgument, path));
-            return;
-        }
-
         if (!File.Exists(path))
         {
             WriteError(new ErrorRecord(
@@ -72,10 +65,18 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
             return;
         }
 
+        string ext = System.IO.Path.GetExtension(path);
+        if (!SupportedExtensions.Contains(ext))
+        {
+            RemovePeSignature(path);
+            return;
+        }
+
         try
         {
             string content = File.ReadAllText(path);
             bool isXml = ext.Equals(".ps1xml", StringComparison.OrdinalIgnoreCase)
+                      || ext.Equals(".psc1", StringComparison.OrdinalIgnoreCase)
                       || ext.Equals(".cdxml", StringComparison.OrdinalIgnoreCase);
 
             Regex regex = isXml ? XmlSigBlockRegex : ScriptSigBlockRegex;
@@ -112,6 +113,41 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
         catch (Exception ex)
         {
             WriteError(new ErrorRecord(ex, "UnprotectPsignSignatureFailed", ErrorCategory.NotSpecified, path));
+        }
+    }
+
+    private void RemovePeSignature(string path)
+    {
+        if (!File.Exists(path))
+        {
+            WriteError(new ErrorRecord(
+                new FileNotFoundException($"File not found: {path}"),
+                "FileNotFound", ErrorCategory.ObjectNotFound, path));
+            return;
+        }
+
+        try
+        {
+            if (!ShouldProcess(path, "Remove PE Authenticode signature"))
+            {
+                return;
+            }
+
+            PortableClearSignatureResponse response = PsignNative.ClearSignature(new PortableClearSignatureRequest
+            {
+                Path = path,
+            });
+            WriteObject(new PsignUnprotectResult
+            {
+                Path = response.Path,
+                SignatureRemoved = response.SignatureRemoved,
+                BytesRemoved = response.BytesRemoved,
+                Message = response.Message,
+            });
+        }
+        catch (Exception ex)
+        {
+            WriteError(new ErrorRecord(ex, "UnprotectPsignPeSignatureFailed", ErrorCategory.NotSpecified, path));
         }
     }
 

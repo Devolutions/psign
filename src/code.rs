@@ -1123,8 +1123,12 @@ fn sign_pe_bytes(
     if signing_digest != pkcs7::AuthenticodeSigningDigest::Sha256 {
         return Err(anyhow!("PE/WinMD signing currently supports only SHA-256"));
     }
+    let (input_bytes, _) = pe_embed::pe_remove_authenticode_certificates(input_bytes.to_vec())
+        .with_context(|| {
+            format!("remove existing PE/WinMD Authenticode signatures from {label}")
+        })?;
     let signed = signer
-        .sign_pe_bytes(input_bytes, signing_digest)
+        .sign_pe_bytes(&input_bytes, signing_digest)
         .with_context(|| format!("sign PE/WinMD payload {label}"))?;
     timestamp_pe_if_requested(&signed, timestamp_url, timestamp_digest)
         .with_context(|| format!("timestamp PE/WinMD payload {label}"))

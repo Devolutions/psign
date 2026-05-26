@@ -25,6 +25,11 @@ internal static unsafe class PsignNative
         return Invoke<PortableSignRequest, PortableSignResponse>(request, psign_core_sign);
     }
 
+    internal static PortableClearSignatureResponse ClearSignature(PortableClearSignatureRequest request)
+    {
+        return Invoke<PortableClearSignatureRequest, PortableClearSignatureResponse>(request, psign_core_clear_signature);
+    }
+
     private delegate PsignFfiResult NativeCall(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
 
     private static TResponse Invoke<TRequest, TResponse>(TRequest request, NativeCall nativeCall)
@@ -74,6 +79,9 @@ internal static unsafe class PsignNative
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern PsignFfiResult psign_core_sign(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern PsignFfiResult psign_core_clear_signature(IntPtr requestJsonPtr, UIntPtr requestJsonLen);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern void psign_core_free(PsignFfiBuffer buffer);

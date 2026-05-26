@@ -70,6 +70,11 @@ fn tiny32_unsigned_fixture() -> std::path::PathBuf {
         .join("tests/fixtures/pe-authenticode-upstream/tiny32.efi")
 }
 
+fn tiny32_signed_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi")
+}
+
 fn colon_lower_thumbprint(thumbprint: &str) -> String {
     thumbprint
         .as_bytes()
@@ -444,6 +449,64 @@ fn portable_sign_sha1_uses_cert_store_identity_for_pe() {
     assert_eq!(
         sha1_upper(&cert.to_der().expect("signer cert DER")),
         thumbprint
+    );
+}
+
+#[test]
+fn portable_sign_sha1_replaces_existing_signature_by_default_and_appends_with_flag() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store_dir = temp.path().join("cert-store");
+    let cert_path = temp.path().join("cert.der");
+    let key_path = temp.path().join("cert.key");
+    let replaced = temp.path().join("tiny32.replaced.efi");
+    let appended = temp.path().join("tiny32.appended.efi");
+    let fixture = test_cert("psign portable append test");
+    let thumbprint = sha1_upper(&fixture.der);
+    std::fs::write(&cert_path, &fixture.der).expect("write cert");
+    std::fs::write(&key_path, &fixture.key_pem).expect("write key");
+    std::fs::copy(tiny32_signed_fixture(), &replaced).expect("copy replaced PE");
+    std::fs::copy(tiny32_signed_fixture(), &appended).expect("copy appended PE");
+
+    psign_tool()
+        .args(["cert-store", "import", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--key"])
+        .arg(&key_path)
+        .arg(&cert_path)
+        .assert()
+        .success();
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--sha1", &thumbprint, "--fd", "SHA256"])
+        .arg(&replaced)
+        .assert()
+        .success();
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args([
+            "--sha1",
+            &thumbprint,
+            "--fd",
+            "SHA256",
+            "--append-signature",
+        ])
+        .arg(&appended)
+        .assert()
+        .success();
+
+    let replaced = std::fs::read(&replaced).expect("read replaced PE");
+    let appended = std::fs::read(&appended).expect("read appended PE");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&replaced).expect("replaced PE entry count"),
+        1
+    );
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended).expect("appended PE entry count"),
+        2
     );
 }
 

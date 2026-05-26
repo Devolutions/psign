@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using System.Management.Automation;
 
@@ -8,8 +9,10 @@ public sealed class PortableSignature
 {
     private X509Certificate2? _signerCertificate;
     private X509Certificate2? _timeStamperCertificate;
+    private SignedCms? _signedCms;
     private bool _signerCertificateResolved;
     private bool _timeStamperCertificateResolved;
+    private bool _signedCmsResolved;
 
     [JsonPropertyName("schema_version")]
     public int SchemaVersion { get; init; }
@@ -55,6 +58,9 @@ public sealed class PortableSignature
     [JsonPropertyName("timestamp_signing_time")]
     public DateTime? TimestampSigningTime { get; init; }
 
+    [JsonPropertyName("pkcs7_der_base64")]
+    public string? Pkcs7DerBase64 { get; init; }
+
     [JsonPropertyName("diagnostics")]
     public string[] PortableDiagnostics { get; init; } = [];
 
@@ -85,6 +91,26 @@ public sealed class PortableSignature
             return _timeStamperCertificate;
         }
     }
+
+    [JsonIgnore]
+    public SignedCms? SignedCms
+    {
+        get
+        {
+            if (!_signedCmsResolved)
+            {
+                _signedCms = DecodeSignedCms(Pkcs7DerBase64);
+                _signedCmsResolved = true;
+            }
+            return _signedCms;
+        }
+    }
+
+    [JsonIgnore]
+    public X509Certificate2? Certificate => SignerCertificate;
+
+    [JsonIgnore]
+    public string? HashAlgorithm => DigestAlgorithm;
 
     [JsonIgnore]
     public SignatureType SignatureType
@@ -128,6 +154,18 @@ public sealed class PortableSignature
         }
 
         return new X509Certificate2(Convert.FromBase64String(derBase64));
+    }
+
+    private static SignedCms? DecodeSignedCms(string? derBase64)
+    {
+        if (string.IsNullOrWhiteSpace(derBase64))
+        {
+            return null;
+        }
+
+        SignedCms cms = new();
+        cms.Decode(Convert.FromBase64String(derBase64));
+        return cms;
     }
 
     private static string[]? ExtractSubjectAlternativeName(X509Certificate2? certificate)

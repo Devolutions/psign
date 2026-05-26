@@ -20,7 +20,9 @@ use psign_authenticode_trust::{
     trust_verify_script_bytes, trust_verify_zip_bytes,
 };
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
-use psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency;
+use psign_sip_digest::verify_pe::{
+    pe_nth_pkcs7_signed_data_der, verify_pe_authenticode_digest_consistency,
+};
 use psign_sip_digest::{
     cab_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script, rdp, timestamp,
     verify_script_digest_consistency, zip_authenticode,
@@ -201,6 +203,8 @@ impl PortableValidatePowerShellRequest {
 pub struct PortableSignRequest {
     pub path: PathBuf,
     #[serde(default)]
+    pub append_signature: bool,
+    #[serde(default)]
     pub output_path: Option<PathBuf>,
     #[serde(default)]
     pub hash_algorithm: PortableDigestAlgorithm,
@@ -270,6 +274,7 @@ impl Default for PortableSignRequest {
     fn default() -> Self {
         Self {
             path: PathBuf::new(),
+            append_signature: false,
             output_path: None,
             hash_algorithm: PortableDigestAlgorithm::default(),
             certificate_path: None,
@@ -329,6 +334,8 @@ pub struct PortableSignatureResponse {
     pub timestamp_kinds: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_signing_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pkcs7_der_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
 }
@@ -344,6 +351,21 @@ pub struct PortableSignResponse {
     pub output_path: PathBuf,
     pub format: PortableFileFormat,
     pub signature: PortableSignatureResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableClearSignatureRequest {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableClearSignatureResponse {
+    pub schema_version: u32,
+    pub path: PathBuf,
+    pub format: PortableFileFormat,
+    pub signature_removed: bool,
+    pub bytes_removed: usize,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,8 +431,8 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         }
     }?;
 
-    let signature =
-        portable_get_signature(PortableGetSignatureRequest::path_only(output_path.clone()))?;
+    let inspect_request = PortableGetSignatureRequest::path_only(output_path.clone());
+    let signature = portable_get_signature(inspect_request)?;
 
     Ok(PortableSignResponse {
         schema_version: SCHEMA_VERSION,
@@ -424,9 +446,9 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
 pub fn portable_get_signature(
     request: PortableGetSignatureRequest,
 ) -> Result<PortableSignatureResponse> {
-    let format = infer_format(&request.path);
     let data =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let format = infer_format_from_path_or_data(&request.path, &data);
 
     let mut response = match format {
         PortableFileFormat::Pe => inspect_pe(&request.path, &data),
@@ -453,6 +475,24 @@ pub fn portable_get_signature(
     apply_trust_if_requested(&request, format, &data, &mut response)?;
 
     Ok(response)
+}
+
+pub fn portable_clear_signature(
+    request: PortableClearSignatureRequest,
+) -> Result<PortableClearSignatureResponse> {
+    let data =
+        std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    let format = infer_format_from_path_or_data(&request.path, &data);
+    match format {
+        PortableFileFormat::Pe => clear_pe_signature(&request.path, format),
+        PortableFileFormat::Unknown => bail!(
+            "unsupported portable signature clear format: {}",
+            request.path.display()
+        ),
+        _ => bail!(
+            "portable signature clear is not supported for {format:?}; use script signature removal for PowerShell files"
+        ),
+    }
 }
 
 pub fn portable_validate_powershell_script(
@@ -503,6 +543,28 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
     }
 }
 
+fn infer_format_from_path_or_data(path: &Path, data: &[u8]) -> PortableFileFormat {
+    let format = infer_format(path);
+    if format != PortableFileFormat::Unknown {
+        return format;
+    }
+    if is_probably_pe(data) {
+        PortableFileFormat::Pe
+    } else {
+        PortableFileFormat::Unknown
+    }
+}
+
+fn is_probably_pe(data: &[u8]) -> bool {
+    if data.len() < 0x40 || data.get(0..2) != Some(b"MZ") {
+        return false;
+    }
+    let pe_offset = u32::from_le_bytes(data[0x3c..0x40].try_into().unwrap()) as usize;
+    pe_offset
+        .checked_add(4)
+        .is_some_and(|end| end <= data.len() && data.get(pe_offset..end) == Some(b"PE\0\0"))
+}
+
 fn infer_powershell_source_format(path: &Path) -> PortableFileFormat {
     let format = infer_format(path);
     if format != PortableFileFormat::Unknown {
@@ -518,6 +580,13 @@ fn infer_powershell_source_format(path: &Path) -> PortableFileFormat {
     } else {
         PortableFileFormat::Unknown
     }
+}
+
+fn script_extension_for(path: &Path) -> String {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "ps1".to_string())
 }
 
 pub fn portable_error_response(
@@ -1041,8 +1110,18 @@ fn authenticode_digest_from_vsix_algorithm(
 }
 
 fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
-    let pe =
+    let mut pe =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    if !request.append_signature {
+        pe = pe_embed::pe_remove_authenticode_certificates(pe)
+            .with_context(|| {
+                format!(
+                    "remove existing PE Authenticode signatures from {}",
+                    request.path.display()
+                )
+            })?
+            .0;
+    }
     let provider = load_signing_provider(request)?;
     let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
     let pe_digest = pe_digest::pe_authenticode_digest(&pe, digest_algorithm.pe_hash_kind())?;
@@ -1060,6 +1139,36 @@ fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))?;
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
+}
+
+fn clear_pe_signature(
+    path: &Path,
+    format: PortableFileFormat,
+) -> Result<PortableClearSignatureResponse> {
+    let image = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let (cleared, bytes_removed) = pe_embed::pe_remove_authenticode_certificates(image)
+        .with_context(|| format!("remove PE Authenticode signatures from {}", path.display()))?;
+
+    if bytes_removed == 0 {
+        return Ok(PortableClearSignatureResponse {
+            schema_version: SCHEMA_VERSION,
+            path: path.to_path_buf(),
+            format,
+            signature_removed: false,
+            bytes_removed,
+            message: "No PE Authenticode certificate table found.".to_string(),
+        });
+    }
+
+    std::fs::write(path, cleared).with_context(|| format!("write {}", path.display()))?;
+    Ok(PortableClearSignatureResponse {
+        schema_version: SCHEMA_VERSION,
+        path: path.to_path_buf(),
+        format,
+        signature_removed: true,
+        bytes_removed,
+        message: "PE Authenticode certificate table removed.".to_string(),
+    })
 }
 
 fn sign_cab(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
@@ -1385,12 +1494,7 @@ fn insert_clickonce_signature_in_manifest(text: &str, signature_xml: &str) -> Re
 }
 
 fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
-    let ext = request
-        .path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("ps1")
-        .to_ascii_lowercase();
+    let ext = script_extension_for(&request.path);
     if !matches!(
         ext.as_str(),
         "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof"
@@ -1728,12 +1832,8 @@ fn apply_trust_if_requested(
             )
         }),
         PortableFileFormat::PowerShellScript => {
-            let extension = request
-                .path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("ps1");
-            trust_verify_script_bytes(data, extension, &opts).map(|r| {
+            let extension = script_extension_for(&request.path);
+            trust_verify_script_bytes(data, &extension, &opts).map(|r| {
                 format!(
                     "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
                     r.pkcs7_entries_verified, r.anchor_thumbprints
@@ -1881,10 +1981,14 @@ fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
     let inspect = inspect_pe_authenticode(data);
     match verify_pe_authenticode_digest_consistency(data) {
         Ok(result) => {
-            let summary = inspect
+            let mut summary = inspect
                 .ok()
                 .map(|r| summarize_pkcs7_reports(r.entries.into_iter().map(|e| e.pkcs7)))
                 .unwrap_or_default();
+            summary.pkcs7_der_base64 =
+                pe_nth_pkcs7_signed_data_der(data, result.matched_attribute_certificate_index)
+                    .ok()
+                    .map(|der| base64::engine::general_purpose::STANDARD.encode(der));
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,
                 path: path.to_path_buf(),
@@ -1901,6 +2005,7 @@ fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
                 digest_algorithm: summary.digest_algorithm,
                 timestamp_kinds: summary.timestamp_kinds,
                 timestamp_signing_time: summary.timestamp_signing_time,
+                pkcs7_der_base64: summary.pkcs7_der_base64,
                 diagnostics: vec![format!(
                     "matched_attribute_certificate_index={}",
                     result.matched_attribute_certificate_index
@@ -1917,8 +2022,7 @@ fn inspect_cab(path: &Path) -> Result<PortableSignatureResponse> {
             let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
             let summary = cab_digest::cab_signature_pkcs7_der(&data)
                 .ok()
-                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(pkcs7).ok())
-                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .and_then(summarize_pkcs7_der)
                 .unwrap_or_default();
             Ok(valid_response(
                 path.to_path_buf(),
@@ -1937,8 +2041,7 @@ fn inspect_msi(path: &Path) -> Result<PortableSignatureResponse> {
             let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
             let summary = msi_digest::msi_digital_signature_pkcs7_der(&data)
                 .ok()
-                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(&pkcs7).ok())
-                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .and_then(|pkcs7| summarize_pkcs7_der(&pkcs7))
                 .unwrap_or_default();
             Ok(valid_response(
                 path.to_path_buf(),
@@ -1957,8 +2060,7 @@ fn inspect_msix(path: &Path) -> Result<PortableSignatureResponse> {
             let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
             let summary = msix_signature_pkcs7_der(&data)
                 .ok()
-                .and_then(|pkcs7| inspect_authenticode_pkcs7_der(&pkcs7).ok())
-                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
+                .and_then(|pkcs7| summarize_pkcs7_der(&pkcs7))
                 .unwrap_or_default();
             Ok(valid_response(
                 path.to_path_buf(),
@@ -1981,10 +2083,7 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
         return Ok(map_digest_error(path, PortableFileFormat::Zip, error));
     }
     let pkcs7 = zip_authenticode::signature_pkcs7_der(&sig)?;
-    let report = inspect_authenticode_pkcs7_der(&pkcs7).ok();
-    let summary = report
-        .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
-        .unwrap_or_default();
+    let summary = summarize_pkcs7_der(&pkcs7).unwrap_or_default();
     Ok(PortableSignatureResponse {
         schema_version: SCHEMA_VERSION,
         path: path.to_path_buf(),
@@ -2001,6 +2100,7 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
         digest_algorithm: summary.digest_algorithm,
         timestamp_kinds: summary.timestamp_kinds,
         timestamp_signing_time: summary.timestamp_signing_time,
+        pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
     })
 }
@@ -2019,10 +2119,7 @@ fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> 
     }
     // Extract signature and parse CMS
     let sig_bytes = extract_nuget_signature_p7s(data)?;
-    let report = inspect_authenticode_pkcs7_der(&sig_bytes).ok();
-    let summary = report
-        .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
-        .unwrap_or_default();
+    let summary = summarize_pkcs7_der(&sig_bytes).unwrap_or_default();
     Ok(PortableSignatureResponse {
         schema_version: SCHEMA_VERSION,
         path: path.to_path_buf(),
@@ -2040,6 +2137,7 @@ fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> 
         digest_algorithm: summary.digest_algorithm,
         timestamp_kinds: summary.timestamp_kinds,
         timestamp_signing_time: summary.timestamp_signing_time,
+        pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
     })
 }
@@ -2125,10 +2223,7 @@ fn inspect_appinstaller(path: &Path) -> Result<PortableSignatureResponse> {
     }
     let pkcs7_bytes = std::fs::read(&companion_path)
         .with_context(|| format!("read companion {}", companion_path.display()))?;
-    let report = inspect_authenticode_pkcs7_der(&pkcs7_bytes).ok();
-    let summary = report
-        .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
-        .unwrap_or_default();
+    let summary = summarize_pkcs7_der(&pkcs7_bytes).unwrap_or_default();
     Ok(PortableSignatureResponse {
         schema_version: SCHEMA_VERSION,
         path: path.to_path_buf(),
@@ -2145,6 +2240,7 @@ fn inspect_appinstaller(path: &Path) -> Result<PortableSignatureResponse> {
         digest_algorithm: summary.digest_algorithm,
         timestamp_kinds: summary.timestamp_kinds,
         timestamp_signing_time: summary.timestamp_signing_time,
+        pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
     })
 }
@@ -2160,23 +2256,21 @@ fn extract_nuget_signature_p7s(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("ps1");
-    match verify_script_digest_consistency(data, ext) {
+    let ext = script_extension_for(path);
+    match verify_script_digest_consistency(data, &ext) {
         Ok(()) => {
             let report = if ps_script::is_wsh_extension(&ext.to_ascii_lowercase()) {
                 None
             } else {
-                ps_script::powershell_class_digest_report(data, ext)
+                ps_script::powershell_class_digest_report(data, &ext)
                     .ok()
-                    .and_then(|r| inspect_authenticode_pkcs7_der(&r.pkcs7_der).ok())
+                    .and_then(|r| summarize_pkcs7_der(&r.pkcs7_der))
             };
-            let summary = report
-                .map(|r| summarize_pkcs7_reports(std::iter::once(r)))
-                .unwrap_or_default();
+            let summary = report.unwrap_or_default();
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,
                 path: path.to_path_buf(),
-                format: infer_powershell_source_format(path),
+                format: infer_script_response_format(path),
                 status: PortableSignatureStatus::Valid,
                 status_message: "Portable script digest binding is valid; trust was not evaluated."
                     .to_string(),
@@ -2189,15 +2283,20 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
                 digest_algorithm: summary.digest_algorithm,
                 timestamp_kinds: summary.timestamp_kinds,
                 timestamp_signing_time: summary.timestamp_signing_time,
+                pkcs7_der_base64: summary.pkcs7_der_base64,
                 diagnostics: Vec::new(),
             })
         }
         Err(error) => Ok(map_digest_error(
             path,
-            infer_powershell_source_format(path),
+            infer_script_response_format(path),
             error,
         )),
     }
+}
+
+fn infer_script_response_format(path: &Path) -> PortableFileFormat {
+    infer_powershell_source_format(path)
 }
 
 fn inspect_pkcs7_file(
@@ -2207,7 +2306,9 @@ fn inspect_pkcs7_file(
     let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     match inspect_authenticode_pkcs7_der(&data) {
         Ok(report) => {
-            let summary = summarize_pkcs7_reports(std::iter::once(report));
+            let mut summary = summarize_pkcs7_reports(std::iter::once(report));
+            summary.pkcs7_der_base64 =
+                Some(base64::engine::general_purpose::STANDARD.encode(&data));
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,
                 path: path.to_path_buf(),
@@ -2225,6 +2326,7 @@ fn inspect_pkcs7_file(
                 digest_algorithm: summary.digest_algorithm,
                 timestamp_kinds: summary.timestamp_kinds,
                 timestamp_signing_time: summary.timestamp_signing_time,
+                pkcs7_der_base64: summary.pkcs7_der_base64,
                 diagnostics: Vec::new(),
             })
         }
@@ -2237,10 +2339,22 @@ struct Pkcs7Summary {
     digest_algorithm: Option<String>,
     timestamp_kinds: Vec<String>,
     timestamp_signing_time: Option<String>,
+    pkcs7_der_base64: Option<String>,
     signer_index: Option<usize>,
     signer_certificate_der_base64: Option<String>,
     timestamper_certificate_der_base64: Option<String>,
     embedded_certificate_count: usize,
+}
+
+fn summarize_pkcs7_der(pkcs7_der: &[u8]) -> Option<Pkcs7Summary> {
+    inspect_authenticode_pkcs7_der(pkcs7_der)
+        .ok()
+        .map(|report| {
+            let mut summary = summarize_pkcs7_reports(std::iter::once(report));
+            summary.pkcs7_der_base64 =
+                Some(base64::engine::general_purpose::STANDARD.encode(pkcs7_der));
+            summary
+        })
 }
 
 fn summarize_pkcs7_reports(
@@ -2310,6 +2424,7 @@ fn valid_response(
         digest_algorithm: summary.digest_algorithm,
         timestamp_kinds: summary.timestamp_kinds,
         timestamp_signing_time: summary.timestamp_signing_time,
+        pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
     }
 }
@@ -2335,6 +2450,7 @@ fn base_response(
         digest_algorithm: None,
         timestamp_kinds: Vec::new(),
         timestamp_signing_time: None,
+        pkcs7_der_base64: None,
         diagnostics: Vec::new(),
     }
 }
@@ -2369,6 +2485,7 @@ fn map_digest_error(
         digest_algorithm: None,
         timestamp_kinds: Vec::new(),
         timestamp_signing_time: None,
+        pkcs7_der_base64: None,
         diagnostics: Vec::new(),
     }
 }
@@ -2672,6 +2789,16 @@ mod tests {
     }
 
     #[test]
+    fn detects_extensionless_pe_from_magic() {
+        let pe = std::fs::read("../../tests/fixtures/pe-authenticode-upstream/tiny32.efi")
+            .expect("read PE fixture");
+        assert_eq!(
+            infer_format_from_path_or_data(Path::new("extensionless"), &pe),
+            PortableFileFormat::Pe
+        );
+    }
+
+    #[test]
     fn validates_unsigned_powershell_content_without_temp_file() {
         let request = PortableValidatePowerShellRequest {
             source_path_or_extension: PathBuf::from(".ps1"),
@@ -2776,6 +2903,57 @@ mod tests {
             .expect("inspect PE");
         assert_eq!(response.status, PortableSignatureStatus::Valid);
         assert!(response.signature_count > 0);
+        assert!(response.pkcs7_der_base64.is_some());
+    }
+
+    #[test]
+    fn pe_sign_replace_vs_append_signature_count() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-pe-append-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let source =
+            PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi");
+        let replaced = temp_dir.join("tiny32.replaced.efi");
+        let appended = temp_dir.join("tiny32.appended.efi");
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+
+        portable_sign(PortableSignRequest {
+            path: source.clone(),
+            output_path: Some(replaced.clone()),
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("replace PE signature");
+
+        portable_sign(PortableSignRequest {
+            path: source,
+            append_signature: true,
+            output_path: Some(appended.clone()),
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("append PE signature");
+
+        let replaced_signature =
+            portable_get_signature(PortableGetSignatureRequest::path_only(replaced))
+                .expect("inspect replaced PE");
+        let appended_signature =
+            portable_get_signature(PortableGetSignatureRequest::path_only(appended))
+                .expect("inspect appended PE");
+
+        assert_eq!(replaced_signature.signature_count, 1);
+        assert_eq!(appended_signature.signature_count, 2);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
@@ -2846,6 +3024,7 @@ mod tests {
     fn default_sign_request() -> PortableSignRequest {
         PortableSignRequest {
             path: PathBuf::from("test.dll"),
+            append_signature: false,
             output_path: None,
             hash_algorithm: PortableDigestAlgorithm::Sha256,
             certificate_path: None,

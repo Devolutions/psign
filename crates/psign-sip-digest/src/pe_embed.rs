@@ -293,6 +293,33 @@ pub fn pe_replace_authenticode_pkcs7_certificate_at(
     Ok(pe_image)
 }
 
+/// Remove the entire PE attribute certificate table and clear the security data directory.
+///
+/// Returns the mutated image and the number of certificate-table bytes removed. If the PE is
+/// already unsigned, the original image is returned with `0` bytes removed.
+pub fn pe_remove_authenticode_certificates(mut pe_image: Vec<u8>) -> Result<(Vec<u8>, usize)> {
+    let (va, size) = read_security_data_directory(&pe_image)?;
+    if va == 0 || size == 0 {
+        return Ok((pe_image, 0));
+    }
+
+    let start = va as usize;
+    let end = start
+        .checked_add(size as usize)
+        .ok_or_else(|| anyhow!("security directory size overflow"))?;
+    if start > pe_image.len() || end > pe_image.len() {
+        return Err(anyhow!(
+            "security directory range {start}..{end} is outside PE length {}",
+            pe_image.len()
+        ));
+    }
+
+    pe_image.drain(start..end);
+    write_security_data_directory(&mut pe_image, 0, 0)?;
+    pe_refresh_image_checksum(&mut pe_image)?;
+    Ok((pe_image, size as usize))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +354,30 @@ mod tests {
         assert_eq!(
             u16::from_le_bytes(w[6..8].try_into().unwrap()),
             WIN_CERT_TYPE_PKCS_SIGNED_DATA
+        );
+    }
+
+    #[test]
+    fn remove_authenticode_certificates_clears_signed_fixture() {
+        let signed =
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi");
+        assert_eq!(
+            pe_pkcs7_signed_data_entry_count(signed).expect("count before"),
+            1
+        );
+
+        let (unsigned, removed) =
+            pe_remove_authenticode_certificates(signed.to_vec()).expect("remove certificates");
+
+        assert!(removed > 0);
+        assert!(pe_pkcs7_signed_data_entry_count(&unsigned).is_err());
+        assert_eq!(
+            read_security_data_directory(&unsigned).expect("security directory"),
+            (0, 0)
+        );
+        assert_eq!(
+            pe_compute_image_checksum(&unsigned).expect("checksum"),
+            pe_read_image_checksum(&unsigned).expect("header checksum")
         );
     }
 

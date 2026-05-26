@@ -1988,7 +1988,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
     },
-    /// Sign an unsigned PE image with portable Authenticode CMS + `WIN_CERTIFICATE` embedding.
+    /// Sign a PE image with portable Authenticode CMS + `WIN_CERTIFICATE` embedding.
     ///
     /// This is the first production-oriented portable Authenticode signing path. It supports local RSA
     /// PKCS#1 v1.5 keys or Azure Key Vault RSA signing and SHA-2 digests; timestamp embedding and
@@ -2015,6 +2015,9 @@ enum Command {
         /// RFC3161 timestamp digest algorithm.
         #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
         timestamp_digest: Option<HashAlg>,
+        /// Append a signature instead of replacing existing embedded Authenticode signatures.
+        #[arg(long = "append-signature", visible_alias = "as")]
+        append_signature: bool,
         /// Azure Key Vault URL for remote RSA signing.
         #[arg(long = "azure-key-vault-url", visible_alias = "kvu")]
         azure_key_vault_url: Option<String>,
@@ -4294,6 +4297,7 @@ where
             digest,
             timestamp_url,
             timestamp_digest,
+            append_signature,
             azure_key_vault_url,
             azure_key_vault_certificate,
             azure_key_vault_certificate_version,
@@ -4306,7 +4310,18 @@ where
             artifact_signing,
             output,
         } => {
-            let pe = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let mut pe =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            if !append_signature {
+                pe = pe_embed::pe_remove_authenticode_certificates(pe)
+                    .with_context(|| {
+                        format!(
+                            "remove existing PE Authenticode signatures from {}",
+                            path.display()
+                        )
+                    })?
+                    .0;
+            }
             let has_local = cert.is_some() || key.is_some();
             let has_kv = azure_key_vault_url
                 .as_deref()

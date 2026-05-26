@@ -85,6 +85,7 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool portable rdp --cert cert.der --key key.pk8 file.rdp
 # Portable PE signing with a local RSA key:
 # psign-tool portable sign-pe --cert cert.der --key key.pk8 --output signed.exe unsigned.exe
+# Existing PE signatures are replaced by default; add --append-signature to match signtool /as.
 # Portable trust verification with explicit anchors:
 # psign-tool portable trust-verify-pe signed.exe --anchor-dir anchors
 # Portable custom ZIP Authenticode verification:
