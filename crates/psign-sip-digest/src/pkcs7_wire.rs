@@ -83,8 +83,16 @@ pub fn pkcs7_outer_sequence_prefix(data: &[u8]) -> Option<&[u8]> {
     data.get(..n)
 }
 
-/// Normalize detached PKCS#7 blobs: bare `SignedData` sequences are wrapped as PKCS#7 `ContentInfo`.
+/// Strip the Windows AppX/AppInstaller **PKCX** wrapper used by standalone
+/// `AppxSignature.p7x` files, returning the inner PKCS#7 DER.
+pub fn strip_pkcx_p7x_wrapper(data: &[u8]) -> Option<&[u8]> {
+    data.strip_prefix(b"PKCX")
+}
+
+/// Normalize detached PKCS#7 blobs: PKCX-wrapped AppX `AppxSignature.p7x` files
+/// are unwrapped, and bare `SignedData` sequences are wrapped as PKCS#7 `ContentInfo`.
 pub fn normalize_pkcs7_der_for_authenticode(sig_blob: &[u8]) -> Cow<'_, [u8]> {
+    let sig_blob = strip_pkcx_p7x_wrapper(sig_blob).unwrap_or(sig_blob);
     let Some(inner) = tlv_outer_sequence_payload(sig_blob) else {
         return Cow::Borrowed(sig_blob);
     };

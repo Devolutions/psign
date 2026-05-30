@@ -1,6 +1,6 @@
 # SignTool CLI parity matrix
 
-This document summarizes native `signtool.exe` options plus the related `rdpsign.exe` RDP signing surface vs the **`psign-tool`** CLI (Rust package **`psign`**). The **machine-readable source of truth** is [`psign-cli-matrix.json`](psign-cli-matrix.json) (`commands.sign`, `commands.verify`, `commands.timestamp`, `commands.catdb`, `commands.remove`, `commands.rdp`, `global_options`, `invocation`, `code_sign_file_formats`).
+This document summarizes native `signtool.exe` options plus the related `rdpsign.exe` RDP signing surface vs the **`psign-tool`** CLI (Rust package **`psign`**). The **machine-readable source of truth** is [`psign-cli-matrix.json`](psign-cli-matrix.json) (`commands.*`, `global_options`, `invocation`, `capability_dimensions`, `code_sign_file_formats`, `portable_digest_cli`, `top_gap_ids`).
 
 SDK help text used for cross-checking can be captured locally under **`parity-output/`** (`signtool-help-*.txt`; gitignored). The pinned kit version is recorded in this repo’s `sdk_kit` field in the JSON (currently aligned with `10.0.26100.0`).
 
@@ -40,10 +40,34 @@ Full native ↔ Rust mappings, tiers, and per-flag notes are **only** maintained
 - **RDP signing**: `psign-tool rdp --sha256 <thumbprint> file.rdp` ports `rdpsign.exe` by writing native `SignScope` / `Signature` records using detached PKCS#7 over the RDP secure-settings blob. `psign-tool portable rdp --cert cert.der --key key.pk8 file.rdp` uses the same RDP blob/record logic with portable RSA/SHA-256 CMS creation; fixtures cover UTF-8, UTF-16 with/without BOM, stale/partial signatures, malformed records, and a repo-test-cert signed sample.
 - **Artifact Signing REST for PE/WinMD**: `psign-tool portable sign-pe --artifact-signing-* --timestamp-url ...` and `psign-tool --mode portable sign --dmdf metadata.json --artifact-signing-* --timestamp-url ...` build, timestamp, and embed PE Authenticode signatures without Microsoft client DLLs. Windows dlib mode remains available for MSIX/AppX and other SIP formats.
 
+## Expanded capability model
+
+The JSON now records the feature matrix across lifecycle dimensions, not just native switch spelling:
+
+| Dimension | Meaning |
+|-----------|---------|
+| `argv-parity` | Response files, slash aliases, and native-shaped global behavior |
+| `sign-embed` / `timestamp` / `remove-mutate` | Signature creation, timestamp attachment, and signed-content mutation |
+| `verify-policy` | WinTrust/CryptoAPI policy paths |
+| `digest-consistency` / `explicit-anchor-trust` | Portable SIP/CMS verification without OS trust stores |
+| `inspect-extract` / `orchestrate` | Diagnostics, split-signing primitives, and nested package planning/execution |
+
+`portable_digest_cli.commands` is checked against `psign-tool portable --help` by `tests/cli_matrix_docs.rs`, so newly-added portable subcommands must be reflected in the machine-readable matrix.
+
+## Top 3 gaps worth filling next
+
+The roadmap choice is maintained in [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md#top-3-gaps-worth-filling-next); the JSON stores only the stable `top_gap_ids` for machine-readable cross-reference. Current priorities:
+
+| Gap id | Why it is high value |
+|--------|----------------------|
+| `portable-msix-bundle-upload-final-signing` | Closes the largest remaining Linux/Artifact Signing package gap after flat MSIX/AppX support. |
+| `catalog-driver-package-authoring` | Turns existing catalog signing/member verification into a fuller driver/package catalog workflow. |
+| `wdac-ci-policy-signing` | Builds on detached PKCS#7/catalog primitives for a security-policy workflow that is adjacent to existing Authenticode users. |
+
 ## Gaps intentionally partial
 
 - **Split digest `/dg`, `/ds`, `/di`, `/dxml`**: Rust accepts equivalents; execution returns a structured error — use native `signtool` or atomic signing (`sign_digest_pipeline.rs`).
-- **PKCS#7 product signing `/p7*`** (non-SIP): Flags exist; differs from PE SIP signing — partial in JSON.
+- **PKCS#7 product signing `/p7*`** (non-SIP): Flags exist; differs from PE SIP signing. Portable `inspect-pkcs7` / `extract-pkcx-pkcs7` cover standalone inspection and AppX `PKCX` unwrap, but native-shaped product signing/export remains partial in JSON.
 - **Sign sealing / intent-to-seal / `/force` (sign)**, **`/c` template**, **`/sa`**, **`/fdchw` / `/tdchw` / `/rmc`**, seal warn flags**: CLI surfaces exist; many return explicit not-implemented errors (`sealing.rs`).
 - **Timestamp `/p7`, `/force`, `/nosealwarn`**: Explicit not-implemented errors.
 - **`/ms` (`--multiple-semantics`)**: Accepted; documented compatibility shim — WinTrust defaults vary by OS.

@@ -2370,6 +2370,17 @@ enum Command {
         #[arg(long, value_enum, default_value_t = InspectInputKind::Pe)]
         input: InspectInputKind,
     },
+    /// Inspect standalone PKCS#7 / P7X bytes as JSON.
+    ///
+    /// Accepts PKCS#7 `ContentInfo`, bare `SignedData`, or AppX `AppxSignature.p7x`
+    /// files with a `PKCX` wrapper.
+    InspectPkcs7 { path: PathBuf },
+    /// Strip an AppX `AppxSignature.p7x` `PKCX` wrapper and write the inner PKCS#7 DER.
+    ExtractPkcxPkcs7 {
+        path: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
     /// Validate JSON metadata shape for Microsoft Artifact Signing (`Endpoint`, `CodeSigningAccountName`, `CertificateProfileName`; optional `ExcludeCredentials` string array). No network / no signing.
     ///
     /// Reads **`--path`** or stdin when omitted (use `-` for stdin explicitly).
@@ -5152,6 +5163,27 @@ where
                 }
             };
             println!("{json}");
+        }
+        Command::InspectPkcs7 { path } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let json = serde_json::to_string_pretty(&inspect_authenticode_pkcs7_der(&bytes)?)?;
+            println!("{json}");
+        }
+        Command::ExtractPkcxPkcs7 { path, output } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let inner = pkcs7_wire::strip_pkcx_p7x_wrapper(&bytes).ok_or_else(|| {
+                anyhow!(
+                    "extract-pkcx-pkcs7 {}: missing PKCX wrapper",
+                    path.display()
+                )
+            })?;
+            match output.as_ref() {
+                Some(p) => std::fs::write(p, inner)
+                    .with_context(|| format!("write PKCS#7 to {}", p.display()))?,
+                None => std::io::stdout()
+                    .write_all(inner)
+                    .context("write PKCS#7 to stdout")?,
+            }
         }
         Command::ArtifactSigningMetadataCheck { path } => {
             run_artifact_signing_metadata_check(path)?;

@@ -25,7 +25,7 @@ Use **`verify --rust-sip-all-digest-checks`** to enable every experimental diges
 |---------|-----|
 | **Encrypted** MSIX / APPX (`.eappx`, `.emsix`, `.eappxbundle`, `.emsixbundle`) | **`EappxSip*`** / **`EappxBundleSip*`** — COM + **`EncryptedAppxHeader`** / keys; not a cleartext ZIP rehash. Rust checker returns an explicit error if you force MSIX digest parity on these extensions. |
 | **`ExtensionsSipGetSignedDataMsg`** | Dispatches to **optional third-party DLLs** enumerated from the package — not portable in-tree. |
-| **Standalone `.p7x`** (**`P7xSip*`**) | Container extract (**PKCX** → inner PKCS#7); **`P7xSipVerifyIndirectData`** is effectively a null-check stub in **`AppxSip.dll`**. No separate “subject digest” to recompute beyond normal Authenticode. |
+| **Standalone `.p7x`** (**`P7xSip*`**) | Container extract (**PKCX** → inner PKCS#7); **`P7xSipVerifyIndirectData`** is effectively a null-check stub in **`AppxSip.dll`**. Portable `inspect-pkcs7` / `extract-pkcx-pkcs7` cover the container-inspection slice; standalone `.p7x` signing/export remains outside the Rust SIP digest layer because there is no separate “subject digest” to recompute beyond normal Authenticode. |
 | **`mso.dll` / VBA** | Indirect data ultimately asks **`VBE7.DLL`** (`DllVbeGetHashOfCodeProjectEx`, …). Pure Rust would duplicate the VBA runtime and OLE project graph; optional future work is **FFI into `VBE7`**, not a small digest module. |
 
 ## Native `signtool` / Win32 backlog (not SIP-specific)

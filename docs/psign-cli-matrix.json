@@ -6,6 +6,29 @@
   "sdk_help_source": "parity-output/signtool-help-*.txt (local / gitignored)",
   "sdk_kit": "10.0.26100.0",
   "learn_doc": "https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool",
+  "last_audited": "2026-05-30",
+  "matrix_scope": {
+    "native_cli": "Windows SDK signtool.exe and rdpsign.exe switch parity where psign-tool delegates to Win32 signing, verify, timestamp, catalog, remove, and RDP code.",
+    "portable_lifecycle": "Linux/macOS-safe digest, CMS inspection, explicit-anchor trust, local/remote signing, timestamp helpers, and package-specific primitives surfaced through psign-tool portable and --mode portable.",
+    "package_orchestration": "dotnet/sign-style planning and guarded execution through psign-tool code for PE/WinMD, NuGet/SNuGet, VSIX, ZIP, MSIX/AppX prepare, ClickOnce/VSTO, and App Installer companion signatures."
+  },
+  "capability_dimensions": [
+    {"id": "argv-parity", "meaning": "Native-style slash aliases, response files, and global mode/verbosity behavior."},
+    {"id": "sign-embed", "meaning": "Create a signature and embed it in the subject format or companion artifact."},
+    {"id": "timestamp", "meaning": "Create or attach legacy/RFC3161 timestamp evidence to an existing or newly-created signature."},
+    {"id": "verify-policy", "meaning": "Native WinTrust/CryptoAPI policy verification where available."},
+    {"id": "digest-consistency", "meaning": "Recompute format-specific indirect data and compare it with PKCS#7/CMS contents without making an OS trust decision."},
+    {"id": "explicit-anchor-trust", "meaning": "Portable CMS signature and certificate-chain verification to caller-supplied anchors, optionally with bounded AIA/OCSP/CRL fetches."},
+    {"id": "inspect-extract", "meaning": "Read, list, or extract embedded PKCS#7/CMS/XMLDSig/package metadata for diagnostics and split-signing workflows."},
+    {"id": "remove-mutate", "meaning": "Strip signatures, unauthenticated attributes, chains, or mutate signed package metadata."},
+    {"id": "orchestrate", "meaning": "Plan and execute nested inside-out signing flows across files, manifests, and package containers."}
+  ],
+  "top_gap_ids": [
+    "portable-msix-bundle-upload-final-signing",
+    "catalog-driver-package-authoring",
+    "wdac-ci-policy-signing"
+  ],
+  "top_gap_plan_doc": "docs/gap-analysis-signing-platforms.md#top-3-gaps-worth-filling-next",
   "global_options": [
     {"native": "/q", "rust": "--quiet (-q)", "tier": "P0", "status": "implemented", "notes": "Suppress stdout on success"},
     {"native": "/v", "rust": "--verbose (-v)", "tier": "P0", "status": "implemented", "notes": "Verbose diagnostics"},
@@ -210,6 +233,12 @@
       "windows_mechanism": "`rdpsign.exe` parses RDP settings, signs the UTF-16 secure-settings blob with detached PKCS#7 (`CryptSignMessage`), serializes `{version,type,length,pkcs7}`, and writes `SignScope` / `Signature` records.",
       "rust_path": "`psign-tool rdp --sha256 <thumbprint> file.rdp` implements the RDP-specific path directly; `psign-tool portable rdp --cert cert.pem --key key.pem file.rdp` uses the same RDP SignScope/secure-blob serializer and creates detached RSA/SHA-256 CMS without Win32. This is not a SIP/SignerSignEx3 file format.",
       "parity": "Unit fixtures under `tests/fixtures/rdp/` cover UTF-8, UTF-8 BOM, UTF-16 LE/BE with and without BOM, partial/stale SignScope/Signature records, malformed records, secure blob generation, serialized signature shape, and a signed `.rdp` generated with the repo test PFX. Portable CLI tests cover external PKCS#7 embedding and local RSA/SHA-256 cert+key signing; Windows tests exercise the same shared fixtures through the `psign` crate and optional integration can compare against native `rdpsign` output shape."
+    },
+    {
+      "extensions": [".zip"],
+      "windows_mechanism": "No native signtool SIP peer for generic ZIP archives; package-specific ZIP containers such as VSIX, NuGet, and MSIX have their own signing formats.",
+      "rust_path": "`psign-tool portable verify-zip` and `trust-verify-zip` validate psign-defined custom ZIP Authenticode comment signatures. `psign-tool code` can also traverse generic ZIP containers for nested package/PE signing.",
+      "parity": "Portable tests cover `verify-zip` / `trust-verify-zip` and tamper rejection. See `docs/zip-authenticode-signing.md`; this is a psign compatibility format, not a WinTrust policy surface."
     }
   ],
   "portable_digest_cli": {
@@ -223,13 +252,17 @@
       {"name": "verify-pe", "maps_to_native_concept": "Consistency check after conceptual WinTrust success — similar to `psign-tool verify --rust-sip-pe-digest-check`"},
       {"name": "trust-verify-pe", "maps_to_native_concept": "Explicit-anchor PKCS#7 trust + picky chain + PE digest (not WinTrust); optional `--as-of YYYY-MM-DD` for expired fixtures"},
       {"name": "trust-verify-cab", "maps_to_native_concept": "`verify-cab` digest consistency then same trust stack as PE"},
+      {"name": "trust-verify-msi", "maps_to_native_concept": "`verify-msi` digest consistency then same trust stack as PE"},
+      {"name": "trust-verify-esd", "maps_to_native_concept": "`verify-esd` digest consistency then same trust stack as PE"},
       {"name": "trust-verify-catalog", "maps_to_native_concept": "`verify-catalog` CMS digest consistency then picky trust when Authenticode-wrapped"},
       {"name": "trust-verify-detached", "maps_to_native_concept": "Detached PKCS#7 vs raw content bytes (digest algo inferred from PKCS#7); blob normalization like Win32 detached helpers"},
+      {"name": "trust-verify-zip", "maps_to_native_concept": "Custom ZIP Authenticode comment signature digest binding plus same explicit-anchor trust stack as PE"},
       {"name": "pe-has-page-hashes", "maps_to_native_concept": "Subset of `verify /ph` — CMS signed-attribute probe plus raw OID TLV fallback"},
       {"name": "pe-page-hash-info", "maps_to_native_concept": "CMS listing of SPC_PE_IMAGE_PAGE_HASHES V1/V2 attrs plus Authenticode flat-table parse (`parsed_page_hash_pairs`; `-` if unwrap fails)"},
       {"name": "verify-pe-page-hashes", "maps_to_native_concept": "Experimental contiguous raw-file range verify vs parsed page-hash digests — not full WinTrust `/ph`"},
       {"name": "pe-authenticode-ranges", "maps_to_native_concept": "Diagnostic listing of disjoint PE file ranges hashed by Authenticode image digest (`authenticode-rs` layout); aids `/ph` vs subject-digest reasoning"},
       {"name": "verify-cab", "maps_to_native_concept": "`verify --rust-sip-cab-digest-check`"},
+      {"name": "verify-zip", "maps_to_native_concept": "Custom ZIP Authenticode comment signature digest binding and reconstructed script digest"},
       {"name": "verify-msi", "maps_to_native_concept": "`verify --rust-sip-msi-digest-check`"},
       {"name": "verify-esd", "maps_to_native_concept": "`verify --rust-sip-esd-digest-check`"},
       {"name": "verify-msix", "maps_to_native_concept": "`verify --rust-sip-msix-digest-check` (cleartext packages)"},
@@ -254,6 +287,8 @@
       {"name": "catalog-signer-rs256-prehash", "maps_to_native_concept": "Same RS256 prehash on whole-file .cat PKCS#7 as pkcs7-signer-rs256-prehash; distinct from verify-catalog CTL scan"},
       {"name": "pkcs7-signer-rs256-prehash", "maps_to_native_concept": "RS256 prehash from PKCS#7 DER alone (post-extract from PE/CAB/MSI or detached blob)"},
       {"name": "pe-signer-rs256-prehash", "maps_to_native_concept": "RS256 prehash from embedded PE PKCS#7 row (index + signer-index)"},
+      {"name": "inspect-pkcs7", "maps_to_native_concept": "Standalone PKCS#7/P7X inspection; accepts ContentInfo, bare SignedData, or AppX PKCX-wrapped AppxSignature.p7x"},
+      {"name": "extract-pkcx-pkcs7", "maps_to_native_concept": "Strip AppX AppxSignature.p7x PKCX wrapper to inner PKCS#7 DER"},
       {"name": "extract-pe-pkcs7", "maps_to_native_concept": "WIN_CERTIFICATE PKCS#7 row as raw DER (same index order as list-pe-pkcs7)"},
       {"name": "list-pe-pkcs7", "maps_to_native_concept": "Enumerate embedded PKCS#7 rows (byte_len per index)"},
       {"name": "inspect-pe-spc-indirect", "maps_to_native_concept": "JSON for SpcIndirectDataContent / digest in embedded PE PKCS#7"},
