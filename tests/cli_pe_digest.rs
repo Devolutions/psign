@@ -86,6 +86,8 @@ fn help_lists_core_subcommands() {
         "pe-authenticode-ranges",
         "artifact-signing-metadata-check",
         "inspect-authenticode",
+        "inspect-pkcs7",
+        "extract-pkcx-pkcs7",
         "inspect-pe-spc-indirect",
         "extract-pe-pkcs7",
         "list-pe-pkcs7",
@@ -3548,6 +3550,64 @@ fn inspect_pkcs7_parity_cli_stdout_matches_library_tiny32() {
         cli_json.get("authenticode_digest"),
         lib_json.get("authenticode_digest")
     );
+}
+
+#[test]
+fn inspect_pkcs7_cli_accepts_pkcx_wrapped_appx_signature() {
+    let pe_bytes = std::fs::read(tiny32_fixture()).expect("read tiny32");
+    let der = verify_pe::pe_first_pkcs7_signed_data_der(&pe_bytes).expect("extract pkcs7");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blob = dir.path().join("AppxSignature.p7x");
+    let mut p7x = b"PKCX".to_vec();
+    p7x.extend_from_slice(&der);
+    std::fs::write(&blob, &p7x).expect("write p7x");
+
+    let mut cmd = portable_cmd();
+    cmd.arg("inspect-pkcs7").arg(&blob);
+    let assert = cmd.assert().success();
+    let out = std::str::from_utf8(&assert.get_output().stdout).expect("utf8");
+    let cli_json: Value = serde_json::from_str(out.trim()).expect("CLI JSON");
+    let lib_json = serde_json::to_value(inspect_authenticode_pkcs7_der(&der).expect("lib"))
+        .expect("serialize lib report");
+    assert_eq!(
+        cli_json.get("authenticode_digest"),
+        lib_json.get("authenticode_digest")
+    );
+}
+
+#[test]
+fn extract_pkcx_pkcs7_strips_wrapper_to_inner_der() {
+    let pe_bytes = std::fs::read(tiny32_fixture()).expect("read tiny32");
+    let der = verify_pe::pe_first_pkcs7_signed_data_der(&pe_bytes).expect("extract pkcs7");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p7x_path = dir.path().join("AppxSignature.p7x");
+    let out_path = dir.path().join("inner.p7");
+    let mut p7x = b"PKCX".to_vec();
+    p7x.extend_from_slice(&der);
+    std::fs::write(&p7x_path, &p7x).expect("write p7x");
+
+    let mut cmd = portable_cmd();
+    cmd.arg("extract-pkcx-pkcs7")
+        .arg(&p7x_path)
+        .arg("--output")
+        .arg(&out_path);
+    cmd.assert().success();
+    assert_eq!(std::fs::read(&out_path).expect("read output"), der);
+}
+
+#[test]
+fn extract_pkcx_pkcs7_rejects_raw_pkcs7_without_wrapper() {
+    let pe_bytes = std::fs::read(tiny32_fixture()).expect("read tiny32");
+    let der = verify_pe::pe_first_pkcs7_signed_data_der(&pe_bytes).expect("extract pkcs7");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blob = dir.path().join("raw.p7");
+    std::fs::write(&blob, &der).expect("write raw pkcs7");
+
+    let mut cmd = portable_cmd();
+    cmd.arg("extract-pkcx-pkcs7").arg(&blob);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("missing PKCX wrapper"));
 }
 
 #[test]
