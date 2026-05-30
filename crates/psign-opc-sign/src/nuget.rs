@@ -1,4 +1,6 @@
-use crate::opc::{PackageSummary, inspect_package_path, normalize_zip_part_name};
+use crate::opc::{
+    PackageSummary, current_zip_datetime, inspect_package_path, normalize_zip_part_name,
+};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -10,8 +12,10 @@ use zip::write::FileOptions;
 pub const PACKAGE_SIGNATURE_FILE_NAME: &str = ".signature.p7s";
 pub const SIGNATURE_CONTENT_VERSION: &str = "1";
 
-fn nuget_zip_options(compression: zip::CompressionMethod) -> FileOptions {
-    FileOptions::default().compression_method(compression)
+fn nuget_zip_options(compression: zip::CompressionMethod, modified: zip::DateTime) -> FileOptions {
+    FileOptions::default()
+        .compression_method(compression)
+        .last_modified_time(modified)
 }
 
 fn normalize_nuget_zip_metadata(bytes: &mut [u8]) -> Result<()> {
@@ -330,7 +334,7 @@ where
                 continue;
             }
 
-            let options = nuget_zip_options(file.compression());
+            let options = nuget_zip_options(file.compression(), file.last_modified());
             if file.is_dir() {
                 output.add_directory(name, options)?;
             } else {
@@ -404,6 +408,8 @@ where
     let mut input = zip::ZipArchive::new(reader).context("open NuGet ZIP")?;
     let mut out = std::io::Cursor::new(Vec::new());
     let mut had_signature = false;
+    let signature_timestamp =
+        current_zip_datetime().context("determine local ZIP timestamp for NuGet signature")?;
 
     {
         let mut output = zip::ZipWriter::new(&mut out);
@@ -421,7 +427,7 @@ where
                 ));
             }
 
-            let options = nuget_zip_options(file.compression());
+            let options = nuget_zip_options(file.compression(), file.last_modified());
             if file.is_dir() {
                 output.add_directory(name, options)?;
             } else {
@@ -433,7 +439,7 @@ where
         if !had_signature || overwrite {
             output.start_file(
                 PACKAGE_SIGNATURE_FILE_NAME,
-                nuget_zip_options(zip::CompressionMethod::Stored),
+                nuget_zip_options(zip::CompressionMethod::Stored, signature_timestamp),
             )?;
             output.write_all(signature_der)?;
         }
@@ -453,14 +459,25 @@ mod tests {
     use zip::write::FileOptions;
 
     fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        zip_with_timestamps(
+            &entries
+                .iter()
+                .map(|(name, bytes)| (*name, *bytes, zip::DateTime::default()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn zip_with_timestamps(entries: &[(&str, &[u8], zip::DateTime)]) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut out);
-            for (name, bytes) in entries {
+            for (name, bytes, modified) in entries {
                 let options = if *name == PACKAGE_SIGNATURE_FILE_NAME {
-                    FileOptions::default().compression_method(zip::CompressionMethod::Stored)
-                } else {
                     FileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored)
+                        .last_modified_time(*modified)
+                } else {
+                    FileOptions::default().last_modified_time(*modified)
                 };
                 writer.start_file(*name, options).unwrap();
                 writer.write_all(bytes).unwrap();
@@ -468,6 +485,29 @@ mod tests {
             writer.finish().unwrap();
         }
         out.into_inner()
+    }
+
+    fn test_datetime(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> zip::DateTime {
+        zip::DateTime::from_date_and_time(year, month, day, hour, minute, second)
+            .expect("valid test timestamp")
+    }
+
+    fn zip_datetime_parts(dt: zip::DateTime) -> (u16, u8, u8, u8, u8, u8) {
+        (
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+        )
     }
 
     fn eocd_offset(bytes: &[u8]) -> usize {
@@ -647,6 +687,30 @@ mod tests {
     }
 
     #[test]
+    fn embed_signature_preserves_existing_entry_timestamps() {
+        let original = test_datetime(2001, 2, 3, 4, 5, 6);
+        let zip = zip_with_timestamps(&[("lib/net8.0/a.dll", b"pe", original)]);
+        let mut out = Cursor::new(Vec::new());
+
+        embed_signature(Cursor::new(zip), &mut out, b"cms", false).unwrap();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(out.into_inner())).unwrap();
+        assert_eq!(
+            zip_datetime_parts(archive.by_name("lib/net8.0/a.dll").unwrap().last_modified()),
+            zip_datetime_parts(original)
+        );
+        assert_ne!(
+            zip_datetime_parts(
+                archive
+                    .by_name(PACKAGE_SIGNATURE_FILE_NAME)
+                    .unwrap()
+                    .last_modified()
+            ),
+            zip_datetime_parts(zip::DateTime::default())
+        );
+    }
+
+    #[test]
     fn embed_signature_rejects_existing_signature_without_overwrite() {
         let zip = zip_with(&[(PACKAGE_SIGNATURE_FILE_NAME, b"old")]);
         let err =
@@ -697,6 +761,28 @@ mod tests {
         assert_eq!(
             info.entry("lib/net8.0/a.dll").map(|e| e.uncompressed_size),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn write_package_without_signature_preserves_existing_entry_timestamps() {
+        let original = test_datetime(2004, 5, 6, 7, 8, 10);
+        let zip = zip_with_timestamps(&[
+            ("lib/net8.0/a.dll", b"pe", original),
+            (
+                PACKAGE_SIGNATURE_FILE_NAME,
+                b"cms",
+                test_datetime(2005, 6, 7, 8, 9, 10),
+            ),
+        ]);
+        let mut out = Cursor::new(Vec::new());
+
+        write_package_without_signature(Cursor::new(zip), &mut out).unwrap();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(out.into_inner())).unwrap();
+        assert_eq!(
+            zip_datetime_parts(archive.by_name("lib/net8.0/a.dll").unwrap().last_modified()),
+            zip_datetime_parts(original)
         );
     }
 
