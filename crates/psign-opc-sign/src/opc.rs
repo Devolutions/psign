@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::Path;
+use time::OffsetDateTime;
 use zip::ZipArchive;
 
 pub const CONTENT_TYPES_PART: &str = "[Content_Types].xml";
@@ -105,6 +106,29 @@ pub fn normalize_zip_part_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+pub fn current_zip_datetime() -> Result<zip::DateTime> {
+    let now = OffsetDateTime::now_local().context("determine local time for ZIP timestamp")?;
+    zip_datetime_from_offset_date_time(now)
+}
+
+fn zip_datetime_from_offset_date_time(dt: OffsetDateTime) -> Result<zip::DateTime> {
+    let year = dt.year();
+    if !(1980..=2107).contains(&year) {
+        return Err(anyhow!(
+            "local time year {year} is outside the ZIP DOS timestamp range"
+        ));
+    }
+    zip::DateTime::from_date_and_time(
+        year as u16,
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+    )
+    .map_err(|_| anyhow!("local time could not be represented as a ZIP DOS timestamp"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +147,17 @@ mod tests {
             writer.finish().unwrap();
         }
         out.into_inner()
+    }
+
+    fn zip_datetime_parts(dt: zip::DateTime) -> (u16, u8, u8, u8, u8, u8) {
+        (
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+        )
     }
 
     #[test]
@@ -152,5 +187,17 @@ mod tests {
     fn rejects_backslash_entry_names() {
         let err = normalize_zip_part_name(r"_rels\.rels").unwrap_err();
         assert!(err.to_string().contains("separators"));
+    }
+
+    #[test]
+    fn zip_datetime_from_offset_date_time_preserves_local_clock_fields() {
+        let dt = OffsetDateTime::from_unix_timestamp(946_684_800)
+            .unwrap()
+            .to_offset(time::UtcOffset::from_hms(-8, 0, 0).unwrap());
+
+        assert_eq!(
+            zip_datetime_parts(zip_datetime_from_offset_date_time(dt).unwrap()),
+            zip_datetime_parts(zip::DateTime::from_date_and_time(1999, 12, 31, 16, 0, 0).unwrap())
+        );
     }
 }

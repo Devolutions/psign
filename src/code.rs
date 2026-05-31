@@ -3001,6 +3001,15 @@ pub(crate) struct ZipEntryUpdate {
     pub compression: zip::CompressionMethod,
 }
 
+fn zip_file_options(
+    compression: zip::CompressionMethod,
+    modified: zip::DateTime,
+) -> zip::write::FileOptions {
+    zip::write::FileOptions::default()
+        .compression_method(compression)
+        .last_modified_time(modified)
+}
+
 #[allow(dead_code)]
 pub(crate) fn repack_zip_with_updates<R, W>(
     reader: R,
@@ -3012,6 +3021,8 @@ where
     W: Write + Seek,
 {
     let mut pending = BTreeMap::new();
+    let updated_timestamp = opc::current_zip_datetime()
+        .context("determine local ZIP timestamp for rewritten entries")?;
     for update in updates {
         let name = normalize_zip_name(&update.name)?;
         if pending.insert(name.clone(), update).is_some() {
@@ -3027,11 +3038,11 @@ where
         if let Some(update) = pending.remove(&name) {
             output.start_file(
                 name,
-                zip::write::FileOptions::default().compression_method(update.compression),
+                zip_file_options(update.compression, updated_timestamp),
             )?;
             output.write_all(&update.bytes)?;
         } else {
-            let options = zip::write::FileOptions::default().compression_method(file.compression());
+            let options = zip_file_options(file.compression(), file.last_modified());
             if file.is_dir() {
                 output.add_directory(name, options)?;
             } else {
@@ -3044,7 +3055,7 @@ where
     for (name, update) in pending {
         output.start_file(
             name,
-            zip::write::FileOptions::default().compression_method(update.compression),
+            zip_file_options(update.compression, updated_timestamp),
         )?;
         output.write_all(&update.bytes)?;
     }
@@ -3392,6 +3403,29 @@ mod tests {
     use super::*;
     use zip::write::FileOptions;
 
+    fn test_datetime(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> zip::DateTime {
+        zip::DateTime::from_date_and_time(year, month, day, hour, minute, second)
+            .expect("valid test timestamp")
+    }
+
+    fn zip_datetime_parts(dt: zip::DateTime) -> (u16, u8, u8, u8, u8, u8) {
+        (
+            dt.year(),
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+        )
+    }
+
     #[test]
     fn brace_expansion_supports_nested_lists_and_ranges() {
         assert_eq!(
@@ -3457,6 +3491,59 @@ mod tests {
     }
 
     #[test]
+    fn repack_zip_preserves_unchanged_entry_timestamps_and_stamps_updates() {
+        let original_a = test_datetime(2001, 2, 3, 4, 5, 6);
+        let original_readme = test_datetime(2002, 3, 4, 5, 6, 8);
+        let input = test_zip_with_timestamps(&[
+            ("lib/net8.0/a.dll", b"old".as_slice(), original_a),
+            ("content/readme.txt", b"text".as_slice(), original_readme),
+        ]);
+        let mut output = Cursor::new(Vec::new());
+
+        repack_zip_with_updates(
+            Cursor::new(input),
+            &mut output,
+            vec![
+                ZipEntryUpdate {
+                    name: "lib/net8.0/a.dll".to_owned(),
+                    bytes: b"new".to_vec(),
+                    compression: zip::CompressionMethod::Deflated,
+                },
+                ZipEntryUpdate {
+                    name: ".signature.p7s".to_owned(),
+                    bytes: b"cms".to_vec(),
+                    compression: zip::CompressionMethod::Stored,
+                },
+            ],
+        )
+        .unwrap();
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(output.into_inner())).unwrap();
+        assert_eq!(
+            zip_datetime_parts(
+                archive
+                    .by_name("content/readme.txt")
+                    .unwrap()
+                    .last_modified()
+            ),
+            zip_datetime_parts(original_readme)
+        );
+
+        let updated = archive.by_name("lib/net8.0/a.dll").unwrap().last_modified();
+        assert_ne!(zip_datetime_parts(updated), zip_datetime_parts(original_a));
+        assert_ne!(
+            zip_datetime_parts(updated),
+            zip_datetime_parts(zip::DateTime::default())
+        );
+
+        let signature = archive.by_name(".signature.p7s").unwrap().last_modified();
+        assert_ne!(
+            zip_datetime_parts(signature),
+            zip_datetime_parts(zip::DateTime::default())
+        );
+    }
+
+    #[test]
     fn repack_zip_rejects_unsafe_update_path() {
         let input = test_zip(&[("file.txt", b"text".as_slice())]);
         let err = repack_zip_with_updates(
@@ -3474,12 +3561,21 @@ mod tests {
     }
 
     fn test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        test_zip_with_timestamps(
+            &entries
+                .iter()
+                .map(|(name, bytes)| (*name, *bytes, zip::DateTime::default()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn test_zip_with_timestamps(entries: &[(&str, &[u8], zip::DateTime)]) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut out);
-            for (name, bytes) in entries {
+            for (name, bytes, modified) in entries {
                 writer
-                    .start_file(*name, FileOptions::default())
+                    .start_file(*name, FileOptions::default().last_modified_time(*modified))
                     .expect("start zip entry");
                 writer.write_all(bytes).expect("write zip entry");
             }
