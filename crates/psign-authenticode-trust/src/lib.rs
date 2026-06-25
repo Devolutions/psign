@@ -8,6 +8,7 @@
 
 pub mod anchor;
 pub mod authroot_cab;
+pub mod authroot_cache;
 pub mod authroot_ctl;
 pub mod chain;
 pub mod inspect;

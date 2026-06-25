@@ -95,7 +95,7 @@ New-PSDrive -Name certs -PSProvider PortableCertStore -Root ./project-certs
 
 ## Trust Model
 
-By default, `Get-PsignSignature` automatically downloads and caches the Microsoft AuthRoot CAB (~350KB) for trust evaluation. The cache lives at `~/.psign/authroot/`.
+By default, `Get-PsignSignature`, `Test-PsignFileCatalog`, and `Test-PsignModule` automatically download and cache the Microsoft AuthRoot CAB for trust evaluation when no explicit trust anchors are supplied. The cache lives at `~/.psign/authroot/` and is refreshed when it is older than 7 days. Set `PSIGN_AUTHROOT_MAX_AGE_DAYS`, `PSIGN_AUTHROOT_CACHE_DIR`, or `PSIGN_AUTHROOT_URL` to override the stale window, cache directory, or source URL.
 
 ```powershell
 # Disable auto-trust

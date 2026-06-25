@@ -1,6 +1,10 @@
 # AuthRoot-style anchors on Linux
 
-Windows resolves Authenticode chains against machine/user certificate stores plus **Microsoft Authenticode roots**. On Linux, **`psign-tool portable trust-verify-pe`** requires you to supply **explicit roots** (and optionally intermediates embedded in the PE PKCS#7).
+Windows resolves Authenticode chains against machine/user certificate stores plus **Microsoft Authenticode roots**. On Linux/macOS, portable trust verification can use explicit roots, or it can automatically download and cache Microsoft’s **`authrootstl.cab`** when no explicit roots are supplied.
+
+By default, **`psign-tool portable trust-verify-*`** and bare **`psign-tool --mode portable verify`** download **`authrootstl.cab`** from Microsoft’s Windows Update distribution URL when the cache is missing or stale. The cache lives at **`~/.psign/authroot/authrootstl.cab`** with metadata in **`authrootstl.cab.json`**. The default refresh window is **7 days**.
+
+Set **`PSIGN_NO_AUTO_TRUST=1`** (also accepts `true` or `yes`) to disable automatic AuthRoot use. Set **`PSIGN_AUTHROOT_MAX_AGE_DAYS=<days>`** to change the staleness window. Advanced/offline environments can set **`PSIGN_AUTHROOT_CACHE_DIR`** or **`PSIGN_AUTHROOT_URL`** for an alternate cache location or mirror. Explicit **`--authroot-cab`**, **`--anchor-dir`**, or repeatable **`--trusted-ca`** inputs take precedence and suppress automatic AuthRoot resolution.
 
 ## Phase A — anchor directory (recommended first ship)
 
@@ -20,14 +24,26 @@ Keep separate what you **trust as an anchor** vs what happens to be embedded in 
 1. Harvests **X.509 certificates** from PKCS#7 blobs (`Pkcs7::from_der` on each member).
 2. Parses PKCS#7 **`ContentInfo` → `SignedData`** when present and extracts CTL **`eContent`** **TrustedSubject** SHA-1 **`SubjectIdentifier`** octets into the anchor thumbprint set (alongside cert-derived thumbs).
 
-Pass **`--authroot-cab /path/to/authrootstl.cab`** on any **`trust-verify-*`** subcommand.
+Pass **`--authroot-cab /path/to/authrootstl.cab`** on any **`trust-verify-*`** subcommand to use a pinned or mirrored CAB instead of the automatic cache.
 
 ### Bootstrap integrity
 
-- **CI / reproducibility:** pin a **SHA-256** of the CAB; pass **`--expect-authroot-cab-sha256 <64-hex>`** so ingest aborts on mismatch.
+- **CI / reproducibility:** pin a **SHA-256** of the CAB; pass **`--authroot-cab`** and **`--expect-authroot-cab-sha256 <64-hex>`** so ingest aborts on mismatch.
 - **Future hardening:** verify the **outer** Authenticode signature / CTL semantics on the STL (see technical plan).
 
-## Example
+## Examples
+
+Default portable trust using the automatic AuthRoot cache:
+
+```bash
+psign-tool portable trust-verify-pe ./signed.exe
+```
+
+Bare portable verify also routes to trust verification for supported formats when auto trust is enabled:
+
+```bash
+psign-tool --mode portable verify ./signed.exe
+```
 
 ```bash
 psign-tool portable trust-verify-pe \
@@ -43,7 +59,7 @@ psign-tool portable trust-verify-pe \
   ./signed.exe
 ```
 
-The unified CLI can use the same trust path without writing to the Windows or Linux OS trust store. With **`--mode portable verify`**, trust inputs such as **`--trusted-ca`**, **`--anchor-dir`**, **`--authroot-cab`**, AIA/OCSP/CRL flags, and timestamp policy flags route to the corresponding portable **`trust-verify-*`** command inferred from the subject file:
+The unified CLI uses the same trust path without writing to the Windows or Linux OS trust store. With **`--mode portable verify`**, supported formats route to the corresponding portable **`trust-verify-*`** command by default when automatic AuthRoot is enabled. Explicit trust inputs such as **`--trusted-ca`**, **`--anchor-dir`**, **`--authroot-cab`**, AIA/OCSP/CRL flags, and timestamp policy flags still route to the same trust commands:
 
 ```bash
 psign-tool --mode portable verify \

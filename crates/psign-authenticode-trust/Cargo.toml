@@ -10,6 +10,7 @@ repository.workspace = true
 anyhow = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 cms = "0.2.3"
 der = { version = "0.7", features = ["derive"] }
 digest = "0.10"
@@ -20,7 +21,7 @@ authenticode = { version = "0.5.0", features = ["std", "object"] }
 psign-sip-digest = { path = "../psign-sip-digest" }
 picky = { version = "7.0.0-rc.23", features = ["pkcs7", "time_conversion"] }
 picky-asn1-x509 = "0.15.4"
-time = "0.3"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 x509-cert = "0.2.5"
 cab = "0.6"
 

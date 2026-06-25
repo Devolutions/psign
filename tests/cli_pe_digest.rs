@@ -2704,6 +2704,17 @@ fn unified_verify_mode_portable_accepts_trusted_ca_without_os_store() {
 }
 
 #[test]
+fn unified_verify_mode_portable_uses_digest_only_when_auto_trust_disabled() {
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.env("PSIGN_NO_AUTO_TRUST", "1")
+        .arg("--mode")
+        .arg("portable")
+        .arg("verify")
+        .arg(tiny32_fixture());
+    cmd.assert().success();
+}
+
+#[test]
 fn trust_verify_pe_ok_with_prefer_timestamp_signing_time_and_as_of() {
     let fixture = tiny32_fixture();
     let bytes = std::fs::read(&fixture).expect("read fixture");
@@ -2772,6 +2783,7 @@ fn trust_verify_pe_require_valid_timestamp_rejects_pkcs9_only_tiny64() {
 #[test]
 fn trust_verify_pe_errors_without_configured_anchors() {
     let mut cmd = portable_cmd();
+    cmd.env("PSIGN_NO_AUTO_TRUST", "1");
     cmd.arg("trust-verify-pe").arg(tiny32_fixture());
     cmd.assert()
         .failure()
@@ -3461,6 +3473,7 @@ fn portable_verify_negative_cab_unsigned_cli() {
 #[test]
 fn portable_verify_negative_trust_cab_no_anchors_cli() {
     let mut cmd = portable_cmd();
+    cmd.env("PSIGN_NO_AUTO_TRUST", "1");
     cmd.arg("trust-verify-cab").arg(tiny_signed_cab_fixture());
     cmd.assert()
         .failure()
@@ -3759,6 +3772,7 @@ fn portable_verify_negative_trust_detached_no_anchors_cli() {
     std::fs::write(&work_pe, &pe_bytes).expect("copy pe");
 
     let mut cmd = portable_cmd();
+    cmd.env("PSIGN_NO_AUTO_TRUST", "1");
     cmd.arg("trust-verify-detached")
         .arg(&work_pe)
         .arg(dir.path().join("sig.p7"));

@@ -1,6 +1,9 @@
 use super::pe_digest::{ParsedPe, PeAuthenticodeHashKind, pe_authenticode_digest};
+use crate::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use anyhow::{Result, anyhow};
-use authenticode::{AttributeCertificateIterator, WIN_CERT_TYPE_PKCS_SIGNED_DATA};
+use authenticode::{
+    AttributeCertificateIterator, AuthenticodeSignature, WIN_CERT_TYPE_PKCS_SIGNED_DATA,
+};
 
 #[derive(Debug, Clone)]
 pub struct PeDigestConsistencyResult {
@@ -35,8 +38,8 @@ pub fn verify_pe_authenticode_digest_consistency(
         if attr.certificate_type != WIN_CERT_TYPE_PKCS_SIGNED_DATA {
             continue;
         }
-        let sig = attr
-            .get_authenticode_signature()
+        let normalized = normalize_pkcs7_der_for_authenticode(attr.data);
+        let sig = AuthenticodeSignature::from_bytes(normalized.as_ref())
             .map_err(|e| anyhow!("PKCS#7 Authenticode parse failed: {e}"))?;
         pkcs7_count += 1;
         let embedded = sig.digest();
