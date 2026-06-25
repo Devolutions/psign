@@ -193,7 +193,7 @@ fn portable_verify_unsupported(args: &crate::cli::VerifyArgs) -> bool {
         || args.enclave_policy
 }
 
-fn portable_verify_trust_requested(args: &crate::cli::VerifyArgs) -> bool {
+fn portable_verify_explicit_trust_requested(args: &crate::cli::VerifyArgs) -> bool {
     args.anchor_dir.is_some()
         || !args.trusted_ca.is_empty()
         || args.authroot_cab.is_some()
@@ -213,29 +213,41 @@ fn portable_verify_trust_requested(args: &crate::cli::VerifyArgs) -> bool {
         || args.online_max_download_bytes != 1024 * 1024
 }
 
+fn portable_auto_trust_enabled() -> bool {
+    !psign_authenticode_trust::authroot_cache::is_auto_trust_disabled()
+}
+
+fn portable_trust_command_for_verify_command(command: &str) -> Option<&'static str> {
+    match command {
+        "verify-pe" => Some("trust-verify-pe"),
+        "verify-cab" => Some("trust-verify-cab"),
+        "verify-msi" => Some("trust-verify-msi"),
+        "verify-esd" => Some("trust-verify-esd"),
+        "verify-catalog" => Some("trust-verify-catalog"),
+        "verify-zip" => Some("trust-verify-zip"),
+        _ => None,
+    }
+}
+
 fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<CommandOutput> {
     if portable_verify_unsupported(args) {
         return Err(anyhow::anyhow!(
-            "--mode portable verify currently supports bare file digest-consistency verification; use `psign-tool portable ...` for portable trust/diagnostic commands"
+            "--mode portable verify supports file verification and portable trust inputs; use `psign-tool portable ...` for lower-level diagnostic commands"
         ));
     }
     for path in &args.files {
-        let command = if portable_verify_trust_requested(args) {
-            match portable_command_for_path(path)? {
-                "verify-pe" => "trust-verify-pe",
-                "verify-cab" => "trust-verify-cab",
-                "verify-msi" => "trust-verify-msi",
-                "verify-esd" => "trust-verify-esd",
-                "verify-catalog" => "trust-verify-catalog",
-                "verify-zip" => "trust-verify-zip",
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "--mode portable verify trust options are not supported for inferred command {other}"
-                    ));
-                }
-            }
+        let inferred_command = portable_command_for_path(path)?;
+        let explicit_trust = portable_verify_explicit_trust_requested(args);
+        let command = if explicit_trust {
+            portable_trust_command_for_verify_command(inferred_command).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--mode portable verify trust options are not supported for inferred command {inferred_command}"
+                )
+            })?
+        } else if portable_auto_trust_enabled() {
+            portable_trust_command_for_verify_command(inferred_command).unwrap_or(inferred_command)
         } else {
-            portable_command_for_path(path)?
+            inferred_command
         };
         let mut argv = Vec::new();
         argv.push(std::ffi::OsString::from(command));
@@ -443,4 +455,45 @@ pub fn run_tool_cli() -> ! {
     }
 
     std::process::exit(batch_exit);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_trust_command_mapping_covers_supported_verify_formats() {
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-pe"),
+            Some("trust-verify-pe")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-cab"),
+            Some("trust-verify-cab")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-msi"),
+            Some("trust-verify-msi")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-esd"),
+            Some("trust-verify-esd")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-catalog"),
+            Some("trust-verify-catalog")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-zip"),
+            Some("trust-verify-zip")
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-msix"),
+            None
+        );
+        assert_eq!(
+            portable_trust_command_for_verify_command("verify-script"),
+            None
+        );
+    }
 }

@@ -13,9 +13,11 @@ internal static class AuthRootCache
     private const string AuthRootCabUrl = "http://ctldl.windowsupdate.com/msdownload/update/v3/static/trustedr/en/authrootstl.cab";
     private const string CabFileName = "authrootstl.cab";
     private const string MetaFileName = "authrootstl.cab.json";
-    private const int DefaultMaxAgeDays = 30;
+    private const int DefaultMaxAgeDays = 7;
     private const string MaxAgeEnvVar = "PSIGN_AUTHROOT_MAX_AGE_DAYS";
     private const string NoAutoTrustEnvVar = "PSIGN_NO_AUTO_TRUST";
+    private const string CacheDirEnvVar = "PSIGN_AUTHROOT_CACHE_DIR";
+    private const string SourceUrlEnvVar = "PSIGN_AUTHROOT_URL";
 
     private static readonly HttpClient SharedClient = new()
     {
@@ -27,8 +29,10 @@ internal static class AuthRootCache
     /// </summary>
     internal static bool IsAutoTrustDisabled()
     {
-        string? value = Environment.GetEnvironmentVariable(NoAutoTrustEnvVar);
-        return value is "1" or "true" or "yes";
+        string? value = Environment.GetEnvironmentVariable(NoAutoTrustEnvVar)?.Trim();
+        return value == "1"
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -55,8 +59,9 @@ internal static class AuthRootCache
         try
         {
             Directory.CreateDirectory(cacheDir);
-            writeVerbose?.Invoke($"Downloading AuthRoot CAB from {AuthRootCabUrl}...");
-            DownloadCab(cabPath, metaPath);
+            string sourceUrl = GetSourceUrl();
+            writeVerbose?.Invoke($"Downloading AuthRoot CAB from {sourceUrl}...");
+            DownloadCab(cabPath, metaPath, sourceUrl);
             writeVerbose?.Invoke($"AuthRoot CAB cached at: {cabPath}");
             return cabPath;
         }
@@ -83,21 +88,36 @@ internal static class AuthRootCache
         string cacheDir = GetCacheDirectory();
         string cabPath = Path.Combine(cacheDir, CabFileName);
         string metaPath = Path.Combine(cacheDir, MetaFileName);
+        string sourceUrl = GetSourceUrl();
 
         Directory.CreateDirectory(cacheDir);
-        writeVerbose?.Invoke($"Downloading AuthRoot CAB from {AuthRootCabUrl}...");
-        DownloadCab(cabPath, metaPath);
+        writeVerbose?.Invoke($"Downloading AuthRoot CAB from {sourceUrl}...");
+        DownloadCab(cabPath, metaPath, sourceUrl);
         writeVerbose?.Invoke($"AuthRoot CAB cached at: {cabPath}");
         return cabPath;
     }
 
     private static string GetCacheDirectory()
     {
+        string? configured = Environment.GetEnvironmentVariable(CacheDirEnvVar);
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured;
+        }
+
         string home = Environment.GetEnvironmentVariable("HOME")
             ?? Environment.GetEnvironmentVariable("USERPROFILE")
             ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
         return Path.Combine(home, ".psign", "authroot");
+    }
+
+    private static string GetSourceUrl()
+    {
+        string? configured = Environment.GetEnvironmentVariable(SourceUrlEnvVar);
+        return string.IsNullOrWhiteSpace(configured)
+            ? AuthRootCabUrl
+            : configured;
     }
 
     private static bool IsStale(string metaPath)
@@ -135,9 +155,9 @@ internal static class AuthRootCache
         return DefaultMaxAgeDays;
     }
 
-    private static void DownloadCab(string cabPath, string metaPath)
+    private static void DownloadCab(string cabPath, string metaPath, string sourceUrl)
     {
-        using HttpResponseMessage response = SharedClient.GetAsync(AuthRootCabUrl).GetAwaiter().GetResult();
+        using HttpResponseMessage response = SharedClient.GetAsync(sourceUrl).GetAwaiter().GetResult();
         response.EnsureSuccessStatusCode();
 
         byte[] bytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
@@ -149,7 +169,7 @@ internal static class AuthRootCache
         AuthRootMeta meta = new()
         {
             DownloadedAtUtc = DateTime.UtcNow,
-            SourceUrl = AuthRootCabUrl,
+            SourceUrl = sourceUrl,
             SizeBytes = bytes.Length,
         };
 

@@ -10,6 +10,7 @@ use picky::x509::certificate::Cert;
 use picky::x509::date::UtcDate;
 use picky::x509::pkcs7::authenticode::AuthenticodeSignature;
 use psign_sip_digest::pe_digest::{PeAuthenticodeHashKind, pe_authenticode_digest};
+use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use psign_sip_digest::verify_pe::for_each_pe_pkcs7_signed_data;
 use sha2::Digest;
 
@@ -109,7 +110,8 @@ fn verify_one_pkcs7(
     anchor_certs: &[Cert],
     opts: &TrustVerifyPeOptions,
 ) -> Result<()> {
-    let sig_authenticode = authenticode::AuthenticodeSignature::from_bytes(pkcs7_der)
+    let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
+    let sig_authenticode = authenticode::AuthenticodeSignature::from_bytes(normalized.as_ref())
         .map_err(|e| anyhow!("authenticode-rs PKCS#7 parse (digest probe): {e}"))?;
     let embedded_digest = sig_authenticode.digest();
     let kind = PeAuthenticodeHashKind::from_digest_byte_len(embedded_digest.len())?;

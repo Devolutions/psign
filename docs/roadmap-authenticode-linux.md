@@ -68,7 +68,7 @@ Already aligned in Rust for **cleartext** subjects:
 
 | Surface | `PSIGN_*` / related | Notes |
 |---------|---------------------------|--------|
-| **`psign-tool portable`** (Linux/macOS) | None required | Subcommands take **paths on the argv** only (`verify-pe`, **`trust-verify-pe`** + **`--anchor-dir` / `--authroot-cab`**, `verify-msix`, …). |
+| **`psign-tool portable`** (Linux/macOS) | **`PSIGN_NO_AUTO_TRUST`**, **`PSIGN_AUTHROOT_MAX_AGE_DAYS`**, **`PSIGN_AUTHROOT_CACHE_DIR`**, **`PSIGN_AUTHROOT_URL`** optional | Trust subcommands can run with paths only by auto-caching Microsoft **`authrootstl.cab`**; explicit **`--anchor-dir`** / **`--authroot-cab`** inputs override auto trust. Digest-only commands such as **`verify-pe`** remain available. |
 | **`psign-tool --mode portable`** (non-Windows) | **`PSIGN_TOOL_MODE=portable`** optional | Uses portable Rust paths where implemented; Win32-only commands fail explicitly. |
 | **`psign-tool --mode windows`** (Windows) | **`PSIGN_TOOL_MODE=windows`**, **`PSIGN_RUST_SIP`**, **`SIGNTOOL_PAGE_HASHES`** (via **`--no-page-hashes`**) | Win32 backend, post-sign Rust SIP digest gates, and **`SignerSignEx3`** page-hash hint — see [`psign-cli-matrix.json`](psign-cli-matrix.json), [`rust-sip-architecture.md`](rust-sip-architecture.md). |
 | **Parity scripts / CI** | **`SIGNTOOL_EXE`**, **`PSIGN_TEST_PFX`**, **`PSIGN_MSIX_*`**, … | Full matrix and semantics in [`ci-parity.md`](ci-parity.md). |

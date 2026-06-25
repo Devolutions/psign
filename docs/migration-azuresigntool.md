@@ -130,7 +130,7 @@ AzureSignTool does not verify signatures. After signing on Windows, use portable
 psign-tool portable verify-pe -- <artifact>
 ```
 
-For **trust** validation with **explicit anchors** (no OS certificate store), use **`trust-verify-pe`** (or format-specific **`trust-verify-*`** commands). Short-lived signing certificates—common with Artifact Signing profiles—**need RFC3161 timestamping** at sign time so signatures remain verifiable after the leaf expires; combine digest checks with timestamp-aware trust options when applicable:
+For **trust** validation without the OS certificate store, use **`trust-verify-pe`** (or format-specific **`trust-verify-*`** commands). Portable trust uses the automatic AuthRoot cache when no anchors are supplied; pass **`--anchor-dir`** / **`--authroot-cab`** for enterprise anchors or pinned CI inputs. Short-lived signing certificates—common with Artifact Signing profiles—**need RFC3161 timestamping** at sign time so signatures remain verifiable after the leaf expires; combine digest checks with timestamp-aware trust options when applicable:
 
 ```text
 psign-tool portable trust-verify-pe ./artifact.exe \

@@ -199,14 +199,14 @@ For migrating from **AzureSignTool** (KV-focused CLI), see [`migration-azuresign
 On Linux/macOS (or Windows without the dlib), use **`psign-tool portable`** after the signed artifact exists:
 
 1. **`verify-pe`** — PKCS#7 indirect digest vs recomputed PE digest (no trust anchors).
-2. **`trust-verify-pe`** — CMS validation **plus** explicit anchor trust (**`--anchor-dir`**, **`--authroot-cab`**) and policy options.
+2. **`trust-verify-pe`** — CMS validation **plus** portable trust using the automatic AuthRoot cache or explicit anchors (**`--anchor-dir`**, **`--authroot-cab`**) and policy options.
 
 Short-lived signing certificates **require a valid RFC3161 timestamp** for verification long after profile expiry. Combine digest verification with trust verification options such as:
 
 - **`--prefer-timestamp-signing-time`** — prefer timestamp token time for **`exact_date`**-style checks.
 - **`--require-valid-timestamp`** — fail if portable extraction finds neither a nested RFC3161 **`TSTInfo.genTime`** nor PKCS#9 **`signing-time`** (use with **`--prefer-timestamp-signing-time`**). With **`--as-of`**, the verification instant is pinned and **timestamp presence is not enforced** on that path (see **`authenticode-trust-stack.md`**).
 - **`--as-of YYYY-MM-DD`** — reproducible verification date.
-- **`--anchor-dir`** / **`--authroot-cab`** — supply roots explicitly (portable path does not use the OS store).
+- **`--anchor-dir`** / **`--authroot-cab`** — supply roots explicitly for enterprise anchors or reproducible pinned CABs (portable path does not use the OS store).
 
 Example:
 

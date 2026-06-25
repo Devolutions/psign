@@ -632,8 +632,8 @@ fn parse_http_uri_general_names(input: &[u8]) -> Result<Vec<String>> {
     Ok(urls)
 }
 
-fn http_get_limited(url: &str, options: &OnlineTrustOptions) -> Result<Vec<u8>> {
-    http_request_limited(url, "GET", None, options)
+pub(crate) fn http_get_limited(url: &str, options: &OnlineTrustOptions) -> Result<Vec<u8>> {
+    http_request_limited(url, "GET", None, options, "portable online trust")
 }
 
 fn http_post_limited(
@@ -643,7 +643,13 @@ fn http_post_limited(
     body: &[u8],
     options: &OnlineTrustOptions,
 ) -> Result<Vec<u8>> {
-    http_request_limited(url, "POST", Some((content_type, accept, body)), options)
+    http_request_limited(
+        url,
+        "POST",
+        Some((content_type, accept, body)),
+        options,
+        "portable online trust",
+    )
 }
 
 fn http_request_limited(
@@ -651,10 +657,11 @@ fn http_request_limited(
     method: &str,
     body: Option<(&str, &str, &[u8])>,
     options: &OnlineTrustOptions,
+    context: &str,
 ) -> Result<Vec<u8>> {
     let without_scheme = url
         .strip_prefix("http://")
-        .ok_or_else(|| anyhow!("only http:// AIA URLs are supported by portable online trust"))?;
+        .ok_or_else(|| anyhow!("only http:// URLs are supported by {context}"))?;
     let (authority, path) = without_scheme
         .split_once('/')
         .map(|(a, p)| (a, format!("/{p}")))
@@ -664,17 +671,17 @@ fn http_request_limited(
         .and_then(|(h, p)| Some((h, p.parse::<u16>().ok()?)))
         .unwrap_or((authority, 80));
     if host.is_empty() {
-        return Err(anyhow!("AIA URL host is empty"));
+        return Err(anyhow!("{context} URL host is empty"));
     }
 
     let mut stream =
         TcpStream::connect((host, port)).with_context(|| format!("connect {host}:{port}"))?;
     stream
         .set_read_timeout(Some(options.timeout))
-        .context("set AIA read timeout")?;
+        .with_context(|| format!("set {context} read timeout"))?;
     stream
         .set_write_timeout(Some(options.timeout))
-        .context("set AIA write timeout")?;
+        .with_context(|| format!("set {context} write timeout"))?;
     match body {
         Some((content_type, accept, body)) => {
             write!(
@@ -699,35 +706,37 @@ fn http_request_limited(
     let mut response = Vec::new();
     let mut tmp = [0u8; 8192];
     loop {
-        let n = stream.read(&mut tmp).context("read AIA HTTP response")?;
+        let n = stream
+            .read(&mut tmp)
+            .with_context(|| format!("read {context} HTTP response"))?;
         if n == 0 {
             break;
         }
         response.extend_from_slice(&tmp[..n]);
         if response.len() > options.max_download_bytes + 64 * 1024 {
-            return Err(anyhow!("AIA HTTP response exceeds configured size limit"));
+            return Err(anyhow!(
+                "{context} HTTP response exceeds configured size limit"
+            ));
         }
     }
 
     let header_end = find_header_end(&response)
-        .ok_or_else(|| anyhow!("AIA HTTP response has no header terminator"))?;
-    let headers =
-        std::str::from_utf8(&response[..header_end]).context("AIA HTTP headers are not UTF-8")?;
+        .ok_or_else(|| anyhow!("{context} HTTP response has no header terminator"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .with_context(|| format!("{context} HTTP headers are not UTF-8"))?;
     let status = headers
         .lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("AIA HTTP response has no status code"))?;
+        .ok_or_else(|| anyhow!("{context} HTTP response has no status code"))?;
     if status != 200 {
-        return Err(anyhow!("AIA HTTP GET returned status {status}"));
+        return Err(anyhow!("{context} HTTP GET returned status {status}"));
     }
     let body_start = header_end + 4;
     let body = response[body_start..].to_vec();
     if body.len() > options.max_download_bytes {
-        return Err(anyhow!(
-            "AIA issuer certificate exceeds configured size limit"
-        ));
+        return Err(anyhow!("{context} download exceeds configured size limit"));
     }
     Ok(body)
 }

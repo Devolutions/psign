@@ -86,7 +86,9 @@ cargo build -p psign --bin psign-tool --locked
 # Portable PE signing with a local RSA key:
 # psign-tool portable sign-pe --cert cert.der --key key.pk8 --output signed.exe unsigned.exe
 # Existing PE signatures are replaced by default; add --append-signature to match signtool /as.
-# Portable trust verification with explicit anchors:
+# Portable trust verification downloads/caches Microsoft AuthRoot automatically when no anchors are supplied:
+# psign-tool portable trust-verify-pe signed.exe
+# Explicit anchors still override auto trust:
 # psign-tool portable trust-verify-pe signed.exe --anchor-dir anchors
 # Portable custom ZIP Authenticode verification:
 # psign-tool portable trust-verify-zip archive.zip --anchor-dir anchors

@@ -154,13 +154,14 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
         Some(s) => Some(parse_verification_date_ymd(s)?),
         None => None,
     };
+    let authroot_cab = resolve_authroot_cab_for_shared(a)?;
     // When using authroot_cab, automatically enable AIA fetching so the chain builder
     // can download missing root certificates from intermediate cert AIA extensions.
-    let effective_aia = a.online_aia || a.authroot_cab.is_some();
+    let effective_aia = a.online_aia || authroot_cab.is_some();
     Ok(TrustVerifyPeOptions {
         anchor_dir: a.anchor_dir.clone(),
         trusted_ca_files: a.trusted_ca.clone(),
-        authroot_cab: a.authroot_cab.clone(),
+        authroot_cab,
         expect_authroot_cab_sha256,
         verification_instant_override,
         verbose_chain: a.verbose_chain,
@@ -180,6 +181,19 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
             require_valid_timestamp: a.require_valid_timestamp,
         },
     })
+}
+
+fn resolve_authroot_cab_for_shared(a: &TrustVerifySharedArgs) -> Result<Option<PathBuf>> {
+    if let Some(cab) = &a.authroot_cab {
+        return Ok(Some(cab.clone()));
+    }
+    if a.anchor_dir.is_some() || !a.trusted_ca.is_empty() {
+        return Ok(None);
+    }
+    Ok(
+        psign_authenticode_trust::authroot_cache::get_or_download_authroot_cab_from_env()?
+            .map(|resolution| resolution.path),
+    )
 }
 
 fn trust_verify_args_present(a: &TrustVerifySharedArgs) -> bool {
@@ -1864,9 +1878,9 @@ enum Command {
     },
     /// Require embedded PKCS#7; compare indirect digest to Rust PE recomputation for each Authenticode cert.
     VerifyPe { path: PathBuf },
-    /// Verify PE Authenticode **trust**: PKCS#7 CMS validation + certificate chain to **explicit** anchors (no OS store).
+    /// Verify PE Authenticode **trust**: PKCS#7 CMS validation + certificate chain to portable anchors (no OS store).
     ///
-    /// Supply **`--anchor-dir`** (Phase A: `.crt`/`.cer`/`.pem`) and/or **`--authroot-cab`** (extract certs + CTL thumbs from AuthRoot-style CAB `.stl` payloads). **`verify-pe`** remains digest-only; this subcommand adds chain + policy checks.
+    /// Uses the automatic Microsoft AuthRoot CAB cache when no anchors are supplied. Supply **`--anchor-dir`** (Phase A: `.crt`/`.cer`/`.pem`) and/or **`--authroot-cab`** (extract certs + CTL thumbs from AuthRoot-style CAB `.stl` payloads) for explicit trust inputs. **`verify-pe`** remains digest-only; this subcommand adds chain + policy checks.
     TrustVerifyPe {
         path: PathBuf,
         #[command(flatten)]
