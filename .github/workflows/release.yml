@@ -373,6 +373,9 @@ jobs:
       - preflight
       - build
     environment: ${{ needs.preflight.outputs.publish_env }}
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - name: Download unsigned Windows x64 binary
@@ -409,23 +412,24 @@ jobs:
         id: signing_mode
         shell: pwsh
         env:
-          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          PUBLISH_ENV: ${{ needs.preflight.outputs.publish_env }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
-          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
-          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
-          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
         run: |
           $dryRun = [System.Boolean]::Parse('${{ needs.preflight.outputs.dry_run }}')
           $signDryRun = [System.Boolean]::Parse('${{ github.event.inputs.sign_dry_run }}')
 
           $requiredValues = @(
-            $env:CODE_SIGNING_KEYVAULT_URL,
+            $env:AZURE_CLIENT_ID,
             $env:AZURE_TENANT_ID,
-            $env:CODE_SIGNING_CLIENT_ID,
-            $env:CODE_SIGNING_CLIENT_SECRET,
-            $env:CODE_SIGNING_CERTIFICATE_NAME,
-            $env:CODE_SIGNING_TIMESTAMP_SERVER
+            $env:AZURE_SUBSCRIPTION_ID,
+            $env:TRUSTED_SIGNING_ENDPOINT,
+            $env:TRUSTED_SIGNING_ACCOUNT_NAME,
+            $env:TRUSTED_SIGNING_PROFILE_NAME
           )
 
           $hasSigningSecrets = $true
@@ -439,14 +443,14 @@ jobs:
           $shouldSign = $hasSigningSecrets -and ((-not $dryRun) -or $signDryRun)
 
           if (-not $dryRun -and -not $hasSigningSecrets) {
-            throw 'Code signing secrets are required for non-dry-run release jobs.'
+            throw "Azure Trusted Signing configuration is required for non-dry-run release jobs in $env:PUBLISH_ENV."
           }
 
           "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           Write-Host "Windows signing dry-run mode: $dryRun"
-          Write-Host "Windows binaries will be signed with Linux psign-tool: $shouldSign"
+          Write-Host "Windows binaries will be signed with the workflow-built Linux psign-tool and Azure Trusted Signing: $shouldSign"
 
       - name: Add Linux psign-tool to PATH
         if: steps.signing_mode.outputs.should_sign == 'true'
@@ -474,79 +478,54 @@ jobs:
           $toolDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $sourceToolPath --version
 
-      - name: Code sign Windows executables
+      - name: Azure login for Trusted Signing
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Code sign Windows artifacts with Trusted Signing
         if: steps.signing_mode.outputs.should_sign == 'true'
         shell: pwsh
         env:
-          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
-          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
-          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
-          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_PROFILE_NAME }}
+          TRUSTED_SIGNING_TIMESTAMP_SERVER: ${{ vars.TRUSTED_SIGNING_TIMESTAMP_SERVER || 'http://timestamp.acs.microsoft.com/' }}
         run: |
-          psign-tool --mode portable --verbose sign `
-            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
-            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
-            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
-            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            --timestamp-digest sha256 `
-            --digest sha256 `
-            --exit-codes azure `
-            "work/win-x64/psign-tool.exe"
+          $accessToken = az account get-access-token `
+            --scope https://codesigning.azure.net/.default `
+            --query accessToken `
+            --output tsv
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "psign-tool signing failed for win-x64 with exit code $LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) {
+            throw 'Failed to acquire a Trusted Signing data-plane access token.'
           }
 
-          psign-tool --mode portable --verbose sign `
-            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
-            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
-            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
-            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            --timestamp-digest sha256 `
-            --digest sha256 `
-            --exit-codes azure `
-            "work/win-arm64/psign-tool.exe"
+          $targets = @(
+            'work/win-x64/psign-tool.exe',
+            'work/win-arm64/psign-tool.exe',
+            'work/psign-core-win-x64/psign-core.dll',
+            'work/psign-core-win-arm64/psign-core.dll'
+          )
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "psign-tool signing failed for win-arm64 with exit code $LASTEXITCODE"
-          }
+          foreach ($target in $targets) {
+            psign-tool --mode portable --verbose sign `
+              --artifact-signing-endpoint "$env:TRUSTED_SIGNING_ENDPOINT" `
+              --artifact-signing-account-name "$env:TRUSTED_SIGNING_ACCOUNT_NAME" `
+              --artifact-signing-profile-name "$env:TRUSTED_SIGNING_PROFILE_NAME" `
+              --artifact-signing-access-token "$accessToken" `
+              --timestamp-url "$env:TRUSTED_SIGNING_TIMESTAMP_SERVER" `
+              --timestamp-digest sha256 `
+              --digest sha256 `
+              --exit-codes azure `
+              "$target"
 
-          psign-tool --mode portable --verbose sign `
-            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
-            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
-            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
-            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            --timestamp-digest sha256 `
-            --digest sha256 `
-            --exit-codes azure `
-            "work/psign-core-win-x64/psign-core.dll"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "psign-core signing failed for win-x64 with exit code $LASTEXITCODE"
-          }
-
-          psign-tool --mode portable --verbose sign `
-            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
-            --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
-            --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
-            --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
-            --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
-            --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
-            --timestamp-digest sha256 `
-            --digest sha256 `
-            --exit-codes azure `
-            "work/psign-core-win-arm64/psign-core.dll"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "psign-core signing failed for win-arm64 with exit code $LASTEXITCODE"
+            if ($LASTEXITCODE -ne 0) {
+              throw "psign-tool Trusted Signing failed for $target with exit code $LASTEXITCODE"
+            }
           }
 
       - name: Package Windows artifacts
@@ -712,11 +691,11 @@ jobs:
           $shouldSign = $hasSigningSecrets -and ((-not $dryRun) -or $signDryRun)
 
           if (-not $dryRun -and -not $hasSigningSecrets) {
-            throw 'Code signing secrets are required for non-dry-run release jobs.'
+            throw 'Azure Key Vault code signing secrets are required for non-dry-run PowerShell module release jobs.'
           }
 
           "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "PowerShell module payload will be signed: $shouldSign"
+          Write-Host "PowerShell module payload will be signed with workflow-built Devolutions.Psign and Azure Key Vault: $shouldSign"
 
       - name: Package PowerShell module
         shell: pwsh
