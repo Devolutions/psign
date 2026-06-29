@@ -30,7 +30,7 @@ repository = "https://github.com/Devolutions/psign"
 
 [package]
 name = "psign"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 description = "Rust port of the Windows SDK signtool.exe (Authenticode sign/verify/timestamp) with portable digest helpers."
 license.workspace = true

@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "psign"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "psign-authenticode-trust"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "authenticode",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "psign-azure-kv-rest"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "psign-codesigning-rest"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "psign-digest-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "psign-opc-sign"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "psign-portable-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "authenticode",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "psign-portable-ffi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "psign-portable-core",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "psign-sip-digest"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "authenticode",
