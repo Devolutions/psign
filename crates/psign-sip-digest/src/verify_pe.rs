@@ -12,6 +12,12 @@ pub struct PeDigestConsistencyResult {
     pub pkcs7_authenticode_entries: usize,
 }
 
+enum PeDigestConsistencyStatus {
+    NoCertificateTable,
+    NoPkcs7Entries,
+    Signed(PeDigestConsistencyResult),
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -21,12 +27,41 @@ fn hex_lower(bytes: &[u8]) -> String {
 pub fn verify_pe_authenticode_digest_consistency(
     bytes: &[u8],
 ) -> Result<PeDigestConsistencyResult> {
+    match verify_pe_authenticode_digest_consistency_status(bytes)? {
+        PeDigestConsistencyStatus::Signed(result) => Ok(result),
+        PeDigestConsistencyStatus::NoCertificateTable => {
+            Err(anyhow!("PE has no certificate table"))
+        }
+        PeDigestConsistencyStatus::NoPkcs7Entries => Err(anyhow!(
+            "no PKCS#7 Authenticode entries found in certificate table"
+        )),
+    }
+}
+
+/// Verify embedded PE Authenticode digest consistency when a PKCS#7 signature exists.
+///
+/// Returns `Ok(None)` for unsigned PE images (no certificate table, or no PKCS#7
+/// Authenticode rows) and returns an error for malformed or digest-mismatched
+/// existing signatures.
+pub fn verify_pe_authenticode_digest_consistency_if_signed(
+    bytes: &[u8],
+) -> Result<Option<PeDigestConsistencyResult>> {
+    match verify_pe_authenticode_digest_consistency_status(bytes)? {
+        PeDigestConsistencyStatus::Signed(result) => Ok(Some(result)),
+        PeDigestConsistencyStatus::NoCertificateTable
+        | PeDigestConsistencyStatus::NoPkcs7Entries => Ok(None),
+    }
+}
+
+fn verify_pe_authenticode_digest_consistency_status(
+    bytes: &[u8],
+) -> Result<PeDigestConsistencyStatus> {
     let parsed = ParsedPe::parse(bytes)?;
     let pe = parsed.as_pe_trait();
     let Some(iter) = AttributeCertificateIterator::new(pe)
         .map_err(|e| anyhow!("certificate table invalid: {e}"))?
     else {
-        return Err(anyhow!("PE has no certificate table"));
+        return Ok(PeDigestConsistencyStatus::NoCertificateTable);
     };
 
     let mut pkcs7_count = 0usize;
@@ -57,16 +92,16 @@ pub fn verify_pe_authenticode_digest_consistency(
     }
 
     if pkcs7_count == 0 {
-        return Err(anyhow!(
-            "no PKCS#7 Authenticode entries found in certificate table"
-        ));
+        return Ok(PeDigestConsistencyStatus::NoPkcs7Entries);
     }
 
-    Ok(PeDigestConsistencyResult {
-        recomputed_digest_hex: last_hex,
-        matched_attribute_certificate_index: last_idx,
-        pkcs7_authenticode_entries: pkcs7_count,
-    })
+    Ok(PeDigestConsistencyStatus::Signed(
+        PeDigestConsistencyResult {
+            recomputed_digest_hex: last_hex,
+            matched_attribute_certificate_index: last_idx,
+            pkcs7_authenticode_entries: pkcs7_count,
+        },
+    ))
 }
 
 /// Invoke `f(index, pkcs7_der)` for each `WIN_CERT_TYPE_PKCS_SIGNED_DATA` attribute certificate.

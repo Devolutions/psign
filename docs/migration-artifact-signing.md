@@ -110,7 +110,7 @@ psign-tool --mode portable sign \
   --max-degree-of-parallelism 4
 ```
 
-`--input-file-list` accepts one path or glob per line; blank lines and `#` comments are ignored. `--skip-signed` skips PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX files that already contain embedded signature material. `--continue-on-error` preserves per-file failure diagnostics and returns a non-zero batch exit code when any target fails.
+`--input-file-list` accepts one path or glob per line; blank lines and `#` comments are ignored. `--skip-signed` skips PE/WinMD files only when existing Authenticode digest verification succeeds, and also skips CAB, MSI/MSP, and flat MSIX/AppX files that already contain embedded signature material. `--continue-on-error` preserves per-file failure diagnostics and returns a non-zero batch exit code when any target fails.
 
 ## Flag mapping (Microsoft sample → psign-tool)
 
