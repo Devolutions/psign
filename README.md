@@ -177,7 +177,7 @@ Set-PsignSignature -LiteralPath .\tool.exe -Sha1 $thumbprint -CertStoreDirectory
 Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate
 ```
 
-`Set-PsignSignature` and `Get-PsignSignature` avoid Win32 SIPs and support PE, CAB, MSI, ZIP Authenticode, MSIX/AppX, PowerShell scripts, whole PowerShell module directories (`.ps1`, `.psm1`, `.psd1`), content-mode signing, RFC3161 timestamping, chain embedding, portable cert-store thumbprint selection, and explicit-anchor trust verification. Their output remains portable-specific but exposes built-in-compatible `SignatureStatus` / `SignatureType` properties for migration from `Get-AuthenticodeSignature`. See [`docs/portable-powershell-module.md`](docs/portable-powershell-module.md) and [`docs/portable-core-ffi.md`](docs/portable-core-ffi.md).
+`Set-PsignSignature` and `Get-PsignSignature` avoid Win32 SIPs and support PE, CAB, MSI, ZIP Authenticode, MSIX/AppX, PowerShell scripts, whole PowerShell module directories (`.ps1`, `.psm1`, `.psd1`), content-mode signing, RFC3161 timestamping, chain embedding, `-SkipSigned` for already-signed PE/WinMD files, portable cert-store thumbprint selection, and explicit-anchor trust verification. Their output remains portable-specific but exposes built-in-compatible `SignatureStatus` / `SignatureType` properties for migration from `Get-AuthenticodeSignature`. See [`docs/portable-powershell-module.md`](docs/portable-powershell-module.md) and [`docs/portable-core-ffi.md`](docs/portable-core-ffi.md).
 
 ## Portable certificate store
 

@@ -22,7 +22,7 @@ Import-Module ./PowerShell/Devolutions.Psign/Devolutions.Psign.psd1
 | `Protect-PsignModule` | Batch-sign all policy-checked files in a module |
 | `Unprotect-PsignSignature` | Strip script signature blocks and clear PE signatures |
 
-`Set-PsignSignature -AppendSignature` appends PE Authenticode signatures; without it, PE signing replaces existing signatures. Signature inspection exposes decoded CMS details through the `SignedCms` property when PKCS#7 bytes are available.
+`Set-PsignSignature -AppendSignature` appends PE Authenticode signatures; without it, PE signing replaces existing signatures. Use `-SkipSigned` to leave PE/WinMD files with an intact embedded Authenticode signature unchanged. Signature inspection exposes decoded CMS details through the `SignedCms` property when PKCS#7 bytes are available.
 
 ## Quick Start
 

@@ -18,4 +18,7 @@ internal sealed class PortableSignResponse
 
     [JsonPropertyName("signature")]
     public PortableSignature Signature { get; init; } = new();
+
+    [JsonPropertyName("skipped")]
+    public bool Skipped { get; init; }
 }
