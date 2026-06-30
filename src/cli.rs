@@ -938,7 +938,7 @@ pub struct SignArgs {
     /// Continue signing remaining files when one fails (`-coe`).
     #[arg(long = "continue-on-error", visible_alias = "coe")]
     pub continue_on_error: bool,
-    /// Skip files that already appear signed (PE certificate directory); AzureSignTool `-s` — native `/s` remains the certificate store name short flag.
+    /// Skip files that already have a valid embedded signature; AzureSignTool `-s` — native `/s` remains the certificate store name short flag.
     #[arg(long = "skip-signed")]
     pub skip_signed: bool,
     /// Cap concurrent signing threads for multi-file batches (`-mdop`). `1` forces sequential signing.

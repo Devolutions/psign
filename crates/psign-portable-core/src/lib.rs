@@ -23,6 +23,7 @@ use psign_authenticode_trust::{
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
 use psign_sip_digest::verify_pe::{
     pe_nth_pkcs7_signed_data_der, verify_pe_authenticode_digest_consistency,
+    verify_pe_authenticode_digest_consistency_if_signed,
 };
 use psign_sip_digest::{
     cab_digest, catalog_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script,
@@ -279,6 +280,8 @@ pub struct PortableSignRequest {
     #[serde(default)]
     pub append_signature: bool,
     #[serde(default)]
+    pub skip_signed: bool,
+    #[serde(default)]
     pub output_path: Option<PathBuf>,
     #[serde(default)]
     pub hash_algorithm: PortableDigestAlgorithm,
@@ -349,6 +352,7 @@ impl Default for PortableSignRequest {
         Self {
             path: PathBuf::new(),
             append_signature: false,
+            skip_signed: false,
             output_path: None,
             hash_algorithm: PortableDigestAlgorithm::default(),
             certificate_path: None,
@@ -455,6 +459,10 @@ fn is_zero(value: &usize) -> bool {
     *value == 0
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortableSignResponse {
     pub schema_version: u32,
@@ -462,6 +470,8 @@ pub struct PortableSignResponse {
     pub output_path: PathBuf,
     pub format: PortableFileFormat,
     pub signature: PortableSignatureResponse,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -519,17 +529,44 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         .clone()
         .unwrap_or_else(|| request.path.clone());
 
-    match format {
-        PortableFileFormat::Pe => sign_pe(&request, &output_path),
-        PortableFileFormat::Cab => sign_cab(&request, &output_path),
-        PortableFileFormat::Msi => sign_msi(&request, &output_path),
-        PortableFileFormat::Msix => sign_msix(&request, &output_path),
-        PortableFileFormat::NuGet => sign_nuget(&request, &output_path),
-        PortableFileFormat::Vsix => sign_vsix(&request, &output_path),
-        PortableFileFormat::ClickOnceManifest => sign_clickonce_manifest(&request, &output_path),
-        PortableFileFormat::AppInstaller => sign_appinstaller(&request, &output_path),
-        PortableFileFormat::Zip => sign_zip(&request, &output_path),
-        PortableFileFormat::PowerShellScript => sign_script(&request, &output_path),
+    let skipped = match format {
+        PortableFileFormat::Pe => sign_pe(&request, &output_path)?,
+        PortableFileFormat::Cab => {
+            sign_cab(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::Msi => {
+            sign_msi(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::Msix => {
+            sign_msix(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::NuGet => {
+            sign_nuget(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::Vsix => {
+            sign_vsix(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::ClickOnceManifest => {
+            sign_clickonce_manifest(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::AppInstaller => {
+            sign_appinstaller(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::Zip => {
+            sign_zip(&request, &output_path)?;
+            false
+        }
+        PortableFileFormat::PowerShellScript => {
+            sign_script(&request, &output_path)?;
+            false
+        }
         PortableFileFormat::WshScript => bail!("portable WSH script signing is not supported yet"),
         PortableFileFormat::Catalog => bail!(
             "portable catalog signing requires an explicit subject list and is not available through PortableSignRequest yet"
@@ -540,7 +577,7 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
                 request.path.display()
             )
         }
-    }?;
+    };
 
     let inspect_request = PortableGetSignatureRequest::path_only(output_path.clone());
     let signature = portable_get_signature(inspect_request)?;
@@ -551,6 +588,7 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         output_path,
         format,
         signature,
+        skipped,
     })
 }
 
@@ -1619,9 +1657,31 @@ fn authenticode_digest_from_vsix_algorithm(
     }
 }
 
-fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<bool> {
     let mut pe =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
+    if request.skip_signed
+        && verify_pe_authenticode_digest_consistency_if_signed(&pe)
+            .with_context(|| {
+                format!(
+                    "check existing PE/WinMD Authenticode signature for {}",
+                    request.path.display()
+                )
+            })?
+            .is_some()
+    {
+        if output_path != request.path.as_path() {
+            std::fs::copy(&request.path, output_path).with_context(|| {
+                format!(
+                    "copy {} to {}",
+                    request.path.display(),
+                    output_path.display()
+                )
+            })?;
+        }
+        return Ok(true);
+    }
+
     if !request.append_signature {
         pe = pe_embed::pe_remove_authenticode_certificates(pe)
             .with_context(|| {
@@ -1648,7 +1708,9 @@ fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let signed = pe_embed::pe_append_authenticode_pkcs7_certificate(pe, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))?;
-    std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
+    std::fs::write(output_path, signed)
+        .with_context(|| format!("write {}", output_path.display()))?;
+    Ok(false)
 }
 
 fn clear_pe_signature(
@@ -3601,6 +3663,149 @@ mod tests {
     }
 
     #[test]
+    fn pe_sign_skip_signed_signs_unsigned_and_skips_valid_pe() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-pe-skip-signed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let unsigned_source =
+            PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.efi");
+        let signed_source =
+            PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi");
+        let unsigned = temp_dir.join("tiny32.unsigned.efi");
+        let already_signed = temp_dir.join("tiny32.already-signed.efi");
+        std::fs::copy(&unsigned_source, &unsigned).expect("copy unsigned PE");
+        std::fs::copy(&signed_source, &already_signed).expect("copy signed PE");
+
+        let signed_response = portable_sign(PortableSignRequest {
+            path: unsigned.clone(),
+            skip_signed: true,
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("sign unsigned PE with skip-signed");
+        assert!(!signed_response.skipped);
+        assert_eq!(signed_response.signature.signature_count, 1);
+
+        let before = std::fs::read(&already_signed).expect("read already signed PE before skip");
+        let skipped_response = portable_sign(PortableSignRequest {
+            path: already_signed.clone(),
+            skip_signed: true,
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("skip already signed PE");
+        let after = std::fs::read(&already_signed).expect("read already signed PE after skip");
+        assert!(skipped_response.skipped);
+        assert_eq!(before, after);
+        assert_eq!(skipped_response.signature.signature_count, 1);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn pe_sign_skip_signed_copies_valid_pe_to_output_path() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-pe-skip-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let signed_source =
+            PathBuf::from("../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi");
+        let output = temp_dir.join("tiny32.output.efi");
+
+        let skipped_response = portable_sign(PortableSignRequest {
+            path: signed_source.clone(),
+            output_path: Some(output.clone()),
+            skip_signed: true,
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("copy skipped PE to output path");
+
+        assert!(skipped_response.skipped);
+        assert_eq!(
+            std::fs::read(&signed_source).expect("read signed source"),
+            std::fs::read(&output).expect("read copied output")
+        );
+        assert_eq!(skipped_response.signature.signature_count, 1);
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn pe_sign_skip_signed_rejects_corrupt_existing_signature() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-pe-skip-corrupt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let target = temp_dir.join("tiny32.corrupt-signed.efi");
+        let mut corrupt =
+            std::fs::read("../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi")
+                .expect("read signed PE");
+        tamper_hashed_pe_byte(&mut corrupt);
+        verify_pe_authenticode_digest_consistency(&corrupt)
+            .expect_err("tampered PE should fail digest verification");
+        std::fs::write(&target, &corrupt).expect("write corrupt signed PE");
+
+        let err = portable_sign(PortableSignRequest {
+            path: target.clone(),
+            skip_signed: true,
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect_err("corrupt signed PE should not be skipped");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("check existing PE/WinMD Authenticode signature"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("mismatch"), "unexpected error: {msg}");
+        assert_eq!(
+            std::fs::read(&target).expect("read corrupt PE after failed skip"),
+            corrupt
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    fn tamper_hashed_pe_byte(bytes: &mut [u8]) {
+        let ranges =
+            pe_digest::pe_authenticode_digest_file_ranges(bytes).expect("PE digest file ranges");
+        let offset = ranges
+            .into_iter()
+            .rev()
+            .find(|range| !range.is_empty())
+            .expect("non-empty PE digest range")
+            .start;
+        bytes[offset] ^= 0x01;
+    }
+
+    #[test]
     fn rejects_mixed_azure_key_vault_and_local_material() {
         let request = PortableSignRequest {
             path: PathBuf::from("test.dll"),
@@ -3669,6 +3874,7 @@ mod tests {
         PortableSignRequest {
             path: PathBuf::from("test.dll"),
             append_signature: false,
+            skip_signed: false,
             output_path: None,
             hash_algorithm: PortableDigestAlgorithm::Sha256,
             certificate_path: None,

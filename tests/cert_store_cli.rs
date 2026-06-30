@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use base64::Engine as _;
 use predicates::prelude::*;
-use psign_sip_digest::{pkcs7, verify_pe};
+use psign_sip_digest::{pe_digest, pkcs7, verify_pe};
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -511,6 +511,109 @@ fn portable_sign_sha1_replaces_existing_signature_by_default_and_appends_with_fl
 }
 
 #[test]
+fn portable_sign_sha1_skip_signed_signs_unsigned_and_skips_valid_pe() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store_dir = temp.path().join("cert-store");
+    let cert_path = temp.path().join("cert.der");
+    let key_path = temp.path().join("cert.key");
+    let unsigned = temp.path().join("tiny32.unsigned.efi");
+    let already_signed = temp.path().join("tiny32.already-signed.efi");
+    let fixture = test_cert("psign portable skip signed test");
+    let thumbprint = sha1_upper(&fixture.der);
+    std::fs::write(&cert_path, &fixture.der).expect("write cert");
+    std::fs::write(&key_path, &fixture.key_pem).expect("write key");
+    std::fs::copy(tiny32_unsigned_fixture(), &unsigned).expect("copy unsigned PE");
+    std::fs::copy(tiny32_signed_fixture(), &already_signed).expect("copy signed PE");
+
+    psign_tool()
+        .args(["cert-store", "import", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--key"])
+        .arg(&key_path)
+        .arg(&cert_path)
+        .assert()
+        .success();
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--sha1", &thumbprint, "--fd", "SHA256", "--skip-signed"])
+        .arg(&unsigned)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let unsigned_after = std::fs::read(&unsigned).expect("read signed formerly unsigned PE");
+    verify_pe::verify_pe_authenticode_digest_consistency(&unsigned_after)
+        .expect("PE digest consistency");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&unsigned_after)
+            .expect("signed PE entry count"),
+        1
+    );
+
+    let before = std::fs::read(&already_signed).expect("read already signed PE before skip");
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--sha1", &thumbprint, "--fd", "SHA256", "--skip-signed"])
+        .arg(&already_signed)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped (already signed):"));
+    let after = std::fs::read(&already_signed).expect("read already signed PE after skip");
+    assert_eq!(before, after);
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&after).expect("skipped PE entry count"),
+        1
+    );
+}
+
+#[test]
+fn portable_sign_sha1_skip_signed_rejects_corrupt_existing_pe_signature() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store_dir = temp.path().join("cert-store");
+    let cert_path = temp.path().join("cert.der");
+    let key_path = temp.path().join("cert.key");
+    let target = temp.path().join("tiny32.corrupt-signed.efi");
+    let fixture = test_cert("psign portable skip corrupt test");
+    let thumbprint = sha1_upper(&fixture.der);
+    std::fs::write(&cert_path, &fixture.der).expect("write cert");
+    std::fs::write(&key_path, &fixture.key_pem).expect("write key");
+
+    let mut corrupt = std::fs::read(tiny32_signed_fixture()).expect("read signed PE fixture");
+    tamper_hashed_pe_byte(&mut corrupt);
+    verify_pe::verify_pe_authenticode_digest_consistency(&corrupt)
+        .expect_err("tampered PE should fail digest verification");
+    std::fs::write(&target, &corrupt).expect("write corrupt signed PE");
+
+    psign_tool()
+        .args(["cert-store", "import", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--key"])
+        .arg(&key_path)
+        .arg(&cert_path)
+        .assert()
+        .success();
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--sha1", &thumbprint, "--fd", "SHA256", "--skip-signed"])
+        .arg(&target)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "check existing PE/WinMD Authenticode signature",
+        ))
+        .stderr(predicate::str::contains("mismatch"));
+
+    assert_eq!(
+        std::fs::read(&target).expect("read corrupt PE after failed skip-signed"),
+        corrupt
+    );
+}
+
+#[test]
 fn portable_sign_sha1_fails_when_private_key_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store_dir = temp.path().join("cert-store");
@@ -536,6 +639,18 @@ fn portable_sign_sha1_fails_when_private_key_missing() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("private key"));
+}
+
+fn tamper_hashed_pe_byte(bytes: &mut [u8]) {
+    let ranges =
+        pe_digest::pe_authenticode_digest_file_ranges(bytes).expect("PE digest file ranges");
+    let offset = ranges
+        .into_iter()
+        .rev()
+        .find(|range| !range.is_empty())
+        .expect("non-empty PE digest range")
+        .start;
+    bytes[offset] ^= 0x01;
 }
 
 #[test]

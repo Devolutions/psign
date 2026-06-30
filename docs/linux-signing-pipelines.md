@@ -135,7 +135,7 @@ psign-tool --mode portable sign \
   --max-degree-of-parallelism 4
 ```
 
-The file list accepts one path or glob per line; blank lines and `#` comments are ignored. Skip detection currently covers PE/WinMD certificate tables, CAB signatures, MSI/MSP `DigitalSignature` streams, and flat MSIX/AppX `AppxSignature.p7x` packages.
+The file list accepts one path or glob per line; blank lines and `#` comments are ignored. Skip detection verifies PE/WinMD Authenticode digests before skipping, and also covers CAB signatures, MSI/MSP `DigitalSignature` streams, and flat MSIX/AppX `AppxSignature.p7x` packages.
 
 ## 1.4 Package-native helper workflows
 

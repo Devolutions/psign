@@ -44,7 +44,7 @@ psign-tool.exe sign ^
 | `-coe` | `--continue-on-error` |
 | `-mdop` | `--max-degree-of-parallelism` |
 
-**`-s` (skip signed)** in AzureSignTool conflicts with native **`/s` (certificate store name)** in this tool. Use **`--skip-signed`** instead.
+**`-s` (skip signed)** in AzureSignTool conflicts with native **`/s` (certificate store name)** in this tool. Use **`--skip-signed`** instead. In `--mode portable sign`, PE/WinMD targets are skipped only when the embedded Authenticode digest verifies; unsigned files still sign normally, and corrupt existing signatures fail.
 
 ### Authentication notes
 

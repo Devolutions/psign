@@ -91,6 +91,9 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
     [Parameter]
     public SwitchParameter AppendSignature { get; set; }
 
+    [Parameter(HelpMessage = "Skip PE/WinMD files that already contain a valid Authenticode signature.")]
+    public SwitchParameter SkipSigned { get; set; }
+
     // Azure Key Vault parameters
     [Parameter]
     public string? AzureKeyVaultUrl { get; set; }
@@ -214,6 +217,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
             {
                 Path = tempPath,
                 AppendSignature = AppendSignature.IsPresent,
+                SkipSigned = SkipSigned.IsPresent,
                 HashAlgorithm = HashAlgorithm,
                 CertificatePath = CertificatePath is null
                     ? null
@@ -247,6 +251,10 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                 ArtifactSigningClientId = ArtifactSigningClientId,
                 ArtifactSigningClientSecret = ArtifactSigningClientSecret,
             });
+            if (response.Skipped)
+            {
+                WriteVerbose($"Skipped already signed content '{sourcePathOrExtension}'.");
+            }
             response.Signature.SourcePathOrExtension = sourcePathOrExtension;
             response.Signature.Content = File.ReadAllBytes(tempPath);
             WriteObject(response.Signature);
@@ -290,6 +298,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                 {
                     Path = path,
                     AppendSignature = AppendSignature.IsPresent,
+                    SkipSigned = SkipSigned.IsPresent,
                     OutputPath = outputPath,
                     HashAlgorithm = HashAlgorithm,
                     CertificatePath = CertificatePath is null
@@ -324,6 +333,10 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                     ArtifactSigningClientId = ArtifactSigningClientId,
                     ArtifactSigningClientSecret = ArtifactSigningClientSecret,
                 });
+                if (response.Skipped)
+                {
+                    WriteVerbose($"Skipped already signed file '{path}'.");
+                }
                 WriteObject(response.Signature);
             }
             finally

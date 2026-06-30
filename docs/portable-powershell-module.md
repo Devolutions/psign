@@ -31,7 +31,7 @@ The P/Invoke ABI also accepts in-memory DER certificate and PKCS#8 private-key m
 
 The portable cert store follows the same layout as `psign-tool cert-store`: `<base>\<scope>\<store>\<SHA1>.der` plus `<SHA1>.key`, where scope is `CurrentUser` or `LocalMachine` and the private key is unencrypted PKCS#8 PEM. `-Thumbprint` has `-Sha1` and `-PortableStoreThumbprint` aliases. If `-CertStoreDirectory` is omitted, the module uses `PSIGN_CERT_STORE` and then `~\.psign\cert-store`.
 
-`Set-PsignSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`.
+`Set-PsignSignature` supports `-IncludeChain Signer|NotRoot|All` (default `NotRoot`), optional `-ChainCertificatePath`, `-TimestampServer`, and `-TimestampHashAlgorithm Sha1|Sha256|Sha384|Sha512`. `-SkipSigned` leaves PE/WinMD files with an intact embedded Authenticode signature unchanged, while unsigned files still sign normally and corrupt existing signatures fail instead of being silently skipped.
 
 Cloud signing is available through Azure Key Vault parameters (`-AzureKeyVaultUrl`, `-AzureKeyVaultCertificate`, and access token, managed identity, or client credentials) or Azure Artifact Signing / Trusted Signing parameters (`-ArtifactSigningEndpoint`, account/profile, and access token, managed identity, or client credentials). The portable module native library is built with both cloud-signing feature sets.
 

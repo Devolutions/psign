@@ -88,4 +88,33 @@ Describe 'Psign native signature features' {
         $after.SignatureCount | Should -Be 1
         $after.SignedCms | Should -Not -BeNullOrEmpty
     }
+
+    It 'signs unsigned PE files through Set-PsignSignature -SkipSigned' {
+        $source = Join-Path $script:RepoRoot 'tests\fixtures\pe-authenticode-upstream\tiny32.efi'
+        $pfxPath = Join-Path $script:RepoRoot 'tests\fixtures\devolutions-authenticode\authenticode-test-cert.pfx'
+        $path = Join-Path $script:TempRoot 'tiny32.skip-signed-unsigned.efi'
+        Copy-Item -LiteralPath $source -Destination $path
+
+        $signed = Set-PsignSignature -LiteralPath $path -PfxPath $pfxPath -Password (ConvertTo-SecureString 'CodeSign123!' -AsPlainText -Force) -SkipSigned
+
+        $signed.Status | Should -Be ([System.Management.Automation.SignatureStatus]::Valid)
+        $after = Get-PsignSignature -LiteralPath $path -SkipTrust
+        $after.SignatureCount | Should -Be 1
+    }
+
+    It 'skips already signed PE files through Set-PsignSignature -SkipSigned' {
+        $source = Join-Path $script:RepoRoot 'tests\fixtures\pe-authenticode-upstream\tiny32.signed.efi'
+        $pfxPath = Join-Path $script:RepoRoot 'tests\fixtures\devolutions-authenticode\authenticode-test-cert.pfx'
+        $path = Join-Path $script:TempRoot 'tiny32.skip-signed-existing.efi'
+        Copy-Item -LiteralPath $source -Destination $path
+
+        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+        $signed = Set-PsignSignature -LiteralPath $path -PfxPath $pfxPath -Password (ConvertTo-SecureString 'CodeSign123!' -AsPlainText -Force) -SkipSigned
+        $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+
+        $signed.Status | Should -Be ([System.Management.Automation.SignatureStatus]::Valid)
+        $after | Should -Be $before
+        $signature = Get-PsignSignature -LiteralPath $path -SkipTrust
+        $signature.SignatureCount | Should -Be 1
+    }
 }

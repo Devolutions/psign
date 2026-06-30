@@ -25,6 +25,11 @@ struct ArtifactSigningMetadataDoc {
     ExcludeCredentials: Option<Vec<String>>,
 }
 
+enum SignOneTargetResult {
+    Signed(Vec<u8>),
+    SkippedAlreadySigned,
+}
+
 pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput> {
     if artifact_signing_requested(args) && azure_key_vault_requested(args) {
         return Err(anyhow!(
@@ -57,17 +62,24 @@ pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput>
         if idx > 0 {
             combined.push('\n');
         }
-        let signed = sign_one_target(target, &identity, args.append_signature)
+        let result = sign_one_target(target, &identity, args.append_signature, args.skip_signed)
             .with_context(|| format!("portable sign '{}'", target.display()))?;
-        std::fs::write(target, signed)
-            .with_context(|| format!("write signed file '{}'", target.display()))?;
-        combined.push_str(&format!(
-            "Signed: {}\nthumbprint_sha1={}\nstore={}\\{}\n",
-            target.display(),
-            identity.thumbprint_sha1,
-            identity.scope,
-            identity.store_name
-        ));
+        match result {
+            SignOneTargetResult::Signed(signed) => {
+                std::fs::write(target, signed)
+                    .with_context(|| format!("write signed file '{}'", target.display()))?;
+                combined.push_str(&format!(
+                    "Signed: {}\nthumbprint_sha1={}\nstore={}\\{}\n",
+                    target.display(),
+                    identity.thumbprint_sha1,
+                    identity.scope,
+                    identity.store_name
+                ));
+            }
+            SignOneTargetResult::SkippedAlreadySigned => {
+                combined.push_str(&format!("Skipped (already signed): {}\n", target.display()));
+            }
+        }
     }
     Ok(CommandOutput::with_exit(combined, success_exit_code(args)))
 }
@@ -162,6 +174,10 @@ fn sign_file_azure_key_vault(args: &SignArgs) -> Result<CommandOutput> {
     for (idx, target) in args.files.iter().enumerate() {
         if idx > 0 {
             combined.push('\n');
+        }
+        if args.skip_signed && target_has_valid_existing_pe_signature(target)? {
+            combined.push_str(&format!("Skipped (already signed): {}\n", target.display()));
+            continue;
         }
         sign_one_target_azure_key_vault(target, args)
             .with_context(|| format!("portable Azure Key Vault sign '{}'", target.display()))?;
@@ -325,7 +341,7 @@ fn expand_sign_targets(args: &SignArgs) -> Result<Vec<PathBuf>> {
 }
 
 fn try_sign_one_artifact_signing(target: &Path, args: &SignArgs) -> Result<String> {
-    if args.skip_signed && target_appears_signed(target) {
+    if args.skip_signed && target_should_skip_signed(target)? {
         return Ok(format!("Skipped (already signed): {}\n", target.display()));
     }
     sign_one_target_artifact_signing(target, args)
@@ -339,28 +355,24 @@ fn try_sign_one_artifact_signing(target: &Path, args: &SignArgs) -> Result<Strin
     ))
 }
 
-fn target_appears_signed(target: &Path) -> bool {
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let Ok(bytes) = std::fs::read(target) else {
-        return false;
-    };
+fn target_should_skip_signed(target: &Path) -> Result<bool> {
+    let ext = target_extension_lower(target);
     match ext.as_str() {
-        "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd" => {
-            psign_sip_digest::verify_pe::pe_pkcs7_signed_data_entry_count(&bytes)
-                .is_ok_and(|count| count > 0)
+        ext if is_pe_winmd_extension(ext) => target_has_valid_existing_pe_signature(target),
+        "cab" => {
+            let bytes =
+                std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+            Ok(psign_sip_digest::cab_digest::cab_signature_pkcs7_der(&bytes).is_ok())
         }
-        "cab" => psign_sip_digest::cab_digest::cab_signature_pkcs7_der(&bytes).is_ok(),
         "msi" | "msp" => {
-            psign_sip_digest::msi_digest::msi_digital_signature_pkcs7_der(&bytes).is_ok()
+            let bytes =
+                std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+            Ok(psign_sip_digest::msi_digest::msi_digital_signature_pkcs7_der(&bytes).is_ok())
         }
         "appx" | "msix" => {
-            psign_sip_digest::msix_digest::verify_msix_digest_consistency(target).is_ok()
+            Ok(psign_sip_digest::msix_digest::verify_msix_digest_consistency(target).is_ok())
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
@@ -445,7 +457,6 @@ fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
     reject_artifact_signing_options(args)?;
     reject_path_option("--input-file-list", &args.sign_input_file_list)?;
     reject_bool_option("--continue-on-error", args.continue_on_error)?;
-    reject_bool_option("--skip-signed", args.skip_signed)?;
     reject_option(
         "--max-degree-of-parallelism",
         args.max_degree_parallelism.is_some(),
@@ -543,16 +554,10 @@ fn sign_one_target(
     target: &Path,
     identity: &crate::cert_store::SigningIdentity,
     append_signature: bool,
-) -> Result<Vec<u8>> {
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if !matches!(
-        ext.as_str(),
-        "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd"
-    ) {
+    skip_signed: bool,
+) -> Result<SignOneTargetResult> {
+    let ext = target_extension_lower(target);
+    if !is_pe_winmd_extension(&ext) {
         return Err(anyhow!(
             "portable thumbprint signing is currently implemented only for PE/WinMD targets; got {}",
             target.display()
@@ -560,6 +565,18 @@ fn sign_one_target(
     }
     let mut bytes =
         std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+    if skip_signed
+        && psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency_if_signed(&bytes)
+            .with_context(|| {
+                format!(
+                    "check existing PE/WinMD Authenticode signature on '{}'",
+                    target.display()
+                )
+            })?
+            .is_some()
+    {
+        return Ok(SignOneTargetResult::SkippedAlreadySigned);
+    }
     if !append_signature {
         bytes = psign_sip_digest::pe_embed::pe_remove_authenticode_certificates(bytes)
             .with_context(|| {
@@ -575,18 +592,12 @@ fn sign_one_target(
         &identity.cert_der,
         &identity.key_pem,
     )
+    .map(SignOneTargetResult::Signed)
 }
 
 fn sign_one_target_azure_key_vault(target: &Path, args: &SignArgs) -> Result<()> {
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if !matches!(
-        ext.as_str(),
-        "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd"
-    ) {
+    let ext = target_extension_lower(target);
+    if !is_pe_winmd_extension(&ext) {
         return Err(anyhow!(
             "portable Azure Key Vault signing is currently implemented only for PE/WinMD targets; got {}",
             target.display()
@@ -611,16 +622,10 @@ fn sign_one_target_azure_key_vault(target: &Path, args: &SignArgs) -> Result<()>
 }
 
 fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()> {
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
+    let ext = target_extension_lower(target);
     let tmp = temporary_output_path(target);
     let result = match ext.as_str() {
-        "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd" => {
-            run_portable_sign_pe_artifact_signing(target, &tmp, args)
-        }
+        ext if is_pe_winmd_extension(ext) => run_portable_sign_pe_artifact_signing(target, &tmp, args),
         _ if args.append_signature => Err(anyhow!(
             "--as/--append-signature is only supported for portable PE/WinMD signing"
         )),
@@ -648,6 +653,36 @@ fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+fn target_extension_lower(target: &Path) -> String {
+    target
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
+fn is_pe_winmd_extension(ext: &str) -> bool {
+    matches!(ext, "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd")
+}
+
+fn target_has_valid_existing_pe_signature(target: &Path) -> Result<bool> {
+    let ext = target_extension_lower(target);
+    if !is_pe_winmd_extension(&ext) {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
+    Ok(
+        psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency_if_signed(&bytes)
+            .with_context(|| {
+                format!(
+                    "check existing PE/WinMD Authenticode signature on '{}'",
+                    target.display()
+                )
+            })?
+            .is_some(),
+    )
 }
 
 fn run_portable_sign_pe_azure_key_vault(
@@ -1343,7 +1378,7 @@ fn batch_exit_code(exit_style: SignExitCodes, successes: usize, failures: usize)
 fn reject_option(name: &str, present: bool) -> Result<()> {
     if present {
         return Err(anyhow!(
-            "portable sign does not support {name}; supported subsets are local store PE/WinMD signing (--sha1, --store/--s, --machine-store/--sm, --cert-store-dir, --fd SHA256), Azure Key Vault PE/WinMD signing (--azure-key-vault-*, --fd SHA256/SHA384/SHA512), and Azure Artifact Signing PE/WinMD signing (--artifact-signing-* or --dmdf)"
+            "portable sign does not support {name}; supported subsets are local store PE/WinMD signing (--sha1, --store/--s, --machine-store/--sm, --cert-store-dir, --fd SHA256, --skip-signed), Azure Key Vault PE/WinMD signing (--azure-key-vault-*, --fd SHA256/SHA384/SHA512, --skip-signed), and Azure Artifact Signing PE/WinMD signing (--artifact-signing-* or --dmdf, --skip-signed)"
         ));
     }
     Ok(())

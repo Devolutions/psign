@@ -46,6 +46,9 @@ internal sealed class PortableSignRequest
     [JsonPropertyName("append_signature")]
     public bool AppendSignature { get; init; }
 
+    [JsonPropertyName("skip_signed")]
+    public bool SkipSigned { get; init; }
+
     [JsonPropertyName("output_path")]
     public string? OutputPath { get; init; }
 

@@ -4738,6 +4738,7 @@ fn mode_portable_sign_uses_azure_key_vault_for_pe() {
         .arg("sign")
         .arg("--digest")
         .arg("sha256")
+        .arg("--skip-signed")
         .arg("--azure-key-vault-url")
         .arg(&url)
         .arg("--azure-key-vault-certificate")
@@ -4754,6 +4755,40 @@ fn mode_portable_sign_uses_azure_key_vault_for_pe() {
     let mut verify = portable_cmd();
     verify.arg("verify-pe").arg(&pe_path);
     verify.assert().success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn mode_portable_sign_azure_key_vault_skip_signed_skips_valid_pe_without_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir.path().join("tiny32.kv-mode-portable-skipped.exe");
+    std::fs::copy(tiny32_fixture(), &pe_path).expect("copy signed PE");
+    let before = std::fs::read(&pe_path).expect("read signed PE before skip");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--skip-signed")
+        .arg("--azure-key-vault-url")
+        .arg("http://127.0.0.1:1")
+        .arg("--azure-key-vault-certificate")
+        .arg("test-cert")
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&pe_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped (already signed):"));
+
+    let after = std::fs::read(&pe_path).expect("read signed PE after skip");
+    assert_eq!(before, after);
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&after).expect("skipped PE entry count"),
+        1
+    );
 }
 
 #[cfg(all(
@@ -4775,6 +4810,7 @@ fn mode_portable_sign_uses_azure_key_vault_and_rfc3161_timestamp_for_pe() {
         .arg("sign")
         .arg("--digest")
         .arg("sha256")
+        .arg("--skip-signed")
         .arg("--timestamp-url")
         .arg(&timestamp_url)
         .arg("--timestamp-digest")
@@ -5640,6 +5676,7 @@ fn mode_portable_sign_uses_artifact_signing_metadata_and_rfc3161_timestamp_for_p
         .arg("sign")
         .arg("--digest")
         .arg("sha256")
+        .arg("--skip-signed")
         .arg("--timestamp-url")
         .arg(&timestamp_url)
         .arg("--timestamp-digest")
@@ -5670,6 +5707,42 @@ fn mode_portable_sign_uses_artifact_signing_metadata_and_rfc3161_timestamp_for_p
         .assert()
         .success()
         .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_skip_signed_skips_valid_pe_without_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let pe_path = dir.path().join("tiny32.artifact-mode-portable-skipped.exe");
+    std::fs::copy(tiny32_fixture(), &pe_path).expect("copy signed PE");
+    let before = std::fs::read(&pe_path).expect("read signed PE before skip");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--skip-signed")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint-base-url")
+        .arg("http://127.0.0.1:1")
+        .arg(&pe_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped (already signed):"));
+
+    let after = std::fs::read(&pe_path).expect("read signed PE after skip");
+    assert_eq!(before, after);
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&after).expect("skipped PE entry count"),
+        1
+    );
 }
 
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
