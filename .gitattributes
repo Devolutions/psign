@@ -1,4 +1,5 @@
 # Fixture bytes are test inputs; do not let Git normalize line endings or encodings.
+tests/fixtures/msix-minimal/AppxManifest.xml -text
 tests/fixtures/*.js -text
 tests/fixtures/*.ps1 -text
 tests/fixtures/*.psd1 -text
