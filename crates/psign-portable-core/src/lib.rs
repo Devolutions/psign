@@ -311,6 +311,8 @@ pub struct PortableSignRequest {
     #[serde(default)]
     pub azure_key_vault_certificate: Option<String>,
     #[serde(default)]
+    pub azure_key_vault_certificate_version: Option<String>,
+    #[serde(default)]
     pub azure_key_vault_access_token: Option<String>,
     #[serde(default)]
     pub azure_key_vault_client_id: Option<String>,
@@ -320,6 +322,8 @@ pub struct PortableSignRequest {
     pub azure_key_vault_tenant_id: Option<String>,
     #[serde(default)]
     pub azure_key_vault_managed_identity: Option<bool>,
+    #[serde(default)]
+    pub azure_authority: Option<String>,
     // Azure Artifact Signing / Trusted Signing
     #[serde(default)]
     pub artifact_signing_endpoint: Option<String>,
@@ -367,11 +371,13 @@ impl Default for PortableSignRequest {
             timestamp_hash_algorithm: None,
             azure_key_vault_url: None,
             azure_key_vault_certificate: None,
+            azure_key_vault_certificate_version: None,
             azure_key_vault_access_token: None,
             azure_key_vault_client_id: None,
             azure_key_vault_client_secret: None,
             azure_key_vault_tenant_id: None,
             azure_key_vault_managed_identity: None,
+            azure_authority: None,
             artifact_signing_endpoint: None,
             artifact_signing_account_name: None,
             artifact_signing_profile_name: None,
@@ -1437,11 +1443,16 @@ fn load_azure_key_vault_signing_provider(request: &PortableSignRequest) -> Resul
         tenant_id: request.azure_key_vault_tenant_id.as_deref(),
         client_id: request.azure_key_vault_client_id.as_deref(),
         client_secret: request.azure_key_vault_client_secret.as_deref(),
-        authority: None,
+        authority: request.azure_authority.as_deref(),
     };
     let token = psign_azure_kv_rest::acquire_kv_access_token(&auth)?;
-    let key_vault_certificate =
-        psign_azure_kv_rest::fetch_kv_certificate(&http, &vault_url, &certificate, None, &token)?;
+    let key_vault_certificate = psign_azure_kv_rest::fetch_kv_certificate(
+        &http,
+        &vault_url,
+        &certificate,
+        request.azure_key_vault_certificate_version.as_deref(),
+        &token,
+    )?;
     let signer_cert_der = psign_azure_kv_rest::kv_decode_cer_b64(&key_vault_certificate.cer)?;
     let signer_cert =
         rdp::parse_certificate(&signer_cert_der).context("parse Key Vault signer certificate")?;
@@ -3889,11 +3900,13 @@ mod tests {
             timestamp_hash_algorithm: None,
             azure_key_vault_url: None,
             azure_key_vault_certificate: None,
+            azure_key_vault_certificate_version: None,
             azure_key_vault_access_token: None,
             azure_key_vault_client_id: None,
             azure_key_vault_client_secret: None,
             azure_key_vault_tenant_id: None,
             azure_key_vault_managed_identity: None,
+            azure_authority: None,
             artifact_signing_endpoint: None,
             artifact_signing_account_name: None,
             artifact_signing_profile_name: None,

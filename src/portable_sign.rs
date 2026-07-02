@@ -597,15 +597,23 @@ fn sign_one_target(
 
 fn sign_one_target_azure_key_vault(target: &Path, args: &SignArgs) -> Result<()> {
     let ext = target_extension_lower(target);
-    if !is_pe_winmd_extension(&ext) {
-        return Err(anyhow!(
-            "portable Azure Key Vault signing is currently implemented only for PE/WinMD targets; got {}",
-            target.display()
-        ));
-    }
-
     let tmp = temporary_output_path(target);
-    let result = run_portable_sign_pe_azure_key_vault(target, &tmp, args)
+    let result = match ext.as_str() {
+        ext if is_pe_winmd_extension(ext) => run_portable_sign_pe_azure_key_vault(target, &tmp, args),
+        ext if is_portable_powershell_script_extension(ext) => {
+            if args.append_signature {
+                Err(anyhow!(
+                    "--as/--append-signature is only supported for portable PE/WinMD signing"
+                ))
+            } else {
+                run_portable_sign_script_azure_key_vault(target, &tmp, args)
+            }
+        }
+        _ => Err(anyhow!(
+            "portable Azure Key Vault signing is currently implemented for PE/WinMD and PowerShell Authenticode script targets (.ps1, .psd1, .psm1, .ps1xml, .psc1, .cdxml, .mof); got {}",
+            target.display()
+        )),
+    }
         .and_then(|_| {
             std::fs::copy(&tmp, target)
                 .with_context(|| format!("replace '{}' with signed output", target.display()))?;
@@ -665,6 +673,10 @@ fn target_extension_lower(target: &Path) -> String {
 
 fn is_pe_winmd_extension(ext: &str) -> bool {
     matches!(ext, "exe" | "dll" | "sys" | "ocx" | "efi" | "winmd")
+}
+
+fn is_portable_powershell_script_extension(ext: &str) -> bool {
+    psign_sip_digest::ps_script::extension_supported(ext)
 }
 
 fn target_has_valid_existing_pe_signature(target: &Path) -> Result<bool> {
@@ -758,6 +770,62 @@ fn run_portable_sign_pe_azure_key_vault(
         .map_err(|e| anyhow!("spawn portable sign-pe runner: {e}"))?
         .join()
         .map_err(|_| anyhow!("portable sign-pe runner panicked"))?
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn run_portable_sign_script_azure_key_vault(
+    target: &Path,
+    output: &Path,
+    args: &SignArgs,
+) -> Result<()> {
+    let request = psign_portable_core::PortableSignRequest {
+        path: target.to_path_buf(),
+        output_path: Some(output.to_path_buf()),
+        hash_algorithm: portable_core_digest(args.digest)?,
+        chain_certificate_paths: args.additional_certs.clone(),
+        timestamp_server: text_opt(args.timestamp_url.as_deref()).map(ToOwned::to_owned),
+        timestamp_hash_algorithm: args
+            .timestamp_digest
+            .map(portable_core_timestamp_digest)
+            .transpose()?,
+        azure_key_vault_url: text_opt(args.azure_key_vault_url.as_deref()).map(ToOwned::to_owned),
+        azure_key_vault_certificate: text_opt(args.azure_key_vault_certificate.as_deref())
+            .map(ToOwned::to_owned),
+        azure_key_vault_certificate_version: text_opt(
+            args.azure_key_vault_certificate_version.as_deref(),
+        )
+        .map(ToOwned::to_owned),
+        azure_key_vault_access_token: text_opt(args.azure_key_vault_access_token.as_deref())
+            .map(ToOwned::to_owned),
+        azure_key_vault_client_id: text_opt(args.azure_key_vault_client_id.as_deref())
+            .map(ToOwned::to_owned),
+        azure_key_vault_client_secret: text_opt(args.azure_key_vault_client_secret.as_deref())
+            .map(ToOwned::to_owned),
+        azure_key_vault_tenant_id: text_opt(args.azure_key_vault_tenant_id.as_deref())
+            .map(ToOwned::to_owned),
+        azure_key_vault_managed_identity: Some(effective_azure_key_vault_managed_identity(args)),
+        azure_authority: text_opt(args.azure_authority.as_deref()).map(ToOwned::to_owned),
+        ..Default::default()
+    };
+    psign_portable_core::portable_sign(request)
+        .map(|_| ())
+        .with_context(|| {
+            format!(
+                "portable Azure Key Vault PowerShell script target '{}'",
+                target.display()
+            )
+        })
+}
+
+#[cfg(not(feature = "azure-kv-sign"))]
+fn run_portable_sign_script_azure_key_vault(
+    _target: &Path,
+    _output: &Path,
+    _args: &SignArgs,
+) -> Result<()> {
+    Err(anyhow!(
+        "portable Azure Key Vault signing support is not compiled into this build (feature: azure-kv-sign)"
+    ))
 }
 
 fn run_portable_sign_pe_artifact_signing(
@@ -1067,7 +1135,7 @@ fn artifact_signing_metadata(args: &SignArgs) -> Result<Option<ArtifactSigningMe
     Ok(Some(doc))
 }
 
-#[cfg(feature = "artifact-signing-rest")]
+#[cfg(any(feature = "artifact-signing-rest", feature = "azure-kv-sign"))]
 fn portable_core_digest(
     digest: crate::cli::DigestAlgorithm,
 ) -> Result<psign_portable_core::PortableDigestAlgorithm> {
@@ -1077,13 +1145,13 @@ fn portable_core_digest(
         crate::cli::DigestAlgorithm::Sha512 => psign_portable_core::PortableDigestAlgorithm::Sha512,
         crate::cli::DigestAlgorithm::Sha1 | crate::cli::DigestAlgorithm::CertHash => {
             return Err(anyhow!(
-                "portable MSIX/AppX Artifact Signing supports SHA256, SHA384, and SHA512 file digests"
+                "portable cloud signing supports SHA256, SHA384, and SHA512 file digests"
             ));
         }
     })
 }
 
-#[cfg(feature = "artifact-signing-rest")]
+#[cfg(any(feature = "artifact-signing-rest", feature = "azure-kv-sign"))]
 fn portable_core_timestamp_digest(
     digest: crate::cli::DigestAlgorithm,
 ) -> Result<psign_portable_core::PortableTimestampDigestAlgorithm> {
@@ -1102,7 +1170,7 @@ fn portable_core_timestamp_digest(
         }
         crate::cli::DigestAlgorithm::CertHash => {
             return Err(anyhow!(
-                "portable MSIX/AppX Artifact Signing timestamp digest does not support certHash"
+                "portable cloud signing timestamp digest does not support certHash"
             ));
         }
     })
