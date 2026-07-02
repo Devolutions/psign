@@ -46,9 +46,11 @@ default = [
 ]
 ## Azure Key Vault signing (`AuthenticatorDigestSign` callback + REST); enables Azure-shaped CLI flags on `sign`.
 azure-kv-sign = [
+    "dep:psign-portable-core",
     "dep:psign-azure-kv-rest",
     "dep:reqwest",
     "psign-digest-cli/azure-kv-sign-portable",
+    "psign-portable-core/azure-kv-sign",
 ]
 ## Azure Artifact Signing / Trusted Signing **data-plane** hash signing (REST LRO); experimental helper command `artifact-signing-submit`.
 artifact-signing-rest = [

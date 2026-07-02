@@ -1,6 +1,6 @@
 # Migrating from AzureSignTool
 
-This project can replace **AzureSignTool** for Windows signing when built with **`--features azure-kv-sign`**. **`psign-tool portable`** covers digest checks, verification, and (with **`--features azure-kv-sign-portable`**) Key Vault **`keys/sign`** on digest files plus PE Authenticode signing through **`portable sign-pe`** or the PE subset of **`--mode portable sign`**. Windows mode remains the broader native-shaped signing path.
+This project can replace **AzureSignTool** for Windows signing when built with **`--features azure-kv-sign`**. **`psign-tool portable`** covers digest checks, verification, and (with **`--features azure-kv-sign-portable`**) Key Vault **`keys/sign`** on digest files plus PE Authenticode signing through **`portable sign-pe`** and native-shaped **`--mode portable sign`** for PE/WinMD plus PowerShell Authenticode script formats (`.ps1`, `.psd1`, `.psm1`, `.ps1xml`, `.psc1`, `.cdxml`, `.mof`). Windows mode remains the broader native-shaped signing path.
 
 **Azure Artifact Signing (Trusted Signing)** via Microsoft’s decoupled **`Azure.CodeSigning.Dlib.dll`** is **not** the Key Vault path: use **`--dlib`** / **`--trusted-signing-dlib-root`** with **`--dmdf`** only (never mixed with **`--azure-key-vault-url`**). See [`migration-artifact-signing.md`](migration-artifact-signing.md). PowerShell OpenAuthenticode overlap (inspect JSON, REST submit, EKU prefix selection) is summarized in [`psa-interoperability.md`](psa-interoperability.md).
 
@@ -44,7 +44,7 @@ psign-tool.exe sign ^
 | `-coe` | `--continue-on-error` |
 | `-mdop` | `--max-degree-of-parallelism` |
 
-**`-s` (skip signed)** in AzureSignTool conflicts with native **`/s` (certificate store name)** in this tool. Use **`--skip-signed`** instead. In `--mode portable sign`, PE/WinMD targets are skipped only when the embedded Authenticode digest verifies; unsigned files still sign normally, and corrupt existing signatures fail.
+**`-s` (skip signed)** in AzureSignTool conflicts with native **`/s` (certificate store name)** in this tool. Use **`--skip-signed`** instead. In `--mode portable sign`, PE/WinMD targets are skipped only when the embedded Authenticode digest verifies; unsigned files still sign normally, and corrupt existing signatures fail. PowerShell Authenticode script targets now sign through the same Key Vault-backed portable path, but they do not yet have native-shaped `--skip-signed` detection.
 
 ### Authentication notes
 
@@ -146,4 +146,4 @@ Use the appropriate portable subcommands for your format (`verify-pe`, catalog c
 
 ## Integration testing
 
-Automated CI uses **`psign-server azure-key-vault-server`** as a local Key Vault replacement. Non-ignored E2E tests cover both **`psign-tool portable azure-key-vault-sign-digest`** and full portable PE signing through **`portable sign-pe`** / **`--mode portable sign`** with a dummy access token, then verify the embedded Authenticode signature without contacting Azure.
+Automated CI uses **`psign-server azure-key-vault-server`** as a local Key Vault replacement. Non-ignored E2E tests cover both **`psign-tool portable azure-key-vault-sign-digest`** and full portable signing through **`portable sign-pe`** / **`--mode portable sign`** with a dummy access token, including PowerShell Authenticode script coverage, then verify the resulting signature without contacting Azure.

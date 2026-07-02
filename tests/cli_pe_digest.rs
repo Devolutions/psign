@@ -4759,6 +4759,45 @@ fn mode_portable_sign_uses_azure_key_vault_for_pe() {
 
 #[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
 #[test]
+fn mode_portable_sign_uses_azure_key_vault_for_psd1() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest_path = dir.path().join("sample.kv-mode-portable-signed.psd1");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unsigned-sample.psd1"),
+        &manifest_path,
+    )
+    .expect("copy unsigned psd1");
+
+    let (mut guard, url, certificate) = spawn_psign_azure_key_vault_server(2);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&manifest_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-script").arg(&manifest_path);
+    verify.assert().success();
+
+    let signed = std::fs::read_to_string(&manifest_path).expect("read signed psd1");
+    assert!(signed.contains("# SIG # Begin signature block"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
 fn mode_portable_sign_azure_key_vault_skip_signed_skips_valid_pe_without_service() {
     let dir = tempfile::tempdir().unwrap();
     let pe_path = dir.path().join("tiny32.kv-mode-portable-skipped.exe");
