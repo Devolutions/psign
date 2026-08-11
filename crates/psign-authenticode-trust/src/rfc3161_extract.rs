@@ -14,7 +14,7 @@ use crate::policy::OnlineTrustOptions;
 use anyhow::{Result, anyhow};
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerInfo};
-use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetStringRef};
+use der::asn1::{ObjectIdentifier, OctetStringRef};
 use der::{Decode, Encode, Header, Reader, SliceReader, Tag};
 use picky::x509::certificate::Cert;
 use picky::x509::date::UtcDate;
@@ -85,10 +85,11 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
         return Ok(None);
     };
 
-    let ts_sd: SignedData = token
-        .content
-        .decode_as()
-        .map_err(|e| anyhow!("timestamp token SignedData: {e}"))?;
+    let ts_sd = signed_data_from_content_info(&token).ok_or_else(|| {
+        anyhow!(
+            "timestamp token SignedData decode failed (after stripping unsupported cert choices)"
+        )
+    })?;
     let parsed = psign_sip_digest::timestamp::parse_tst_info_der(&tstinfo_der)
         .ok_or_else(|| anyhow!("timestamp token TSTInfo parse failed"))?;
     let expected_imprint =
@@ -154,10 +155,150 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
 fn signed_data_from_pkcs7(pkcs7_der: &[u8]) -> Option<SignedData> {
     let mut r = SliceReader::new(pkcs7_der).ok()?;
     let ci = ContentInfo::decode(&mut r).ok()?;
+    signed_data_from_content_info(&ci)
+}
+
+/// Decode CMS **`SignedData`**, rewriting the certificate bag when the `cms` crate cannot parse it.
+///
+/// Microsoft RFC3161 tokens commonly embed attribute certificates as **`CertificateChoices`**
+/// alternatives (`[1]` / `[2]`). The `cms` crate only models plain X.509 certificates and
+/// `other [3]`, so a strict decode fails even though the X.509 TSA certs and TSTInfo are fine.
+/// Portable timestamp trust only needs X.509 certificates, so unsupported choices (and optional
+/// CRLs) are stripped before a second decode attempt.
+fn signed_data_from_content_info(ci: &ContentInfo) -> Option<SignedData> {
     if ci.content_type != ID_SIGNED_DATA {
         return None;
     }
-    ci.content.decode_as::<SignedData>().ok()
+    if let Ok(sd) = ci.content.decode_as::<SignedData>() {
+        return Some(sd);
+    }
+    let sd_der = ci.content.to_der().ok()?;
+    let rewritten = rewrite_cms_signed_data_for_timestamp_decode(&sd_der)?;
+    SignedData::from_der(&rewritten).ok()
+}
+
+fn rewrite_cms_signed_data_for_timestamp_decode(sd_tlv: &[u8]) -> Option<Vec<u8>> {
+    let mut r = SliceReader::new(sd_tlv).ok()?;
+    let hdr = Header::decode(&mut r).ok()?;
+    if hdr.tag != Tag::Sequence {
+        return None;
+    }
+    let body = r.read_slice(hdr.length).ok()?;
+
+    let mut fields: Vec<&[u8]> = Vec::new();
+    let mut pos = body;
+    while !pos.is_empty() {
+        let (tlv, rest) = split_der_tlv(pos)?;
+        fields.push(tlv);
+        pos = rest;
+    }
+    // version, digestAlgorithms, encapContentInfo, [certs], [crls], signerInfos
+    if fields.len() < 4 {
+        return None;
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(sd_tlv.len());
+    let mut body_out = Vec::with_capacity(body.len());
+    body_out.extend_from_slice(fields[0]);
+    body_out.extend_from_slice(fields[1]);
+    body_out.extend_from_slice(fields[2]);
+
+    let mut idx = 3;
+    if idx < fields.len() && is_context_specific_constructed(fields[idx], 0) {
+        if let Some(filtered) = filter_a0_certificate_set_keep_x509_only(fields[idx])
+            && !filtered.is_empty()
+        {
+            body_out.extend_from_slice(&filtered);
+        }
+        idx += 1;
+    }
+    // Drop CRLs — not required for MessageImprint / CMS sig / TSA chain checks.
+    if idx < fields.len() && is_context_specific_constructed(fields[idx], 1) {
+        idx += 1;
+    }
+    while idx < fields.len() {
+        body_out.extend_from_slice(fields[idx]);
+        idx += 1;
+    }
+
+    encode_der_sequence(&body_out, &mut out);
+    Some(out)
+}
+
+fn is_context_specific_constructed(tlv: &[u8], number: u8) -> bool {
+    let Some(&tag) = tlv.first() else {
+        return false;
+    };
+    // Short-form context-specific constructed: 0xa0 | number (number < 31).
+    tag == (0xa0 | number)
+}
+
+/// Keep only plain X.509 **`Certificate`** (SEQUENCE) entries inside IMPLICIT **`[0] CertificateSet`**.
+/// Returns **`Some(empty)`** to drop the entire certificates field, or **`None`** on malformed input.
+fn filter_a0_certificate_set_keep_x509_only(a0_tlv: &[u8]) -> Option<Vec<u8>> {
+    if !is_context_specific_constructed(a0_tlv, 0) {
+        return None;
+    }
+    let mut r = SliceReader::new(a0_tlv).ok()?;
+    let hdr = Header::decode(&mut r).ok()?;
+    let body = r.read_slice(hdr.length).ok()?;
+    let mut kept = Vec::new();
+    let mut pos = body;
+    while !pos.is_empty() {
+        let (tlv, rest) = split_der_tlv(pos)?;
+        if tlv.first() == Some(&0x30) {
+            kept.extend_from_slice(tlv);
+        }
+        pos = rest;
+    }
+    if kept.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(encode_der_context_specific_constructed(0, &kept))
+}
+
+fn split_der_tlv(input: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut r = SliceReader::new(input).ok()?;
+    let start_remaining = usize::try_from(r.remaining_len()).ok()?;
+    let hdr = Header::decode(&mut r).ok()?;
+    let _body = r.read_slice(hdr.length).ok()?;
+    let end_remaining = usize::try_from(r.remaining_len()).ok()?;
+    let tlv_len = start_remaining.checked_sub(end_remaining)?;
+    let tlv = input.get(..tlv_len)?;
+    let rest = input.get(tlv_len..)?;
+    Some((tlv, rest))
+}
+
+fn encode_der_sequence(body: &[u8], out: &mut Vec<u8>) {
+    out.push(0x30);
+    encode_der_length(body.len(), out);
+    out.extend_from_slice(body);
+}
+
+fn encode_der_context_specific_constructed(number: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + body.len());
+    out.push(0xa0 | number);
+    encode_der_length(body.len(), &mut out);
+    out.extend_from_slice(body);
+    out
+}
+
+fn encode_der_length(len: usize, out: &mut Vec<u8>) {
+    if len < 0x80 {
+        out.push(len as u8);
+    } else if len <= 0xff {
+        out.push(0x81);
+        out.push(len as u8);
+    } else if len <= 0xffff {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 0xff) as u8);
+    } else {
+        out.push(0x83);
+        out.push((len >> 16) as u8);
+        out.push(((len >> 8) & 0xff) as u8);
+        out.push((len & 0xff) as u8);
+    }
 }
 
 fn timestamp_token_from_signer_unsigned_attrs(
@@ -185,17 +326,24 @@ fn timestamp_token_from_signer_unsigned_attrs(
 
 fn timestamp_token_from_attribute(attr: &Attribute) -> Option<(ContentInfo, Vec<u8>, UtcDate)> {
     for val in attr.values.iter() {
-        let token = timestamp_content_info_from_attribute_value(val)?;
-        if token.content_type != ID_SIGNED_DATA {
+        let Some(token) = timestamp_content_info_from_attribute_value(val) else {
             continue;
-        }
-        let sd: SignedData = token.content.decode_as().ok()?;
+        };
+        let Some(sd) = signed_data_from_content_info(&token) else {
+            continue;
+        };
         if sd.encap_content_info.econtent_type != ID_CT_TSTINFO {
             continue;
         }
-        let any = sd.encap_content_info.econtent.as_ref()?;
-        let tstinfo_der = tstinfo_bytes_from_encapsulated_econtent(any)?;
-        let gen_date = tstinfo_gen_time(tstinfo_der)?;
+        let Some(any) = sd.encap_content_info.econtent.as_ref() else {
+            continue;
+        };
+        let Some(tstinfo_der) = tstinfo_bytes_from_encapsulated_econtent(any) else {
+            continue;
+        };
+        let Some(gen_date) = tstinfo_gen_time(tstinfo_der) else {
+            continue;
+        };
         return Some((token, tstinfo_der.to_vec(), gen_date));
     }
     None
@@ -288,6 +436,13 @@ fn timestamp_attr_priority(attr: &Attribute) -> Option<u8> {
 
 fn utc_date_from_timestamp_attribute(attr: &Attribute) -> Option<UtcDate> {
     for val in attr.values.iter() {
+        // CMS AttributeValue is often a bare ContentInfo SEQUENCE. `Any::value()` is only the
+        // contents (no tag/length), so prefer the full DER TLV before falling back to raw value.
+        if let Ok(tlv) = val.to_der()
+            && let Some(d) = utc_date_from_unsigned_attr_payload(&tlv)
+        {
+            return Some(d);
+        }
         let payload = attribute_value_bytes(val);
         if let Some(d) = utc_date_from_unsigned_attr_payload(payload) {
             return Some(d);
@@ -326,10 +481,7 @@ fn peel_octet_string_outer(bytes: &[u8]) -> Option<&[u8]> {
 }
 
 fn extract_gentime_from_timestamp_content_info(ci: &ContentInfo) -> Option<UtcDate> {
-    if ci.content_type != ID_SIGNED_DATA {
-        return None;
-    }
-    let sd: SignedData = ci.content.decode_as().ok()?;
+    let sd = signed_data_from_content_info(ci)?;
     gentime_from_signed_data_timestamp(&sd)
 }
 
@@ -377,18 +529,62 @@ fn tstinfo_gen_time(tstinfo_der: &[u8]) -> Option<UtcDate> {
     }
     let inner = r.read_slice(hdr.length).ok()?;
     let mut sr = SliceReader::new(inner).ok()?;
-    der_skip_tlv(&mut sr)?;
-    der_skip_tlv(&mut sr)?;
-    der_skip_tlv(&mut sr)?;
-    der_skip_tlv(&mut sr)?;
-    let gt = GeneralizedTime::decode(&mut sr).ok()?;
-    utc_date_from_der_generalized_time(gt)
+    der_skip_tlv(&mut sr)?; // version
+    der_skip_tlv(&mut sr)?; // policy
+    der_skip_tlv(&mut sr)?; // messageImprint
+    der_skip_tlv(&mut sr)?; // serialNumber
+    let gt_hdr = Header::decode(&mut sr).ok()?;
+    if gt_hdr.tag != Tag::GeneralizedTime {
+        return None;
+    }
+    let gt_body = sr.read_slice(gt_hdr.length).ok()?;
+    utc_date_from_generalized_time_contents(gt_body)
 }
 
-fn utc_date_from_der_generalized_time(gt: GeneralizedTime) -> Option<UtcDate> {
-    let secs = i64::try_from(gt.to_unix_duration().as_secs()).ok()?;
-    let odt = time::OffsetDateTime::from_unix_timestamp(secs).ok()?;
-    Some(UtcDate::from(odt))
+/// Parse **`GeneralizedTime`** contents (no tag/length) into a picky **`UtcDate`**.
+///
+/// Accepts the common RFC 5280 / CMS forms used by Authenticode TSAs, including Microsoft ACS
+/// tokens that emit fractional seconds (`YYYYMMDDHHMMSS.fffZ`). Fractional seconds are truncated
+/// toward zero; only **`Z`** / **`z`** (UTC) is accepted. The strict `der` crate decoder rejects
+/// fractional seconds, so this path is intentionally more permissive for real-world tokens.
+fn utc_date_from_generalized_time_contents(body: &[u8]) -> Option<UtcDate> {
+    let s = std::str::from_utf8(body).ok()?.trim();
+    let s = s.strip_suffix('Z').or_else(|| s.strip_suffix('z'))?;
+    let main = match s.split_once('.') {
+        Some((m, frac)) => {
+            if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            m
+        }
+        None => s,
+    };
+    if !main.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let (year, month, day, hour, minute, second) = match main.len() {
+        14 => (
+            main[0..4].parse::<i32>().ok()?,
+            main[4..6].parse::<u8>().ok()?,
+            main[6..8].parse::<u8>().ok()?,
+            main[8..10].parse::<u8>().ok()?,
+            main[10..12].parse::<u8>().ok()?,
+            main[12..14].parse::<u8>().ok()?,
+        ),
+        12 => (
+            main[0..4].parse::<i32>().ok()?,
+            main[4..6].parse::<u8>().ok()?,
+            main[6..8].parse::<u8>().ok()?,
+            main[8..10].parse::<u8>().ok()?,
+            main[10..12].parse::<u8>().ok()?,
+            0u8,
+        ),
+        _ => return None,
+    };
+    let date =
+        time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
+    let clock = time::Time::from_hms(hour, minute, second).ok()?;
+    Some(UtcDate::from(time::OffsetDateTime::new_utc(date, clock)))
 }
 
 fn der_skip_tlv<'a, R: Reader<'a>>(reader: &mut R) -> Option<()> {
@@ -433,7 +629,7 @@ mod tests {
     use super::*;
     use der::DateTime;
     use der::Encode;
-    use der::asn1::UtcTime;
+    use der::asn1::{GeneralizedTime, UtcTime};
     use psign_sip_digest::verify_pe::pe_first_pkcs7_signed_data_der;
 
     #[test]
@@ -473,6 +669,139 @@ mod tests {
     #[test]
     fn tstinfo_gen_time_rejects_empty_sequence() {
         assert!(super::tstinfo_gen_time(&[0x30, 0x00]).is_none());
+    }
+
+    /// Microsoft ACS / Azure Trusted Signing TSAs emit fractional-second GeneralizedTime
+    /// (`YYYYMMDDHHMMSS.fffZ`). The strict `der` decoder rejects that form; portable trust must not.
+    #[test]
+    fn utc_date_from_generalized_time_contents_accepts_fractional_seconds() {
+        let d = super::utc_date_from_generalized_time_contents(b"20260810234021.194Z")
+            .expect("fractional GeneralizedTime");
+        assert_eq!((d.year(), d.month(), d.day()), (2026, 8, 10));
+    }
+
+    #[test]
+    fn utc_date_from_generalized_time_contents_accepts_whole_seconds() {
+        let d = super::utc_date_from_generalized_time_contents(b"20230701120000Z")
+            .expect("whole-second GeneralizedTime");
+        assert_eq!((d.year(), d.month(), d.day()), (2023, 7, 1));
+    }
+
+    #[test]
+    fn utc_date_from_generalized_time_contents_rejects_non_utc() {
+        assert!(super::utc_date_from_generalized_time_contents(b"20230701120000+0000").is_none());
+        assert!(super::utc_date_from_generalized_time_contents(b"not-a-time").is_none());
+        assert!(super::utc_date_from_generalized_time_contents(b"20230701120000.Z").is_none());
+    }
+
+    /// Microsoft timestamp tokens embed attribute certificates (`CertificateChoices` `[1]`) that the
+    /// `cms` crate cannot decode. Stripping them must preserve plain X.509 entries.
+    #[test]
+    fn filter_a0_certificate_set_keeps_only_x509_sequences() {
+        // Two X.509 SEQUENCE placeholders + one context-specific [1] attr-cert placeholder.
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x30, 0x03, 0x02, 0x01, 0x01]); // fake cert A
+        body.extend_from_slice(&[0xa1, 0x03, 0x02, 0x01, 0x02]); // attr cert choice
+        body.extend_from_slice(&[0x30, 0x03, 0x02, 0x01, 0x03]); // fake cert B
+        let a0 = super::encode_der_context_specific_constructed(0, &body);
+        let filtered = super::filter_a0_certificate_set_keep_x509_only(&a0).expect("filter");
+        assert_eq!(filtered[0], 0xa0);
+        // Body should be cert A + cert B only (10 bytes).
+        let mut r = SliceReader::new(&filtered).unwrap();
+        let hdr = Header::decode(&mut r).unwrap();
+        let kept = r.read_slice(hdr.length).unwrap();
+        assert_eq!(
+            kept,
+            &[0x30, 0x03, 0x02, 0x01, 0x01, 0x30, 0x03, 0x02, 0x01, 0x03]
+        );
+    }
+
+    #[test]
+    fn rewrite_signed_data_strips_attr_cert_and_crls() {
+        // Minimal SignedData-shaped SEQUENCE:
+        // version, digestAlgs SET, encapContentInfo SEQUENCE, certs[0], crls[1], signerInfos SET
+        let version = [0x02, 0x01, 0x03];
+        let digest_algs = [0x31, 0x00];
+        let encap = [0x30, 0x00];
+        let mut certs_body = Vec::new();
+        certs_body.extend_from_slice(&[0x30, 0x03, 0x02, 0x01, 0x0a]);
+        certs_body.extend_from_slice(&[0xa1, 0x03, 0x02, 0x01, 0x0b]);
+        let certs = super::encode_der_context_specific_constructed(0, &certs_body);
+        let crls = super::encode_der_context_specific_constructed(1, &[0x30, 0x00]);
+        let signer_infos = [0x31, 0x00];
+        let mut body = Vec::new();
+        body.extend_from_slice(&version);
+        body.extend_from_slice(&digest_algs);
+        body.extend_from_slice(&encap);
+        body.extend_from_slice(&certs);
+        body.extend_from_slice(&crls);
+        body.extend_from_slice(&signer_infos);
+        let mut sd = Vec::new();
+        super::encode_der_sequence(&body, &mut sd);
+        let out = super::rewrite_cms_signed_data_for_timestamp_decode(&sd).expect("rewrite");
+        // Parse top-level fields of rewritten SEQUENCE and ensure no [1] CRL and no attr-cert.
+        let mut r = SliceReader::new(&out).unwrap();
+        let hdr = Header::decode(&mut r).unwrap();
+        assert_eq!(hdr.tag, Tag::Sequence);
+        let inner = r.read_slice(hdr.length).unwrap();
+        let mut fields = Vec::new();
+        let mut pos = inner;
+        while !pos.is_empty() {
+            let (tlv, rest) = super::split_der_tlv(pos).unwrap();
+            fields.push(tlv.to_vec());
+            pos = rest;
+        }
+        assert_eq!(fields.len(), 5, "version,digests,encap,certs,signerInfos");
+        assert!(super::is_context_specific_constructed(&fields[3], 0));
+        assert!(
+            !fields
+                .iter()
+                .any(|f| super::is_context_specific_constructed(f, 1))
+        );
+        let cert_field = &fields[3];
+        let mut cr = SliceReader::new(cert_field).unwrap();
+        let ch = Header::decode(&mut cr).unwrap();
+        let cb = cr.read_slice(ch.length).unwrap();
+        assert_eq!(cb, &[0x30, 0x03, 0x02, 0x01, 0x0a]);
+    }
+
+    /// Build a minimal **`TSTInfo` SEQUENCE** whose **`genTime`** uses ACS-style fractional seconds.
+    #[test]
+    fn tstinfo_gen_time_accepts_fractional_generalized_time() {
+        // version INTEGER 1
+        // policy OID 1.2.3
+        // messageImprint SEQUENCE { AlgorithmIdentifier sha256, OCTET STRING 32 zero }
+        // serial INTEGER 1
+        // genTime 20260810234021.194Z
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x02, 0x01, 0x01]); // version
+        body.extend_from_slice(&[0x06, 0x02, 0x2a, 0x03]); // OID 1.2.3
+        // messageImprint
+        let mi_inner = {
+            let mut v = Vec::new();
+            // AlgorithmIdentifier SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }
+            v.extend_from_slice(&[
+                0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+                0x00,
+            ]);
+            v.extend_from_slice(&[0x04, 0x20]);
+            v.extend_from_slice(&[0u8; 32]);
+            v
+        };
+        body.push(0x30);
+        body.push(mi_inner.len() as u8);
+        body.extend_from_slice(&mi_inner);
+        body.extend_from_slice(&[0x02, 0x01, 0x01]); // serial
+        let gt = b"20260810234021.194Z";
+        body.push(0x18);
+        body.push(gt.len() as u8);
+        body.extend_from_slice(gt);
+        let mut tlv = Vec::new();
+        tlv.push(0x30);
+        tlv.push(body.len() as u8);
+        tlv.extend_from_slice(&body);
+        let d = super::tstinfo_gen_time(&tlv).expect("fractional genTime TSTInfo");
+        assert_eq!((d.year(), d.month(), d.day()), (2026, 8, 10));
     }
 
     /// **`tiny32.signed.efi`** carries PKCS#9 **`signing-time`** (no nested RFC3161 **`TSTInfo`** in unsigned attrs).
