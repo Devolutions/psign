@@ -2715,6 +2715,86 @@ fn unified_verify_mode_portable_uses_digest_only_when_auto_trust_disabled() {
 }
 
 #[test]
+fn unified_verify_mode_portable_routes_detached_pkcs7() {
+    let repo = repo_root();
+    let content = repo.join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let signature =
+        repo.join("tests/fixtures/generated-signed/appinstaller/sample.appinstaller.p7");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.args(["--mode", "portable", "verify"])
+        .arg("--detached-pkcs7")
+        .arg(&signature)
+        .arg("--anchor-dir")
+        .arg(anchor_dir(&repo))
+        .arg(&content);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-detached: ok"));
+}
+
+#[test]
+fn unified_verify_mode_portable_routes_detached_pkcs7_with_content_override() {
+    let repo = repo_root();
+    let content = repo.join("tests/fixtures/generated-unsigned/appinstaller/sample.appinstaller");
+    let signature =
+        repo.join("tests/fixtures/generated-signed/appinstaller/sample.appinstaller.p7");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.args(["--mode", "portable", "verify"])
+        .arg("--detached-pkcs7")
+        .arg(&signature)
+        .arg("--detached-pkcs7-content")
+        .arg(&content)
+        .arg("--anchor-dir")
+        .arg(anchor_dir(&repo))
+        .arg(&signature);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-detached: ok"));
+}
+
+#[test]
+fn unified_verify_mode_portable_routes_explicit_catalog_and_each_subject() {
+    let repo = repo_root();
+    let catalog = repo.join("tests/fixtures/generated-signed/catalog/sample.cat");
+    let member = repo.join("tests/fixtures/generated-unsigned/catalog/member.sys");
+    let inf = repo.join("tests/fixtures/generated-unsigned/catalog/sample.inf");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.args(["--mode", "portable", "verify"])
+        .arg("--catalog")
+        .arg(&catalog)
+        .arg("--anchor-dir")
+        .arg(anchor_dir(&repo))
+        .arg(&member)
+        .arg(&inf);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-catalog: ok"))
+        .stdout(predicate::str::contains("verify-catalog-member: ok"))
+        .stdout(predicate::str::contains("member.sys"))
+        .stdout(predicate::str::contains("sample.inf"));
+}
+
+#[test]
+fn unified_verify_mode_portable_rejects_catalog_hash_selection() {
+    let repo = repo_root();
+    let catalog = repo.join("tests/fixtures/generated-signed/catalog/sample.cat");
+    let member = repo.join("tests/fixtures/generated-unsigned/catalog/member.sys");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.args(["--mode", "portable", "verify"])
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["--catalog-hash-algorithm", "sha1"])
+        .arg(&member);
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "derives each member digest algorithm from the catalog",
+    ));
+}
+
+#[test]
 fn trust_verify_pe_ok_with_prefer_timestamp_signing_time_and_as_of() {
     let fixture = tiny32_fixture();
     let bytes = std::fs::read(&fixture).expect("read fixture");
@@ -3203,6 +3283,141 @@ fn timestamp_pe_rfc3161_attaches_unsigned_timestamp_attribute() {
             "microsoft_nested_rfc3161_attribute",
         ))
         .stdout(predicate::str::contains("1.3.6.1.4.1.311.3.3.1"));
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "timestamp-http"))]
+#[test]
+fn mode_portable_timestamp_posts_and_embeds_rfc3161_token_for_existing_pe() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cert = dir.path().join("signer.der");
+    let key = dir.path().join("signer.pk8");
+    let signed_pe = dir.path().join("tiny32.signed.exe");
+    write_test_rsa_cert_key(&cert, &key);
+
+    let mut sign = portable_cmd();
+    sign.arg("sign-pe")
+        .arg(tiny32_unsigned_fixture())
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--key")
+        .arg(&key)
+        .arg("--output")
+        .arg(&signed_pe);
+    sign.assert().success();
+
+    let (mut guard, url) = spawn_psign_server(&[]);
+    let mut stamp = Command::cargo_bin("psign-tool").expect("binary");
+    stamp
+        .args([
+            "--mode",
+            "portable",
+            "timestamp",
+            "--rfc3161-url",
+            &url,
+            "--digest",
+            "sha256",
+        ])
+        .arg(&signed_pe);
+    stamp
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("timestamp-pe-rfc3161: ok"));
+    let status = guard.0.wait().expect("server exit");
+    assert!(status.success(), "server failed with {status}");
+
+    let inspection =
+        inspect_pe_authenticode(&std::fs::read(&signed_pe).expect("read timestamped PE"))
+            .expect("inspect timestamped PE");
+    assert!(
+        inspection
+            .entries
+            .iter()
+            .flat_map(|entry| entry.pkcs7.signers.iter())
+            .flat_map(|signer| signer.timestamp_hints.iter())
+            .any(|hint| hint.kind == "microsoft_nested_rfc3161_attribute"),
+        "expected embedded Microsoft RFC3161 timestamp token"
+    );
+}
+
+#[test]
+fn mode_portable_timestamp_rejects_unsupported_modes_and_non_pe_inputs() {
+    let reject = |args: &[&str], expected: &str| {
+        let mut cmd = Command::cargo_bin("psign-tool").expect("binary");
+        cmd.args(args);
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+    };
+
+    reject(
+        &[
+            "--mode",
+            "portable",
+            "timestamp",
+            "--legacy-url",
+            "http://tsa.example/legacy",
+            "missing.exe",
+        ],
+        "legacy",
+    );
+    reject(
+        &[
+            "--mode",
+            "portable",
+            "timestamp",
+            "--seal-timestamp-url",
+            "http://tsa.example/sealed",
+            "missing.exe",
+        ],
+        "sealing",
+    );
+    reject(
+        &[
+            "--mode",
+            "portable",
+            "timestamp",
+            "--rfc3161-url",
+            "http://tsa.example/rfc3161",
+            "--digest",
+            "sha256",
+            "--timestamp-pkcs7-files",
+            "missing.p7",
+        ],
+        "timestamp-pkcs7",
+    );
+    reject(
+        &[
+            "--mode",
+            "portable",
+            "timestamp",
+            "--rfc3161-url",
+            "http://tsa.example/rfc3161",
+            "--digest",
+            "sha256",
+            "--signature-index",
+            "1",
+            "missing.exe",
+        ],
+        "signature-index",
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let non_pe = dir.path().join("not-a-pe.txt");
+    std::fs::write(&non_pe, b"not a PE").expect("write non-PE");
+    let mut cmd = Command::cargo_bin("psign-tool").expect("binary");
+    cmd.args([
+        "--mode",
+        "portable",
+        "timestamp",
+        "--rfc3161-url",
+        "http://tsa.example/rfc3161",
+        "--digest",
+        "sha256",
+    ])
+    .arg(&non_pe);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("only PE/WinMD"));
 }
 
 #[test]
@@ -4798,6 +5013,129 @@ fn mode_portable_sign_uses_azure_key_vault_for_psd1() {
 
 #[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
 #[test]
+fn mode_portable_sign_azure_key_vault_signs_portable_formats_in_ordered_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let targets = [
+        ("sample.cab", root.join("generated-unsigned/cab/sample.cab")),
+        (
+            "tiny.msi",
+            root.join("generated-unsigned/installer/tiny.msi"),
+        ),
+        (
+            "tiny-patch.msp",
+            root.join("generated-unsigned/installer/tiny-patch.msp"),
+        ),
+        (
+            "sample.msix",
+            root.join("generated-unsigned/msix/sample.msix"),
+        ),
+        (
+            "sample.appx",
+            root.join("generated-unsigned/msix/sample.appx"),
+        ),
+        (
+            "sample.nupkg",
+            root.join("package-signing/unsigned/sample.nupkg"),
+        ),
+        (
+            "sample.vsix",
+            root.join("package-signing/unsigned/sample.vsix"),
+        ),
+        (
+            "sample.appinstaller",
+            root.join("generated-unsigned/appinstaller/sample.appinstaller"),
+        ),
+        ("sample.psd1", root.join("unsigned-sample.psd1")),
+    ];
+    let mut paths = Vec::new();
+    for (name, source) in targets {
+        let path = dir.path().join(name);
+        std::fs::copy(source, &path).expect("copy unsigned portable target");
+        paths.push(path);
+    }
+    let unsupported = dir.path().join("unsupported.txt");
+    std::fs::write(&unsupported, b"unsupported portable signing target")
+        .expect("write unsupported");
+    let input_list = dir.path().join("inputs.txt");
+    let mut entries = Vec::new();
+    entries.push(paths[0].display().to_string());
+    entries.push(unsupported.display().to_string());
+    entries.extend(paths[1..].iter().map(|path| path.display().to_string()));
+    std::fs::write(&input_list, entries.join("\n")).expect("write input list");
+
+    // Keep serving until the client finishes: some package formats make more than one signing
+    // request, and the test only needs to verify completed client-side results.
+    let (_guard, url, certificate) = spawn_psign_azure_key_vault_server(0);
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg("--input-file-list")
+        .arg(&input_list)
+        .arg("--continue-on-error")
+        .arg("--max-degree-of-parallelism")
+        .arg("2")
+        .arg("--exit-codes")
+        .arg("azure");
+    let output = cmd.output().expect("run Key Vault batch signing");
+    assert!(
+        !output.status.success(),
+        "partial Azure-style batch should not return success"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+    let first = stdout
+        .find(&format!("Signed: {}", paths[0].display()))
+        .expect("first signed target");
+    let failed = stdout.find("Failed:").expect("unsupported target failure");
+    let next = stdout
+        .find(&format!("Signed: {}", paths[1].display()))
+        .expect("second signed target");
+    assert!(
+        first < failed && failed < next,
+        "batch results must retain input-list order:\n{stdout}"
+    );
+    for path in &paths {
+        assert!(
+            stdout.contains(&format!("Signed: {}", path.display())),
+            "missing successful target {}:\n{stdout}",
+            path.display()
+        );
+    }
+    assert!(
+        stdout.contains("native-shaped signing"),
+        "unsupported target should use the explicit format diagnostic:\n{stdout}"
+    );
+
+    cab_digest::cab_signature_pkcs7_der(&std::fs::read(&paths[0]).expect("read CAB"))
+        .expect("signed CAB");
+    msi_digest::msi_digital_signature_pkcs7_der(&std::fs::read(&paths[1]).expect("read MSI"))
+        .expect("signed MSI");
+    msi_digest::msi_digital_signature_pkcs7_der(&std::fs::read(&paths[2]).expect("read MSP"))
+        .expect("signed MSP");
+    psign_sip_digest::msix_digest::verify_msix_digest_consistency(&paths[3]).expect("signed MSIX");
+    psign_sip_digest::msix_digest::verify_msix_digest_consistency(&paths[4]).expect("signed AppX");
+    assert!(
+        std::fs::read_to_string(&paths[8])
+            .expect("read signed script")
+            .contains("# SIG # Begin signature block")
+    );
+    assert!(
+        paths[7].with_extension("appinstaller.p7").is_file(),
+        "App Installer companion signature should replace the original companion"
+    );
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
 fn mode_portable_sign_azure_key_vault_skip_signed_skips_valid_pe_without_service() {
     let dir = tempfile::tempdir().unwrap();
     let pe_path = dir.path().join("tiny32.kv-mode-portable-skipped.exe");
@@ -5583,7 +5921,7 @@ fn mode_portable_artifact_signing_uses_file_list_skip_signed_and_parallelism() {
 fn mode_portable_artifact_signing_continue_on_error_reports_partial_failure() {
     let dir = tempfile::tempdir().unwrap();
     let cab_path = dir.path().join("tiny.cab");
-    let unsupported_path = dir.path().join("unsupported.ps1");
+    let unsupported_path = dir.path().join("unsupported.js");
     std::fs::write(&cab_path, minimal_unsigned_cab_fixture_bytes()).expect("write unsigned CAB");
     std::fs::write(&unsupported_path, b"not a portable Artifact Signing target")
         .expect("write unsupported target");
@@ -5611,7 +5949,7 @@ fn mode_portable_artifact_signing_continue_on_error_reports_partial_failure() {
         .stdout(predicate::str::contains("Signed:"))
         .stdout(predicate::str::contains("Failed:"))
         .stdout(predicate::str::contains(
-            "portable Artifact Signing is currently implemented for PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX targets",
+            "portable Artifact Signing is currently implemented for PE/WinMD, PowerShell Authenticode scripts",
         ));
     let status = guard.0.wait().expect("server exit");
     assert!(status.success(), "server failed with {status}");

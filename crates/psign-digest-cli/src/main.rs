@@ -2153,7 +2153,8 @@ enum Command {
     },
     /// Attach an RFC3161 timestamp token to an existing embedded PE Authenticode signature.
     ///
-    /// Accepts either a raw `timeStampToken` `ContentInfo` DER file or a `TimeStampResp` DER file containing one.
+    /// Accepts a raw `timeStampToken` `ContentInfo` DER file, a `TimeStampResp` DER file containing one,
+    /// or posts a request to a TSA with `--rfc3161-url` and `--digest`.
     TimestampPeRfc3161 {
         /// Signed PE path to mutate.
         #[arg(value_name = "PATH")]
@@ -2165,11 +2166,17 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         signer_index: usize,
         /// Raw RFC3161 timeStampToken ContentInfo DER.
-        #[arg(long, value_name = "PATH", conflicts_with = "response")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["response", "rfc3161_url"])]
         token: Option<PathBuf>,
         /// RFC3161 TimeStampResp DER containing a granted timeStampToken.
-        #[arg(long, value_name = "PATH", conflicts_with = "token")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "rfc3161_url"])]
         response: Option<PathBuf>,
+        /// RFC3161 TSA endpoint. Requires `--digest` and the `timestamp-http` feature.
+        #[arg(long, visible_alias = "tr", conflicts_with_all = ["token", "response"])]
+        rfc3161_url: Option<String>,
+        /// RFC3161 timestamp message-imprint digest. Required with `--rfc3161-url`.
+        #[arg(long, visible_alias = "td", value_enum, requires = "rfc3161_url")]
+        digest: Option<HashAlg>,
         /// Output PE path.
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
@@ -4783,14 +4790,34 @@ where
             signer_index,
             token,
             response,
+            rfc3161_url,
+            digest,
             output,
         } => {
             let pe = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let token_der = match (token, response) {
-                (Some(token), None) => {
-                    std::fs::read(&token).with_context(|| format!("read {}", token.display()))?
+            let pkcs7_der = verify_pe::pe_nth_pkcs7_signed_data_der(&pe, index)
+                .with_context(|| format!("extract PE PKCS#7 row {index} from {}", path.display()))?;
+            let stamped_pkcs7 = match (token, response, rfc3161_url) {
+                (Some(token), None, None) => {
+                    let token_der =
+                        std::fs::read(&token).with_context(|| format!("read {}", token.display()))?;
+                    let sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_der).with_context(|| {
+                        format!("parse PE PKCS#7 row {index} from {}", path.display())
+                    })?;
+                    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(
+                        &sd,
+                        signer_index,
+                        &token_der,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "attach RFC3161 timestamp to {} row {index} signer {signer_index}",
+                            path.display()
+                        )
+                    })?;
+                    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)?
                 }
-                (None, Some(response)) => {
+                (None, Some(response), None) => {
                     let bytes = std::fs::read(&response)
                         .with_context(|| format!("read {}", response.display()))?;
                     let parsed = parse_time_stamp_resp_der(&bytes).ok_or_else(|| {
@@ -4802,29 +4829,58 @@ where
                             parsed.pki_status.as_raw_integer()
                         ));
                     }
-                    parsed
+                    let token_der = parsed
                         .time_stamp_token
-                        .map(|t| t.to_vec())
-                        .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?
+                        .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?;
+                    let sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_der).with_context(|| {
+                        format!("parse PE PKCS#7 row {index} from {}", path.display())
+                    })?;
+                    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(
+                        &sd,
+                        signer_index,
+                        token_der,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "attach RFC3161 timestamp to {} row {index} signer {signer_index}",
+                            path.display()
+                        )
+                    })?;
+                    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)?
                 }
-                _ => return Err(anyhow!("provide exactly one of --token or --response")),
+                (None, None, Some(url)) => {
+                    if signer_index != 0 {
+                        return Err(anyhow!(
+                            "timestamp-pe-rfc3161 RFC3161 HTTP timestamping supports only signer_index 0"
+                        ));
+                    }
+                    let digest = digest.ok_or_else(|| {
+                        anyhow!("timestamp-pe-rfc3161 requires --digest with --rfc3161-url")
+                    })?;
+                    #[cfg(feature = "timestamp-http")]
+                    {
+                        timestamp_pkcs7_der_rfc3161(
+                            &pkcs7_der,
+                            &url,
+                            digest,
+                            Rfc3161TimestampAttribute::MicrosoftAuthenticode,
+                        )
+                        .context("request and attach RFC3161 timestamp")?
+                    }
+                    #[cfg(not(feature = "timestamp-http"))]
+                    {
+                        let _ = (url, digest);
+                        return Err(anyhow!(
+                            "timestamp-pe-rfc3161 RFC3161 timestamping requires the timestamp-http feature"
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "provide exactly one of --token, --response, or --rfc3161-url with --digest"
+                    ));
+                }
             };
-            let pkcs7_der = verify_pe::pe_nth_pkcs7_signed_data_der(&pe, index)
-                .with_context(|| format!("extract PE PKCS#7 row {index} from {}", path.display()))?;
-            let sd = pkcs7::parse_pkcs7_signed_data_der(&pkcs7_der)
-                .with_context(|| format!("parse PE PKCS#7 row {index} from {}", path.display()))?;
-            let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(
-                &sd,
-                signer_index,
-                &token_der,
-            )
-            .with_context(|| {
-                format!(
-                    "attach RFC3161 timestamp to {} row {index} signer {signer_index}",
-                    path.display()
-                )
-            })?;
-            let stamped_pkcs7 = pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)?;
             let out_image =
                 pe_embed::pe_replace_authenticode_pkcs7_certificate_at(pe, index, &stamped_pkcs7)
                     .with_context(|| {

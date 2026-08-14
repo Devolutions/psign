@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "artifact-signing-rest")]
@@ -25,11 +26,6 @@ struct ArtifactSigningMetadataDoc {
     ExcludeCredentials: Option<Vec<String>>,
 }
 
-enum SignOneTargetResult {
-    Signed(Vec<u8>),
-    SkippedAlreadySigned,
-}
-
 pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput> {
     if artifact_signing_requested(args) && azure_key_vault_requested(args) {
         return Err(anyhow!(
@@ -43,45 +39,30 @@ pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput>
         return sign_file_azure_key_vault(args);
     }
     validate_supported_options(args)?;
-    if args.files.is_empty() {
+    let targets = expand_sign_targets(args)?;
+    if targets.is_empty() {
         return Err(anyhow!("portable sign requires at least one file"));
     }
-    let thumbprint = args
-        .cert_sha1
-        .as_deref()
-        .ok_or_else(|| anyhow!("portable sign requires --sha1 <thumbprint>"))?;
-    let identity = crate::cert_store::resolve_signing_identity(
-        args.cert_store_dir.as_deref(),
-        args.machine_store,
-        &args.store_name,
-        thumbprint,
-    )?;
 
-    let mut combined = String::new();
-    for (idx, target) in args.files.iter().enumerate() {
-        if idx > 0 {
-            combined.push('\n');
-        }
-        let result = sign_one_target(target, &identity, args.append_signature, args.skip_signed)
-            .with_context(|| format!("portable sign '{}'", target.display()))?;
-        match result {
-            SignOneTargetResult::Signed(signed) => {
-                std::fs::write(target, signed)
-                    .with_context(|| format!("write signed file '{}'", target.display()))?;
-                combined.push_str(&format!(
-                    "Signed: {}\nthumbprint_sha1={}\nstore={}\\{}\n",
-                    target.display(),
-                    identity.thumbprint_sha1,
-                    identity.scope,
-                    identity.store_name
-                ));
-            }
-            SignOneTargetResult::SkippedAlreadySigned => {
-                combined.push_str(&format!("Skipped (already signed): {}\n", target.display()));
-            }
-        }
-    }
-    Ok(CommandOutput::with_exit(combined, success_exit_code(args)))
+    let identity = args
+        .pfx
+        .is_none()
+        .then(|| {
+            let thumbprint = args.cert_sha1.as_deref().ok_or_else(|| {
+                anyhow!("portable sign requires --sha1 <thumbprint> without --pfx")
+            })?;
+            crate::cert_store::resolve_signing_identity(
+                args.cert_store_dir.as_deref(),
+                args.machine_store,
+                &args.store_name,
+                thumbprint,
+            )
+        })
+        .transpose()?;
+
+    execute_sign_batch(args, &targets, |target| {
+        try_sign_one_local(target, args, identity.as_ref())
+    })
 }
 
 fn sign_file_artifact_signing(args: &SignArgs) -> Result<CommandOutput> {
@@ -93,18 +74,34 @@ fn sign_file_artifact_signing(args: &SignArgs) -> Result<CommandOutput> {
         ));
     }
 
-    let exit_style = resolved_sign_exit_codes(args);
+    execute_sign_batch(args, &targets, |target| {
+        try_sign_one_artifact_signing(target, args)
+    })
+}
+
+fn sign_file_azure_key_vault(args: &SignArgs) -> Result<CommandOutput> {
+    validate_azure_key_vault_supported_options(args)?;
+    let targets = expand_sign_targets(args)?;
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "portable Azure Key Vault sign requires at least one file"
+        ));
+    }
+
+    execute_sign_batch(args, &targets, |target| {
+        try_sign_one_azure_key_vault(target, args)
+    })
+}
+
+fn execute_sign_batch<F>(args: &SignArgs, targets: &[PathBuf], sign_one: F) -> Result<CommandOutput>
+where
+    F: Fn(&Path) -> Result<String> + Sync,
+{
     let parallel = args.max_degree_parallelism != Some(1) && targets.len() > 1;
     let threads = args
         .max_degree_parallelism
         .unwrap_or_else(rayon::current_num_threads);
-
-    struct Row {
-        idx: usize,
-        result: Result<String, anyhow::Error>,
-    }
-
-    let rows: Vec<Row> = if parallel {
+    let rows: Vec<(usize, Result<String>)> = if parallel {
         let pool = ThreadPoolBuilder::new()
             .num_threads(threads.max(1))
             .build()
@@ -113,94 +110,64 @@ fn sign_file_artifact_signing(args: &SignArgs) -> Result<CommandOutput> {
             targets
                 .par_iter()
                 .enumerate()
-                .map(|(idx, target)| Row {
-                    idx,
-                    result: try_sign_one_artifact_signing(target, args),
-                })
+                .map(|(idx, target)| (idx, sign_one(target)))
                 .collect()
         })
     } else {
         targets
             .iter()
             .enumerate()
-            .map(|(idx, target)| Row {
-                idx,
-                result: try_sign_one_artifact_signing(target, args),
-            })
+            .map(|(idx, target)| (idx, sign_one(target)))
             .collect()
     };
 
     let mut ordered = rows;
-    ordered.sort_by_key(|r| r.idx);
-
+    ordered.sort_by_key(|(idx, _)| *idx);
     let mut combined = String::new();
-    let mut successes: usize = 0;
-    let mut failures: usize = 0;
-    for (n, row) in ordered.into_iter().enumerate() {
-        if n > 0 {
+    let mut successes = 0;
+    let mut failures = 0;
+    for (position, (idx, result)) in ordered.into_iter().enumerate() {
+        if position > 0 {
             combined.push('\n');
         }
-        let target_display = targets[row.idx].display().to_string();
-        match row.result {
+        match result {
             Ok(block) => {
                 successes += 1;
                 combined.push_str(&block);
             }
-            Err(e) => {
+            Err(error) if args.continue_on_error => {
                 failures += 1;
-                if args.continue_on_error {
-                    combined.push_str(&format!("Failed: {target_display}: {e:#}\n"));
-                } else {
-                    return Err(e);
-                }
+                combined.push_str(&format!("Failed: {}: {error:#}\n", targets[idx].display()));
             }
+            Err(error) => return Err(error),
         }
     }
     Ok(CommandOutput::with_exit(
         combined,
-        batch_exit_code(exit_style, successes, failures),
+        batch_exit_code(resolved_sign_exit_codes(args), successes, failures),
     ))
 }
 
-fn sign_file_azure_key_vault(args: &SignArgs) -> Result<CommandOutput> {
-    validate_azure_key_vault_supported_options(args)?;
-    if args.files.is_empty() {
-        return Err(anyhow!(
-            "portable Azure Key Vault sign requires at least one file"
-        ));
-    }
-
-    let mut combined = String::new();
-    for (idx, target) in args.files.iter().enumerate() {
-        if idx > 0 {
-            combined.push('\n');
-        }
-        if args.skip_signed && target_has_valid_existing_pe_signature(target)? {
-            combined.push_str(&format!("Skipped (already signed): {}\n", target.display()));
-            continue;
-        }
-        sign_one_target_azure_key_vault(target, args)
-            .with_context(|| format!("portable Azure Key Vault sign '{}'", target.display()))?;
-        combined.push_str(&format!(
-            "Signed: {}\nazure_key_vault_certificate={}\n",
-            target.display(),
-            args.azure_key_vault_certificate
-                .as_deref()
-                .unwrap_or("<missing>")
-        ));
-    }
-    Ok(CommandOutput::with_exit(combined, success_exit_code(args)))
-}
-
 fn validate_supported_options(args: &SignArgs) -> Result<()> {
-    if args.digest != DigestAlgorithm::Sha256 {
+    match args.digest {
+        DigestAlgorithm::Sha256 | DigestAlgorithm::Sha384 | DigestAlgorithm::Sha512 => {}
+        DigestAlgorithm::Sha1 | DigestAlgorithm::CertHash => {
+            return Err(anyhow!(
+                "portable sign supports only --fd SHA256, SHA384, or SHA512, got {}",
+                args.digest.as_signtool_name()
+            ));
+        }
+    }
+    if args.pfx.is_some() && args.cert_sha1.is_some() {
         return Err(anyhow!(
-            "portable sign currently supports only --fd SHA256, got {}",
-            args.digest.as_signtool_name()
+            "portable sign accepts either --f/--pfx or --sha1 certificate-store material, not both"
         ));
     }
-    reject_path_option("--f/--pfx", &args.pfx)?;
-    reject_string_option("--p/--password", &args.password)?;
+    if args.password.is_some() && args.pfx.is_none() {
+        return Err(anyhow!(
+            "portable sign accepts --p/--password only together with --f/--pfx"
+        ));
+    }
     reject_bool_option("--a/--auto-select", args.auto_select)?;
     reject_string_option("--n/--subject-name", &args.subject_name)?;
     reject_string_option("--i/--issuer-name", &args.issuer_name)?;
@@ -214,13 +181,20 @@ fn validate_supported_options(args: &SignArgs) -> Result<()> {
         "--trusted-signing-dlib-root",
         &args.trusted_signing_dlib_root,
     )?;
-    reject_string_option("--tr/--timestamp-url", &args.timestamp_url)?;
+    if args.timestamp_url.is_some() && args.timestamp_digest.is_none() {
+        return Err(anyhow!(
+            "portable sign requires --td/--timestamp-digest with --tr/--timestamp-url"
+        ));
+    }
+    if args.timestamp_url.is_none() && args.timestamp_digest.is_some() {
+        return Err(anyhow!(
+            "portable sign requires --tr/--timestamp-url with --td/--timestamp-digest"
+        ));
+    }
     reject_string_option("--t/--legacy-timestamp-url", &args.legacy_timestamp_url)?;
     reject_string_option("--tseal/--seal-timestamp-url", &args.seal_timestamp_url)?;
-    reject_option("--td/--timestamp-digest", args.timestamp_digest.is_some())?;
     reject_string_option("--d/--description", &args.description)?;
     reject_string_option("--du/--description-url", &args.description_url)?;
-    reject_vec_option("--ac/--additional-cert", &args.additional_certs)?;
     reject_string_option("--r/--root-subject-name", &args.root_subject_name)?;
     reject_string_option("--u/--eku-oid", &args.eku_oid)?;
     reject_bool_option(
@@ -289,7 +263,7 @@ fn validate_supported_options(args: &SignArgs) -> Result<()> {
     reject_artifact_signing_options(args)?;
     if args.max_degree_parallelism == Some(0) {
         return Err(anyhow!(
-            "portable Artifact Signing sign requires --max-degree-of-parallelism to be at least 1"
+            "portable sign requires --max-degree-of-parallelism to be at least 1"
         ));
     }
     Ok(())
@@ -307,17 +281,20 @@ fn expand_glob_pattern(
     if pattern.contains('*') || pattern.contains('?') {
         for entry in glob(pattern).map_err(|e| anyhow!("{e}"))? {
             let p = entry.map_err(|e| anyhow!("{e}"))?;
-            if seen.insert(p.clone()) {
-                out.push(p);
-            }
+            insert_sign_target(p, out, seen);
         }
     } else {
         let p = PathBuf::from(pattern);
-        if seen.insert(p.clone()) {
-            out.push(p);
-        }
+        insert_sign_target(p, out, seen);
     }
     Ok(())
+}
+
+fn insert_sign_target(path: PathBuf, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    if seen.insert(identity) {
+        out.push(path);
+    }
 }
 
 fn expand_sign_targets(args: &SignArgs) -> Result<Vec<PathBuf>> {
@@ -455,12 +432,11 @@ fn validate_azure_key_vault_supported_options(args: &SignArgs) -> Result<()> {
     reject_bool_option("--noenclavewarn", args.sign_no_enclave_warn)?;
     reject_option("--rust-sip", args.rust_sip.is_some())?;
     reject_artifact_signing_options(args)?;
-    reject_path_option("--input-file-list", &args.sign_input_file_list)?;
-    reject_bool_option("--continue-on-error", args.continue_on_error)?;
-    reject_option(
-        "--max-degree-of-parallelism",
-        args.max_degree_parallelism.is_some(),
-    )?;
+    if args.max_degree_parallelism == Some(0) {
+        return Err(anyhow!(
+            "portable Azure Key Vault sign requires --max-degree-of-parallelism to be at least 1"
+        ));
+    }
     Ok(())
 }
 
@@ -550,83 +526,180 @@ fn validate_artifact_signing_supported_options(args: &SignArgs) -> Result<()> {
     Ok(())
 }
 
-fn sign_one_target(
+fn try_sign_one_local(
     target: &Path,
-    identity: &crate::cert_store::SigningIdentity,
+    args: &SignArgs,
+    identity: Option<&crate::cert_store::SigningIdentity>,
+) -> Result<String> {
+    if args.skip_signed && target_should_skip_signed(target)? {
+        return Ok(format!("Skipped (already signed): {}\n", target.display()));
+    }
+
+    let mut request = portable_sign_request(target, temporary_output_path(target), args)?;
+    if let Some(pfx) = &args.pfx {
+        request.pfx_path = Some(pfx.clone());
+        request.pfx_password = args.password.clone();
+    } else {
+        let identity = identity.expect("certificate-store identity is resolved before signing");
+        request.certificate_path = Some(identity.cert_path.clone());
+        request.private_key_path = Some(identity.key_path.clone());
+    }
+    run_portable_core_sign(request, "portable sign")?;
+
+    let mut block = format!("Signed: {}\n", target.display());
+    if let Some(identity) = identity {
+        block.push_str(&format!(
+            "thumbprint_sha1={}\nstore={}\\{}\n",
+            identity.thumbprint_sha1, identity.scope, identity.store_name
+        ));
+    } else {
+        block.push_str(&format!(
+            "pfx={}\n",
+            args.pfx.as_ref().expect("PFX source is selected").display()
+        ));
+    }
+    Ok(block)
+}
+
+fn try_sign_one_azure_key_vault(target: &Path, args: &SignArgs) -> Result<String> {
+    if args.skip_signed && target_should_skip_signed(target)? {
+        return Ok(format!("Skipped (already signed): {}\n", target.display()));
+    }
+
+    let mut request = portable_sign_request(target, temporary_output_path(target), args)?;
+    request.azure_key_vault_url =
+        text_opt(args.azure_key_vault_url.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_certificate =
+        text_opt(args.azure_key_vault_certificate.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_certificate_version =
+        text_opt(args.azure_key_vault_certificate_version.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_access_token =
+        text_opt(args.azure_key_vault_access_token.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_client_id =
+        text_opt(args.azure_key_vault_client_id.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_client_secret =
+        text_opt(args.azure_key_vault_client_secret.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_tenant_id =
+        text_opt(args.azure_key_vault_tenant_id.as_deref()).map(ToOwned::to_owned);
+    request.azure_key_vault_managed_identity =
+        Some(effective_azure_key_vault_managed_identity(args));
+    request.azure_authority = text_opt(args.azure_authority.as_deref()).map(ToOwned::to_owned);
+
+    run_portable_core_sign(request, "portable Azure Key Vault sign")?;
+    Ok(format!(
+        "Signed: {}\nazure_key_vault_certificate={}\n",
+        target.display(),
+        args.azure_key_vault_certificate
+            .as_deref()
+            .unwrap_or("<missing>")
+    ))
+}
+
+fn portable_sign_request(
+    target: &Path,
+    output: PathBuf,
+    args: &SignArgs,
+) -> Result<psign_portable_core::PortableSignRequest> {
+    validate_portable_core_target(target, args.append_signature)?;
+    Ok(psign_portable_core::PortableSignRequest {
+        path: target.to_path_buf(),
+        append_signature: args.append_signature,
+        skip_signed: args.skip_signed,
+        output_path: Some(output),
+        hash_algorithm: portable_core_digest(args.digest)?,
+        chain_certificate_paths: args.additional_certs.clone(),
+        timestamp_server: text_opt(args.timestamp_url.as_deref()).map(ToOwned::to_owned),
+        timestamp_hash_algorithm: args
+            .timestamp_digest
+            .map(portable_core_timestamp_digest)
+            .transpose()?,
+        ..Default::default()
+    })
+}
+
+fn validate_portable_core_target(
+    target: &Path,
     append_signature: bool,
-    skip_signed: bool,
-) -> Result<SignOneTargetResult> {
+) -> Result<psign_portable_core::PortableFileFormat> {
     let ext = target_extension_lower(target);
-    if !is_pe_winmd_extension(&ext) {
+    if matches!(ext.as_str(), "msixbundle" | "appxbundle") {
         return Err(anyhow!(
-            "portable thumbprint signing is currently implemented only for PE/WinMD targets; got {}",
+            "portable signing supports flat MSIX/AppX packages but not MSIX/AppX bundles: {}",
             target.display()
         ));
     }
-    let mut bytes =
-        std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
-    if skip_signed
-        && psign_sip_digest::verify_pe::verify_pe_authenticode_digest_consistency_if_signed(&bytes)
-            .with_context(|| {
-                format!(
-                    "check existing PE/WinMD Authenticode signature on '{}'",
-                    target.display()
-                )
-            })?
-            .is_some()
-    {
-        return Ok(SignOneTargetResult::SkippedAlreadySigned);
+    let format = psign_portable_core::infer_format(target);
+    match format {
+        psign_portable_core::PortableFileFormat::Catalog => {
+            return Err(anyhow!(
+                "portable native-shaped signing does not support catalog targets; use `psign-tool portable sign-catalog` with an explicit subject list"
+            ));
+        }
+        psign_portable_core::PortableFileFormat::WshScript => {
+            return Err(anyhow!(
+                "portable native-shaped signing does not support WSH script targets (.vbs, .js, .wsf): {}",
+                target.display()
+            ));
+        }
+        psign_portable_core::PortableFileFormat::Unknown => {
+            return Err(anyhow!(
+                "portable native-shaped signing supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts; got {}",
+                target.display()
+            ));
+        }
+        _ => {}
     }
-    if !append_signature {
-        bytes = psign_sip_digest::pe_embed::pe_remove_authenticode_certificates(bytes)
-            .with_context(|| {
-                format!(
-                    "remove existing PE Authenticode signatures from '{}'",
-                    target.display()
-                )
-            })?
-            .0;
+    if append_signature && format != psign_portable_core::PortableFileFormat::Pe {
+        return Err(anyhow!(
+            "--as/--append-signature is only supported for portable PE/WinMD signing"
+        ));
     }
-    psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(
-        &bytes,
-        &identity.cert_der,
-        &identity.key_pem,
-    )
-    .map(SignOneTargetResult::Signed)
+    Ok(format)
 }
 
-fn sign_one_target_azure_key_vault(target: &Path, args: &SignArgs) -> Result<()> {
-    let ext = target_extension_lower(target);
-    let tmp = temporary_output_path(target);
-    let result = match ext.as_str() {
-        ext if is_pe_winmd_extension(ext) => run_portable_sign_pe_azure_key_vault(target, &tmp, args),
-        ext if is_portable_powershell_script_extension(ext) => {
-            if args.append_signature {
-                Err(anyhow!(
-                    "--as/--append-signature is only supported for portable PE/WinMD signing"
-                ))
-            } else {
-                run_portable_sign_script_azure_key_vault(target, &tmp, args)
-            }
-        }
-        _ => Err(anyhow!(
-            "portable Azure Key Vault signing is currently implemented for PE/WinMD and PowerShell Authenticode script targets (.ps1, .psd1, .psm1, .ps1xml, .psc1, .cdxml, .mof); got {}",
-            target.display()
-        )),
-    }
+fn run_portable_core_sign(
+    request: psign_portable_core::PortableSignRequest,
+    operation: &str,
+) -> Result<()> {
+    let target = request.path.clone();
+    let output = request
+        .output_path
+        .clone()
+        .expect("portable sign output is set");
+    let format = validate_portable_core_target(&target, request.append_signature)?;
+    let companion = (format == psign_portable_core::PortableFileFormat::AppInstaller)
+        .then(|| appinstaller_companion_path(&output));
+    let result = psign_portable_core::portable_sign(request)
+        .map(|_| ())
+        .with_context(|| format!("{operation} '{}'", target.display()))
         .and_then(|_| {
-            std::fs::copy(&tmp, target)
+            std::fs::copy(&output, &target)
                 .with_context(|| format!("replace '{}' with signed output", target.display()))?;
+            if let Some(companion) = &companion {
+                let target_companion = appinstaller_companion_path(&target);
+                std::fs::copy(companion, &target_companion).with_context(|| {
+                    format!(
+                        "replace App Installer companion '{}' with '{}'",
+                        target_companion.display(),
+                        companion.display()
+                    )
+                })?;
+            }
             Ok(())
-        })
-        .and_then(|_| {
-            std::fs::remove_file(&tmp)
-                .with_context(|| format!("remove temporary output '{}'", tmp.display()))
         });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&output);
+    if let Some(companion) = companion {
+        let _ = std::fs::remove_file(companion);
     }
     result
+}
+
+fn appinstaller_companion_path(path: &Path) -> PathBuf {
+    path.with_extension(
+        path.extension()
+            .map(|extension| format!("{}.p7", extension.to_string_lossy()))
+            .unwrap_or_else(|| "p7".to_string()),
+    )
 }
 
 fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()> {
@@ -704,137 +777,6 @@ fn target_has_valid_existing_pe_signature(target: &Path) -> Result<bool> {
             })?
             .is_some(),
     )
-}
-
-fn run_portable_sign_pe_azure_key_vault(
-    target: &Path,
-    output: &Path,
-    args: &SignArgs,
-) -> Result<()> {
-    let mut argv = vec![
-        OsString::from("psign-tool"),
-        OsString::from("sign-pe"),
-        target.as_os_str().to_os_string(),
-        OsString::from("--digest"),
-        OsString::from(portable_digest_name(args.digest)?),
-    ];
-    if args.append_signature {
-        argv.push(OsString::from("--append-signature"));
-    }
-    for chain_cert in &args.additional_certs {
-        argv.push(OsString::from("--chain-cert"));
-        argv.push(chain_cert.as_os_str().to_os_string());
-    }
-    push_option(&mut argv, "--timestamp-url", &args.timestamp_url);
-    if let Some(timestamp_digest) = args.timestamp_digest {
-        argv.push(OsString::from("--timestamp-digest"));
-        argv.push(OsString::from(timestamp_digest_name(timestamp_digest)?));
-    }
-    push_option(
-        &mut argv,
-        "--azure-key-vault-url",
-        &args.azure_key_vault_url,
-    );
-    push_option(
-        &mut argv,
-        "--azure-key-vault-certificate",
-        &args.azure_key_vault_certificate,
-    );
-    push_option(
-        &mut argv,
-        "--azure-key-vault-certificate-version",
-        &args.azure_key_vault_certificate_version,
-    );
-    push_option(
-        &mut argv,
-        "--azure-key-vault-accesstoken",
-        &args.azure_key_vault_access_token,
-    );
-    if effective_azure_key_vault_managed_identity(args) {
-        argv.push(OsString::from("--azure-key-vault-managed-identity"));
-    }
-    push_option(
-        &mut argv,
-        "--azure-key-vault-tenant-id",
-        &args.azure_key_vault_tenant_id,
-    );
-    push_option(
-        &mut argv,
-        "--azure-key-vault-client-id",
-        &args.azure_key_vault_client_id,
-    );
-    push_option(
-        &mut argv,
-        "--azure-key-vault-client-secret",
-        &args.azure_key_vault_client_secret,
-    );
-    push_option(&mut argv, "--azure-authority", &args.azure_authority);
-    argv.push(OsString::from("--output"));
-    argv.push(output.as_os_str().to_os_string());
-
-    std::thread::Builder::new()
-        .name("psign-portable-sign-pe".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || psign_digest_cli::run_from(argv))
-        .map_err(|e| anyhow!("spawn portable sign-pe runner: {e}"))?
-        .join()
-        .map_err(|_| anyhow!("portable sign-pe runner panicked"))?
-}
-
-#[cfg(feature = "azure-kv-sign")]
-fn run_portable_sign_script_azure_key_vault(
-    target: &Path,
-    output: &Path,
-    args: &SignArgs,
-) -> Result<()> {
-    let request = psign_portable_core::PortableSignRequest {
-        path: target.to_path_buf(),
-        output_path: Some(output.to_path_buf()),
-        hash_algorithm: portable_core_digest(args.digest)?,
-        chain_certificate_paths: args.additional_certs.clone(),
-        timestamp_server: text_opt(args.timestamp_url.as_deref()).map(ToOwned::to_owned),
-        timestamp_hash_algorithm: args
-            .timestamp_digest
-            .map(portable_core_timestamp_digest)
-            .transpose()?,
-        azure_key_vault_url: text_opt(args.azure_key_vault_url.as_deref()).map(ToOwned::to_owned),
-        azure_key_vault_certificate: text_opt(args.azure_key_vault_certificate.as_deref())
-            .map(ToOwned::to_owned),
-        azure_key_vault_certificate_version: text_opt(
-            args.azure_key_vault_certificate_version.as_deref(),
-        )
-        .map(ToOwned::to_owned),
-        azure_key_vault_access_token: text_opt(args.azure_key_vault_access_token.as_deref())
-            .map(ToOwned::to_owned),
-        azure_key_vault_client_id: text_opt(args.azure_key_vault_client_id.as_deref())
-            .map(ToOwned::to_owned),
-        azure_key_vault_client_secret: text_opt(args.azure_key_vault_client_secret.as_deref())
-            .map(ToOwned::to_owned),
-        azure_key_vault_tenant_id: text_opt(args.azure_key_vault_tenant_id.as_deref())
-            .map(ToOwned::to_owned),
-        azure_key_vault_managed_identity: Some(effective_azure_key_vault_managed_identity(args)),
-        azure_authority: text_opt(args.azure_authority.as_deref()).map(ToOwned::to_owned),
-        ..Default::default()
-    };
-    psign_portable_core::portable_sign(request)
-        .map(|_| ())
-        .with_context(|| {
-            format!(
-                "portable Azure Key Vault PowerShell script target '{}'",
-                target.display()
-            )
-        })
-}
-
-#[cfg(not(feature = "azure-kv-sign"))]
-fn run_portable_sign_script_azure_key_vault(
-    _target: &Path,
-    _output: &Path,
-    _args: &SignArgs,
-) -> Result<()> {
-    Err(anyhow!(
-        "portable Azure Key Vault signing support is not compiled into this build (feature: azure-kv-sign)"
-    ))
 }
 
 fn run_portable_sign_pe_artifact_signing(
@@ -1174,7 +1116,6 @@ fn artifact_signing_metadata(args: &SignArgs) -> Result<Option<ArtifactSigningMe
     Ok(Some(doc))
 }
 
-#[cfg(any(feature = "artifact-signing-rest", feature = "azure-kv-sign"))]
 fn portable_core_digest(
     digest: crate::cli::DigestAlgorithm,
 ) -> Result<psign_portable_core::PortableDigestAlgorithm> {
@@ -1184,13 +1125,12 @@ fn portable_core_digest(
         crate::cli::DigestAlgorithm::Sha512 => psign_portable_core::PortableDigestAlgorithm::Sha512,
         crate::cli::DigestAlgorithm::Sha1 | crate::cli::DigestAlgorithm::CertHash => {
             return Err(anyhow!(
-                "portable cloud signing supports SHA256, SHA384, and SHA512 file digests"
+                "portable signing supports SHA256, SHA384, and SHA512 file digests"
             ));
         }
     })
 }
 
-#[cfg(any(feature = "artifact-signing-rest", feature = "azure-kv-sign"))]
 fn portable_core_timestamp_digest(
     digest: crate::cli::DigestAlgorithm,
 ) -> Result<psign_portable_core::PortableTimestampDigestAlgorithm> {
@@ -1209,7 +1149,7 @@ fn portable_core_timestamp_digest(
         }
         crate::cli::DigestAlgorithm::CertHash => {
             return Err(anyhow!(
-                "portable cloud signing timestamp digest does not support certHash"
+                "portable signing timestamp digest does not support certHash"
             ));
         }
     })
@@ -1354,11 +1294,23 @@ fn push_path_option(argv: &mut Vec<OsString>, name: &str, value: Option<&PathBuf
 }
 
 fn temporary_output_path(target: &Path) -> PathBuf {
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
+    let stem = target
+        .file_stem()
+        .and_then(|name| name.to_str())
         .unwrap_or("signed-output");
-    target.with_file_name(format!("{}.psign-{}.tmp", file_name, std::process::id()))
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target.hash(&mut hasher);
+    let target_id = hasher.finish();
+    match target.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => target.with_file_name(format!(
+            "{stem}.psign-{}-{target_id:016x}.{extension}",
+            std::process::id()
+        )),
+        None => target.with_file_name(format!(
+            "{stem}.psign-{}-{target_id:016x}",
+            std::process::id()
+        )),
+    }
 }
 
 fn azure_key_vault_requested(args: &SignArgs) -> bool {
@@ -1436,12 +1388,6 @@ fn reject_workload_identity(name: &str, value: Option<AzureCredentialType>) -> R
     Ok(())
 }
 
-fn success_exit_code(args: &SignArgs) -> i32 {
-    match resolved_sign_exit_codes(args) {
-        SignExitCodes::Azuresigntool | SignExitCodes::Signtool => 0,
-    }
-}
-
 fn resolved_sign_exit_codes(args: &SignArgs) -> SignExitCodes {
     if let Some(x) = args.exit_codes {
         return x;
@@ -1485,7 +1431,7 @@ fn batch_exit_code(exit_style: SignExitCodes, successes: usize, failures: usize)
 fn reject_option(name: &str, present: bool) -> Result<()> {
     if present {
         return Err(anyhow!(
-            "portable sign does not support {name}; supported subsets are local store PE/WinMD signing (--sha1, --store/--s, --machine-store/--sm, --cert-store-dir, --fd SHA256, --skip-signed), Azure Key Vault PE/WinMD signing (--azure-key-vault-*, --fd SHA256/SHA384/SHA512, --skip-signed), and Azure Artifact Signing PE/WinMD signing (--artifact-signing-* or --dmdf, --skip-signed)"
+            "portable sign does not support {name}; local PFX/certificate-store and Azure Key Vault signing support PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts, while Azure Artifact Signing supports its documented native-shaped subset"
         ));
     }
     Ok(())
@@ -1501,10 +1447,6 @@ fn reject_string_option(name: &str, value: &Option<String>) -> Result<()> {
 
 fn reject_path_option(name: &str, value: &Option<PathBuf>) -> Result<()> {
     reject_option(name, value.is_some())
-}
-
-fn reject_vec_option(name: &str, value: &[PathBuf]) -> Result<()> {
-    reject_option(name, !value.is_empty())
 }
 
 fn reject_artifact_signing_options(args: &SignArgs) -> Result<()> {
@@ -1578,4 +1520,37 @@ fn reject_artifact_signing_options(args: &SignArgs) -> Result<()> {
         &args.artifact_signing_endpoint_base_url,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{insert_sign_target, temporary_output_path};
+    use std::collections::HashSet;
+
+    #[test]
+    fn deduplicates_existing_path_aliases() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target.ps1");
+        std::fs::write(&target, "Write-Output test").expect("write target");
+        let alias = directory.path().join(".").join("target.ps1");
+
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+        insert_sign_target(target, &mut targets, &mut seen);
+        insert_sign_target(alias, &mut targets, &mut seen);
+
+        assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn temporary_output_paths_do_not_collide_for_same_named_targets() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let first = directory.path().join("one").join("target.ps1");
+        let second = directory.path().join("two").join("target.ps1");
+
+        assert_ne!(
+            temporary_output_path(&first),
+            temporary_output_path(&second)
+        );
+    }
 }

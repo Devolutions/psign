@@ -10,6 +10,7 @@ pub mod cert_store;
 pub mod cli;
 pub mod code;
 pub mod native_argv;
+pub mod portable_remove;
 pub mod portable_sign;
 pub mod rdp;
 pub mod response_argv;
@@ -159,8 +160,6 @@ fn portable_verify_unsupported(args: &crate::cli::VerifyArgs) -> bool {
     args.policy != crate::cli::VerifyPolicy::Default
         || args.policy_guid.is_some()
         || args.revocation_check
-        || args.detached_pkcs7.is_some()
-        || args.catalog.is_some()
         || args.catalog_search.is_some()
         || args.catalog_database_guid.is_some()
         || args.os_version_check.is_some()
@@ -177,7 +176,7 @@ fn portable_verify_unsupported(args: &crate::cli::VerifyArgs) -> bool {
         || !args.signer_thumbprint_sha1.is_empty()
         || !args.intermediate_ca_sha1.is_empty()
         || !args.warn_if_missing_eku.is_empty()
-        || args.detached_pkcs7_content.is_some()
+        || (args.detached_pkcs7_content.is_some() && args.detached_pkcs7.is_none())
         || args.warn_pca_2010
         || args.no_warn_pca_2010
         || args.verify_sealing_signatures
@@ -191,6 +190,75 @@ fn portable_verify_unsupported(args: &crate::cli::VerifyArgs) -> bool {
         || args.rust_sip_all_digest_checks
         || args.biometric_policy
         || args.enclave_policy
+}
+
+fn append_portable_trust_args(args: &crate::cli::VerifyArgs, argv: &mut Vec<std::ffi::OsString>) {
+    if let Some(dir) = &args.anchor_dir {
+        argv.push(std::ffi::OsString::from("--anchor-dir"));
+        argv.push(dir.as_os_str().to_os_string());
+    }
+    for ca in &args.trusted_ca {
+        argv.push(std::ffi::OsString::from("--trusted-ca"));
+        argv.push(ca.as_os_str().to_os_string());
+    }
+    if let Some(cab) = &args.authroot_cab {
+        argv.push(std::ffi::OsString::from("--authroot-cab"));
+        argv.push(cab.as_os_str().to_os_string());
+    }
+    if let Some(expected) = &args.expect_authroot_cab_sha256 {
+        argv.push(std::ffi::OsString::from("--expect-authroot-cab-sha256"));
+        argv.push(std::ffi::OsString::from(expected));
+    }
+    if args.verbose_chain {
+        argv.push(std::ffi::OsString::from("--verbose-chain"));
+    }
+    if args.allow_loose_signing_cert {
+        argv.push(std::ffi::OsString::from("--allow-loose-signing-cert"));
+    }
+    if args.prefer_timestamp_signing_time {
+        argv.push(std::ffi::OsString::from("--prefer-timestamp-signing-time"));
+    }
+    if args.require_valid_timestamp {
+        argv.push(std::ffi::OsString::from("--require-valid-timestamp"));
+    }
+    if args.online_aia {
+        argv.push(std::ffi::OsString::from("--online-aia"));
+    }
+    if let Some(url) = &args.aia_url_override {
+        argv.push(std::ffi::OsString::from("--aia-url-override"));
+        argv.push(std::ffi::OsString::from(url));
+    }
+    if args.online_ocsp {
+        argv.push(std::ffi::OsString::from("--online-ocsp"));
+    }
+    if let Some(url) = &args.ocsp_url_override {
+        argv.push(std::ffi::OsString::from("--ocsp-url-override"));
+        argv.push(std::ffi::OsString::from(url));
+    }
+    if let Some(mode) = args.revocation_mode {
+        argv.push(std::ffi::OsString::from("--revocation-mode"));
+        argv.push(std::ffi::OsString::from(mode.as_arg()));
+    }
+    if let Some(url) = &args.crl_url_override {
+        argv.push(std::ffi::OsString::from("--crl-url-override"));
+        argv.push(std::ffi::OsString::from(url));
+    }
+    if let Some(as_of) = &args.as_of {
+        argv.push(std::ffi::OsString::from("--as-of"));
+        argv.push(std::ffi::OsString::from(as_of));
+    }
+    if args.online_timeout_secs != 5 {
+        argv.push(std::ffi::OsString::from("--online-timeout-secs"));
+        argv.push(std::ffi::OsString::from(
+            args.online_timeout_secs.to_string(),
+        ));
+    }
+    if args.online_max_download_bytes != 1024 * 1024 {
+        argv.push(std::ffi::OsString::from("--online-max-download-bytes"));
+        argv.push(std::ffi::OsString::from(
+            args.online_max_download_bytes.to_string(),
+        ));
+    }
 }
 
 fn portable_verify_explicit_trust_requested(args: &crate::cli::VerifyArgs) -> bool {
@@ -235,6 +303,49 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
             "--mode portable verify supports file verification and portable trust inputs; use `psign-tool portable ...` for lower-level diagnostic commands"
         ));
     }
+
+    if let Some(signature) = &args.detached_pkcs7 {
+        if args.files.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "--mode portable verify --detached-pkcs7 requires exactly one verify target"
+            ));
+        }
+        let content = args
+            .detached_pkcs7_content
+            .as_ref()
+            .unwrap_or(&args.files[0]);
+        let mut argv = vec![std::ffi::OsString::from("trust-verify-detached")];
+        append_portable_trust_args(args, &mut argv);
+        argv.push(content.as_os_str().to_os_string());
+        argv.push(signature.as_os_str().to_os_string());
+        run_portable_args(&argv)?;
+        return Ok(CommandOutput::ok(String::new()));
+    }
+
+    if let Some(catalog) = &args.catalog {
+        if args.catalog_hash_algorithm != crate::cli::CatalogHashAlgorithm::Sha256 {
+            return Err(anyhow::anyhow!(
+                "--mode portable verify --catalog derives each member digest algorithm from the catalog; --catalog-hash-algorithm must be sha256"
+            ));
+        }
+
+        let mut trust_argv = vec![std::ffi::OsString::from("trust-verify-catalog")];
+        append_portable_trust_args(args, &mut trust_argv);
+        trust_argv.push(catalog.as_os_str().to_os_string());
+        run_portable_args(&trust_argv)?;
+
+        for subject in &args.files {
+            let argv = [
+                std::ffi::OsString::from("verify-catalog-member"),
+                std::ffi::OsString::from("--catalog"),
+                catalog.as_os_str().to_os_string(),
+                subject.as_os_str().to_os_string(),
+            ];
+            run_portable_args(&argv)?;
+        }
+        return Ok(CommandOutput::ok(String::new()));
+    }
+
     for path in &args.files {
         let inferred_command = portable_command_for_path(path)?;
         let explicit_trust = portable_verify_explicit_trust_requested(args);
@@ -251,72 +362,7 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
         };
         let mut argv = Vec::new();
         argv.push(std::ffi::OsString::from(command));
-        if let Some(dir) = &args.anchor_dir {
-            argv.push(std::ffi::OsString::from("--anchor-dir"));
-            argv.push(dir.as_os_str().to_os_string());
-        }
-        for ca in &args.trusted_ca {
-            argv.push(std::ffi::OsString::from("--trusted-ca"));
-            argv.push(ca.as_os_str().to_os_string());
-        }
-        if let Some(cab) = &args.authroot_cab {
-            argv.push(std::ffi::OsString::from("--authroot-cab"));
-            argv.push(cab.as_os_str().to_os_string());
-        }
-        if let Some(expected) = &args.expect_authroot_cab_sha256 {
-            argv.push(std::ffi::OsString::from("--expect-authroot-cab-sha256"));
-            argv.push(std::ffi::OsString::from(expected));
-        }
-        if args.verbose_chain {
-            argv.push(std::ffi::OsString::from("--verbose-chain"));
-        }
-        if args.allow_loose_signing_cert {
-            argv.push(std::ffi::OsString::from("--allow-loose-signing-cert"));
-        }
-        if args.prefer_timestamp_signing_time {
-            argv.push(std::ffi::OsString::from("--prefer-timestamp-signing-time"));
-        }
-        if args.require_valid_timestamp {
-            argv.push(std::ffi::OsString::from("--require-valid-timestamp"));
-        }
-        if args.online_aia {
-            argv.push(std::ffi::OsString::from("--online-aia"));
-        }
-        if let Some(url) = &args.aia_url_override {
-            argv.push(std::ffi::OsString::from("--aia-url-override"));
-            argv.push(std::ffi::OsString::from(url));
-        }
-        if args.online_ocsp {
-            argv.push(std::ffi::OsString::from("--online-ocsp"));
-        }
-        if let Some(url) = &args.ocsp_url_override {
-            argv.push(std::ffi::OsString::from("--ocsp-url-override"));
-            argv.push(std::ffi::OsString::from(url));
-        }
-        if let Some(mode) = args.revocation_mode {
-            argv.push(std::ffi::OsString::from("--revocation-mode"));
-            argv.push(std::ffi::OsString::from(mode.as_arg()));
-        }
-        if let Some(url) = &args.crl_url_override {
-            argv.push(std::ffi::OsString::from("--crl-url-override"));
-            argv.push(std::ffi::OsString::from(url));
-        }
-        if let Some(as_of) = &args.as_of {
-            argv.push(std::ffi::OsString::from("--as-of"));
-            argv.push(std::ffi::OsString::from(as_of));
-        }
-        if args.online_timeout_secs != 5 {
-            argv.push(std::ffi::OsString::from("--online-timeout-secs"));
-            argv.push(std::ffi::OsString::from(
-                args.online_timeout_secs.to_string(),
-            ));
-        }
-        if args.online_max_download_bytes != 1024 * 1024 {
-            argv.push(std::ffi::OsString::from("--online-max-download-bytes"));
-            argv.push(std::ffi::OsString::from(
-                args.online_max_download_bytes.to_string(),
-            ));
-        }
+        append_portable_trust_args(args, &mut argv);
         argv.push(path.as_os_str().to_os_string());
         run_portable_args(&argv)?;
     }
@@ -337,6 +383,73 @@ fn execute_portable_inspect(
         std::ffi::OsString::from(input),
     ];
     run_portable_args(&argv)
+}
+
+fn execute_portable_timestamp(args: &crate::cli::TimestampArgs) -> anyhow::Result<CommandOutput> {
+    if args.legacy_url.is_some() {
+        return Err(anyhow::anyhow!(
+            "--mode portable timestamp does not support legacy --legacy-url (/t); use RFC3161 --rfc3161-url (/tr)"
+        ));
+    }
+    if args.seal_timestamp_url.is_some() || args.remove_seal || args.no_seal_warn {
+        return Err(anyhow::anyhow!(
+            "--mode portable timestamp does not support sealing (--seal-timestamp-url (/tseal), --remove-seal (/force), or --no-seal-warn (/nosealwarn))"
+        ));
+    }
+    if args.timestamp_pkcs7_files {
+        return Err(anyhow::anyhow!(
+            "--mode portable timestamp does not support --timestamp-pkcs7-files (/p7); only embedded PE/WinMD signatures are supported"
+        ));
+    }
+    if args.signature_index.is_some() {
+        return Err(anyhow::anyhow!(
+            "--mode portable timestamp does not support --signature-index (/tp); portable RFC3161 insertion safely timestamps only the primary embedded signature"
+        ));
+    }
+    let url = args.rfc3161_url.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--mode portable timestamp requires RFC3161 --rfc3161-url (/tr) and --digest (/td)"
+        )
+    })?;
+    let digest = match args.digest {
+        Some(crate::cli::DigestAlgorithm::Sha1) => "sha1",
+        Some(crate::cli::DigestAlgorithm::Sha256) => "sha256",
+        Some(crate::cli::DigestAlgorithm::Sha384) => "sha384",
+        Some(crate::cli::DigestAlgorithm::Sha512) => "sha512",
+        Some(crate::cli::DigestAlgorithm::CertHash) => {
+            return Err(anyhow::anyhow!(
+                "--mode portable timestamp does not support --digest certHash; use sha1, sha256, sha384, or sha512"
+            ));
+        }
+        None => {
+            return Err(anyhow::anyhow!(
+                "--mode portable timestamp requires --digest (/td) with --rfc3161-url (/tr)"
+            ));
+        }
+    };
+
+    for path in &args.files {
+        let image =
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+        psign_sip_digest::verify_pe::pe_nth_pkcs7_signed_data_der(&image, 0).map_err(|e| {
+            anyhow::anyhow!(
+                "--mode portable timestamp supports only PE/WinMD files with a primary embedded Authenticode signature ({}): {e}",
+                path.display()
+            )
+        })?;
+        let argv = [
+            std::ffi::OsString::from("timestamp-pe-rfc3161"),
+            path.as_os_str().to_os_string(),
+            std::ffi::OsString::from("--rfc3161-url"),
+            std::ffi::OsString::from(url),
+            std::ffi::OsString::from("--digest"),
+            std::ffi::OsString::from(digest),
+            std::ffi::OsString::from("--output"),
+            path.as_os_str().to_os_string(),
+        ];
+        run_portable_args(&argv)?;
+    }
+    Ok(CommandOutput::ok(String::new()))
 }
 
 #[cfg(windows)]
@@ -378,15 +491,11 @@ fn execute_portable(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
         Command::Verify(args) => execute_portable_verify(args),
         Command::InspectSignature(args) => execute_portable_inspect(args),
         Command::Sign(args) => crate::portable_sign::sign_file(args, &cli.global),
-        Command::Timestamp(_) => Err(anyhow::anyhow!(
-            "--mode portable timestamp is not implemented; portable timestamp helpers are available under `psign-tool portable ...`"
-        )),
+        Command::Timestamp(args) => execute_portable_timestamp(args),
         Command::Catdb(_) => Err(anyhow::anyhow!(
             "--mode portable catdb is unsupported because catalog database operations require Win32"
         )),
-        Command::Remove(_) => Err(anyhow::anyhow!(
-            "--mode portable remove is unsupported; embedded signature removal currently requires the Windows implementation"
-        )),
+        Command::Remove(args) => crate::portable_remove::remove_command(args, &cli.global),
         Command::Rdp(_) => Err(anyhow::anyhow!(
             "--mode portable rdp is available as `psign-tool portable rdp ...`"
         )),
