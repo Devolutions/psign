@@ -1,6 +1,6 @@
 [package]
 name = "psign-authenticode-trust"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 description = "Portable Authenticode PKCS#7 trust verification (anchors, chain, EKU) using picky-rs"
 license.workspace = true

@@ -66,7 +66,7 @@ dotnet tool run psign-tool -- --help
 Create local dotnet tool packages from prebuilt release artifacts:
 
 ```powershell
-pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.6.2 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
+pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.6.3 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
 ```
 
 The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`, plus an `any` fallback package for unsupported runtimes.
