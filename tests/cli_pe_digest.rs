@@ -5621,12 +5621,23 @@ fn mode_portable_artifact_signing_continue_on_error_reports_partial_failure() {
     verify.assert().success();
 }
 
-#[cfg(feature = "artifact-signing-rest")]
+#[cfg(all(
+    feature = "timestamp-server",
+    feature = "timestamp-http",
+    feature = "artifact-signing-rest"
+))]
 #[test]
-fn mode_portable_artifact_signing_rejects_unsupported_targets_before_remote_submit() {
+fn mode_portable_artifact_signing_signs_and_timestamps_psd1() {
     let dir = tempfile::tempdir().unwrap();
-    let script_path = dir.path().join("unsigned.ps1");
-    std::fs::write(&script_path, b"Write-Host test").expect("write script");
+    let script_path = dir.path().join("sample.artifact-mode-portable-signed.psd1");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unsigned-sample.psd1"),
+        &script_path,
+    )
+    .expect("copy unsigned psd1");
+
+    let (mut artifact_guard, endpoint) = spawn_psign_artifact_signing_server(2);
+    let (mut timestamp_guard, timestamp_url) = spawn_psign_server(&[]);
 
     let mut cmd = Command::cargo_bin("psign-tool").unwrap();
     cmd.arg("--mode")
@@ -5640,10 +5651,38 @@ fn mode_portable_artifact_signing_rejects_unsupported_targets_before_remote_subm
         .arg("prof")
         .arg("--artifact-signing-access-token")
         .arg("test-token")
+        .arg("--artifact-signing-endpoint")
+        .arg(&endpoint)
+        .arg("--timestamp-url")
+        .arg(&timestamp_url)
+        .arg("--timestamp-digest")
+        .arg("sha256")
+        .arg("--exit-codes")
+        .arg("azure")
         .arg(&script_path);
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "portable Artifact Signing is currently implemented for PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX targets",
-    ));
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let artifact_status = artifact_guard
+        .0
+        .wait()
+        .expect("Artifact Signing server exit");
+    assert!(
+        artifact_status.success(),
+        "Artifact Signing server failed with {artifact_status}"
+    );
+    let timestamp_status = timestamp_guard.0.wait().expect("timestamp server exit");
+    assert!(
+        timestamp_status.success(),
+        "timestamp server failed with {timestamp_status}"
+    );
+
+    let mut verify = portable_cmd();
+    verify.arg("verify-script").arg(&script_path);
+    verify.assert().success();
+
+    let signed = std::fs::read_to_string(&script_path).expect("read signed psd1");
+    assert!(signed.contains("# SIG # Begin signature block"));
 }
 
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]

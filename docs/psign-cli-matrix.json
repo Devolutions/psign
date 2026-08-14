@@ -62,7 +62,7 @@
       {"native": "/di", "rust": "--digest-ingest", "tier": "P1", "status": "partial"},
       {"native": "/ds", "rust": "--digest-sign-only", "tier": "P1", "status": "partial"},
       {"native": "/dlib", "rust": "--dlib", "tier": "P0", "status": "implemented"},
-      {"native": "/dmdf", "rust": "--dmdf", "tier": "P0", "status": "implemented", "notes": "Windows dlib metadata; in --mode portable Artifact Signing PE/WinMD signing, accepted as metadata JSON without loading the dlib"},
+      {"native": "/dmdf", "rust": "--dmdf", "tier": "P0", "status": "implemented", "notes": "Windows dlib metadata; in --mode portable Artifact Signing PE/WinMD and PowerShell Authenticode script signing, accepted as metadata JSON without loading the dlib"},
       {"native": "/dxml", "rust": "--digest-xml", "tier": "P1", "status": "partial"},
       {"native": "/du", "rust": "--description-url", "tier": "P0", "status": "implemented"},
       {"native": "/f", "rust": "--pfx", "tier": "P0", "status": "implemented"},

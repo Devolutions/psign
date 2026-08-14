@@ -634,6 +634,15 @@ fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()
     let tmp = temporary_output_path(target);
     let result = match ext.as_str() {
         ext if is_pe_winmd_extension(ext) => run_portable_sign_pe_artifact_signing(target, &tmp, args),
+        ext if is_portable_powershell_script_extension(ext) => {
+            if args.append_signature {
+                Err(anyhow!(
+                    "--as/--append-signature is only supported for portable PE/WinMD signing"
+                ))
+            } else {
+                run_portable_sign_script_artifact_signing(target, &tmp, args)
+            }
+        }
         _ if args.append_signature => Err(anyhow!(
             "--as/--append-signature is only supported for portable PE/WinMD signing"
         )),
@@ -644,7 +653,7 @@ fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()
             "portable Artifact Signing for catalog targets is available through `psign-tool portable sign-catalog ... --artifact-signing-*`; native-shaped in-place .cat signing needs a catalog-authenticode replacement path and is not implemented yet"
         )),
         _ => Err(anyhow!(
-            "portable Artifact Signing is currently implemented for PE/WinMD, CAB, MSI/MSP, and flat MSIX/AppX targets; got {}",
+            "portable Artifact Signing is currently implemented for PE/WinMD, PowerShell Authenticode scripts (.ps1, .psd1, .psm1, .ps1xml, .psc1, .cdxml, .mof), CAB, MSI/MSP, and flat MSIX/AppX targets; got {}",
             target.display()
         )),
     }
@@ -1019,6 +1028,25 @@ fn run_portable_sign_msix_artifact_signing(
     output: &Path,
     args: &SignArgs,
 ) -> Result<()> {
+    run_portable_sign_portable_core_artifact_signing(target, output, args, "MSIX/AppX")
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn run_portable_sign_script_artifact_signing(
+    target: &Path,
+    output: &Path,
+    args: &SignArgs,
+) -> Result<()> {
+    run_portable_sign_portable_core_artifact_signing(target, output, args, "PowerShell script")
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn run_portable_sign_portable_core_artifact_signing(
+    target: &Path,
+    output: &Path,
+    args: &SignArgs,
+    target_kind: &str,
+) -> Result<()> {
     let metadata = artifact_signing_metadata(args)?;
     let endpoint = text_opt(args.artifact_signing_endpoint.as_deref())
         .map(ToOwned::to_owned)
@@ -1032,17 +1060,17 @@ fn run_portable_sign_msix_artifact_signing(
         })
         .ok_or_else(|| {
             anyhow!(
-                "portable MSIX/AppX Artifact Signing requires --artifact-signing-endpoint, --artifact-signing-endpoint-base-url, --artifact-signing-region, or metadata Endpoint"
+                "portable {target_kind} Artifact Signing requires --artifact-signing-endpoint, --artifact-signing-endpoint-base-url, --artifact-signing-region, or metadata Endpoint"
             )
         })?;
     let account_name = text_opt(args.artifact_signing_account_name.as_deref())
         .map(ToOwned::to_owned)
         .or_else(|| metadata.as_ref().map(|m| m.CodeSigningAccountName.clone()))
-        .ok_or_else(|| anyhow!("portable MSIX/AppX Artifact Signing requires --artifact-signing-account-name or metadata CodeSigningAccountName"))?;
+        .ok_or_else(|| anyhow!("portable {target_kind} Artifact Signing requires --artifact-signing-account-name or metadata CodeSigningAccountName"))?;
     let profile_name = text_opt(args.artifact_signing_profile_name.as_deref())
         .map(ToOwned::to_owned)
         .or_else(|| metadata.as_ref().map(|m| m.CertificateProfileName.clone()))
-        .ok_or_else(|| anyhow!("portable MSIX/AppX Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName"))?;
+        .ok_or_else(|| anyhow!("portable {target_kind} Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName"))?;
     let correlation_id = text_opt(args.artifact_signing_correlation_id.as_deref())
         .map(ToOwned::to_owned)
         .or_else(|| metadata.as_ref().and_then(|m| m.CorrelationId.clone()));
@@ -1052,7 +1080,7 @@ fn run_portable_sign_msix_artifact_signing(
         || text_present(&args.artifact_signing_authority)
     {
         return Err(anyhow!(
-            "native-shaped portable MSIX/AppX Artifact Signing does not yet support correlation ID, signature-algorithm, api-version, or authority overrides"
+            "native-shaped portable {target_kind} Artifact Signing does not yet support correlation ID, signature-algorithm, api-version, or authority overrides"
         ));
     }
 
@@ -1102,7 +1130,7 @@ fn run_portable_sign_msix_artifact_signing(
         .map(|_| ())
         .with_context(|| {
             format!(
-                "portable Artifact Signing MSIX/AppX target '{}'",
+                "portable Artifact Signing {target_kind} target '{}'",
                 target.display()
             )
         })
@@ -1116,6 +1144,17 @@ fn run_portable_sign_msix_artifact_signing(
 ) -> Result<()> {
     Err(anyhow!(
         "portable MSIX/AppX Artifact Signing support is not compiled into this build (feature: artifact-signing-rest)"
+    ))
+}
+
+#[cfg(not(feature = "artifact-signing-rest"))]
+fn run_portable_sign_script_artifact_signing(
+    _target: &Path,
+    _output: &Path,
+    _args: &SignArgs,
+) -> Result<()> {
+    Err(anyhow!(
+        "portable PowerShell script Artifact Signing support is not compiled into this build (feature: artifact-signing-rest)"
     ))
 }
 
