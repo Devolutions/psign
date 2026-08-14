@@ -30,7 +30,7 @@ repository = "https://github.com/Devolutions/psign"
 
 [package]
 name = "psign"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 description = "Rust port of the Windows SDK signtool.exe (Authenticode sign/verify/timestamp) with portable digest helpers."
 license.workspace = true
@@ -46,7 +46,6 @@ default = [
 ]
 ## Azure Key Vault signing (`AuthenticatorDigestSign` callback + REST); enables Azure-shaped CLI flags on `sign`.
 azure-kv-sign = [
-    "dep:psign-portable-core",
     "dep:psign-azure-kv-rest",
     "dep:reqwest",
     "psign-digest-cli/azure-kv-sign-portable",
@@ -55,7 +54,6 @@ azure-kv-sign = [
 ## Azure Artifact Signing / Trusted Signing **data-plane** hash signing (REST LRO); experimental helper command `artifact-signing-submit`.
 artifact-signing-rest = [
     "dep:psign-codesigning-rest",
-    "dep:psign-portable-core",
     "psign-digest-cli/artifact-signing-rest",
     "psign-portable-core/artifact-signing-rest",
 ]
@@ -69,7 +67,7 @@ psign-sip-digest = { path = "crates/psign-sip-digest" }
 psign-authenticode-trust = { path = "crates/psign-authenticode-trust" }
 psign-digest-cli = { path = "crates/psign-digest-cli" }
 psign-opc-sign = { path = "crates/psign-opc-sign" }
-psign-portable-core = { path = "crates/psign-portable-core", optional = true }
+psign-portable-core = { path = "crates/psign-portable-core" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,6 +1,6 @@
 # Linux signing pipelines (what works today)
 
-**`psign-tool portable`** on Linux/macOS can now sign PE with local RSA/SHA-2 keys, Azure Key Vault RSA signing, or Azure Artifact Signing REST, and can sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with local RSA/SHA-2 keys. CAB, MSI/MSP, generic catalog, and flat MSIX/AppX signing can also use Azure Artifact Signing REST. It still does not provide MSIX/AppX bundle, upload, or encrypted package final signing, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
+**`psign-tool portable`** on Linux/macOS can sign PE, CAB, MSI/MSP, flat MSIX/AppX, NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts through native-shaped portable local PFX/certificate-store or Azure Key Vault routes. It can also sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with scoped local RSA/SHA-2 commands; Azure Artifact Signing REST supports its documented native-shaped subset. It still does not provide MSIX/AppX bundle, upload, or encrypted package final signing, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
 
 For tool-by-tool gaps vs **`signtool.exe`**, AzureSignTool, and Artifact Signing, see [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md). On Windows, for writable copies of native signing binaries outside protected install paths, see [`writable-signing-binaries.md`](writable-signing-binaries.md).
 
@@ -18,7 +18,7 @@ Automation: **`scripts/linux-portable-validation.sh`**, GitHub **`ci-unix`**, an
 
 ## 1.1 Local portable signing
 
-Local RSA/SHA-2 signing is intentionally exposed through scoped portable commands before routing the native-shaped `sign` verb:
+Scoped portable commands remain available for explicit cert/key output paths:
 
 ```bash
 psign-tool portable sign-pe --cert cert.der --key key.pk8 --output signed.exe unsigned.exe
@@ -29,7 +29,9 @@ psign-tool portable sign-catalog --cert cert.der --key key.pk8 --output files.ca
 
 `sign-catalog` authors generic CTL member entries and signs the catalog PKCS#7. Pair it with `verify-catalog` and `verify-catalog-member --catalog files.cat file1.exe`; driver/INF policy and OS catalog database lookup remain Windows-only.
 
-## 1.2 Portable PE signing with Azure Key Vault
+For native-shaped in-place local signing, use either `--pfx`/`--password` or portable certificate-store material selected by `--sha1`. The route supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts; it also accepts input file lists and batch controls. Catalog targets, WSH scripts, and MSIX/AppX bundles remain explicit unsupported cases.
+
+## 1.2 Portable signing with Azure Key Vault
 
 With **`--features azure-kv-sign-portable`**, PE/WinMD signing can use Azure Key Vault for the RSA signature while building and embedding Authenticode CMS locally:
 
@@ -44,7 +46,7 @@ psign-tool portable sign-pe ./MyApp.exe \
   --output ./MyApp.signed.exe
 ```
 
-The PE subset of the native-shaped verb is also available for in-place signing:
+The native-shaped in-place route covers the same portable-core formats (including CAB, MSI/MSP, flat MSIX/AppX, packages, and PowerShell) and supports batch input lists, continuation, parallelism, and Azure-style exit codes:
 
 ```bash
 psign-tool --mode portable sign \
@@ -57,7 +59,7 @@ psign-tool --mode portable sign \
   ./MyApp.exe
 ```
 
-Portable Key Vault PE signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
+Portable Key Vault signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. MSIX/AppX bundles, catalog targets, and WSH scripts remain unsupported by this native-shaped route. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
 
 ## 1.3 Portable signing with Azure Artifact Signing REST
 

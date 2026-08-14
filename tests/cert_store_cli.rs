@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use base64::Engine as _;
 use predicates::prelude::*;
-use psign_sip_digest::{pe_digest, pkcs7, verify_pe};
+use psign_sip_digest::{cab_digest, pe_digest, pkcs7, verify_pe};
 use rand::rngs::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -499,14 +499,37 @@ fn portable_sign_sha1_replaces_existing_signature_by_default_and_appends_with_fl
         .success();
 
     let replaced = std::fs::read(&replaced).expect("read replaced PE");
-    let appended = std::fs::read(&appended).expect("read appended PE");
+    let appended_bytes = std::fs::read(&appended).expect("read appended PE");
     assert_eq!(
         verify_pe::pe_pkcs7_signed_data_entry_count(&replaced).expect("replaced PE entry count"),
         1
     );
     assert_eq!(
-        verify_pe::pe_pkcs7_signed_data_entry_count(&appended).expect("appended PE entry count"),
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended_bytes)
+            .expect("appended PE entry count"),
         2
+    );
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args([
+            "--sha1",
+            &thumbprint,
+            "--fd",
+            "SHA256",
+            "--append-signature",
+        ])
+        .arg(&appended)
+        .arg(&appended)
+        .assert()
+        .success();
+
+    let appended_twice = std::fs::read(&appended).expect("read twice-appended PE");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended_twice)
+            .expect("twice-appended PE entry count"),
+        4
     );
 }
 
@@ -683,6 +706,122 @@ fn portable_sign_sha1_rejects_unsupported_format() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("PE/WinMD"));
+}
+
+#[test]
+fn portable_sign_pfx_signs_cab_and_powershell_from_input_file_list() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pfx_path = temp.path().join("signing.pfx");
+    let cab_path = temp.path().join("sample.cab");
+    let script_path = temp.path().join("sample.psd1");
+    let list_path = temp.path().join("inputs.txt");
+    let fixture = test_cert("psign PFX portable package test");
+    std::fs::write(&pfx_path, test_pfx_der(&fixture, "secret")).expect("write PFX");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated-unsigned/cab/sample.cab"),
+        &cab_path,
+    )
+    .expect("copy unsigned CAB");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/unsigned-sample.psd1"),
+        &script_path,
+    )
+    .expect("copy unsigned script");
+    std::fs::write(
+        &list_path,
+        format!("{}\n{}\n", cab_path.display(), script_path.display()),
+    )
+    .expect("write input list");
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--pfx"])
+        .arg(&pfx_path)
+        .args([
+            "--password",
+            "secret",
+            "--input-file-list",
+            list_path.to_str().expect("UTF-8 path"),
+            "--max-degree-of-parallelism",
+            "2",
+            "--exit-codes",
+            "azure",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Signed: {}",
+            cab_path.display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Signed: {}",
+            script_path.display()
+        )));
+
+    let cab = std::fs::read(&cab_path).expect("read signed CAB");
+    cab_digest::cab_signature_pkcs7_der(&cab).expect("CAB signature");
+    assert!(
+        std::fs::read_to_string(&script_path)
+            .expect("read signed script")
+            .contains("# SIG # Begin signature block")
+    );
+}
+
+#[test]
+fn portable_sign_certificate_store_signs_cab_and_rejects_non_pe_append() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store_dir = temp.path().join("cert-store");
+    let cert_path = temp.path().join("cert.der");
+    let key_path = temp.path().join("cert.key");
+    let cab_path = temp.path().join("sample.cab");
+    let fixture = test_cert("psign certificate-store CAB test");
+    let thumbprint = sha1_upper(&fixture.der);
+    std::fs::write(&cert_path, &fixture.der).expect("write certificate");
+    std::fs::write(&key_path, &fixture.key_pem).expect("write private key");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated-unsigned/cab/sample.cab"),
+        &cab_path,
+    )
+    .expect("copy unsigned CAB");
+
+    psign_tool()
+        .args(["cert-store", "import", "--cert-store-dir"])
+        .arg(&store_dir)
+        .arg("--key")
+        .arg(&key_path)
+        .arg(&cert_path)
+        .assert()
+        .success();
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args([
+            "--sha1",
+            &thumbprint,
+            "--append-signature",
+            "--digest",
+            "sha256",
+        ])
+        .arg(&cab_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--as/--append-signature is only supported for portable PE/WinMD signing",
+        ));
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args(["--sha1", &thumbprint, "--digest", "sha256"])
+        .arg(&cab_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    cab_digest::cab_signature_pkcs7_der(&std::fs::read(&cab_path).expect("read signed CAB"))
+        .expect("CAB signature");
 }
 
 fn test_pfx_der(fixture: &TestCert, password: &str) -> Vec<u8> {

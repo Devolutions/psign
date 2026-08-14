@@ -2104,9 +2104,23 @@ fn sign_script(request: &PortableSignRequest, output_path: &Path) -> Result<()> 
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let block = format_powershell_signature_block(&pkcs7, &ext);
-    let mut signed = script;
-    signed.extend_from_slice(block.as_bytes());
+    let signed = append_script_signature_block(script, &block);
     std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
+}
+
+fn append_script_signature_block(mut script: Vec<u8>, block: &str) -> Vec<u8> {
+    if script.starts_with(&[0xFF, 0xFE]) {
+        for unit in block.encode_utf16() {
+            script.extend_from_slice(&unit.to_le_bytes());
+        }
+    } else if script.starts_with(&[0xFE, 0xFF]) {
+        for unit in block.encode_utf16() {
+            script.extend_from_slice(&unit.to_be_bytes());
+        }
+    } else {
+        script.extend_from_slice(block.as_bytes());
+    }
+    script
 }
 
 fn create_script_authenticode_pkcs7_with_provider(
@@ -3366,6 +3380,36 @@ mod tests {
         assert_eq!(
             infer_format(Path::new("unknown.bin")),
             PortableFileFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn appends_script_signature_block_using_source_utf16_encoding() {
+        let block = "\r\n# SIG # Begin signature block\r\n";
+        let signed_le = append_script_signature_block(vec![0xFF, 0xFE, b'x', 0], block);
+        assert_eq!(&signed_le[..4], &[0xFF, 0xFE, b'x', 0]);
+        assert_eq!(
+            String::from_utf16(
+                &signed_le[2..]
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            )
+            .expect("UTF-16LE script"),
+            format!("x{block}")
+        );
+
+        let signed_be = append_script_signature_block(vec![0xFE, 0xFF, 0, b'x'], block);
+        assert_eq!(&signed_be[..4], &[0xFE, 0xFF, 0, b'x']);
+        assert_eq!(
+            String::from_utf16(
+                &signed_be[2..]
+                    .chunks_exact(2)
+                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            )
+            .expect("UTF-16BE script"),
+            format!("x{block}")
         );
     }
 
