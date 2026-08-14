@@ -97,7 +97,9 @@ fn execute_sign_batch<F>(args: &SignArgs, targets: &[PathBuf], sign_one: F) -> R
 where
     F: Fn(&Path) -> Result<String> + Sync,
 {
-    let parallel = args.max_degree_parallelism != Some(1) && targets.len() > 1;
+    let parallel = args.max_degree_parallelism != Some(1)
+        && targets.len() > 1
+        && !has_duplicate_target_identities(targets);
     let threads = args
         .max_degree_parallelism
         .unwrap_or_else(rayon::current_num_threads);
@@ -312,9 +314,24 @@ fn expand_sign_targets(args: &SignArgs) -> Result<Vec<PathBuf>> {
         }
     }
     for p in &args.files {
-        expand_glob_pattern(&p.to_string_lossy(), &mut out, &mut seen)?;
+        let pattern = p.to_string_lossy();
+        if pattern.contains('*') || pattern.contains('?') {
+            expand_glob_pattern(&pattern, &mut out, &mut seen)?;
+        } else {
+            // Native-shaped trailing targets are operations, not a set: signing the same
+            // PE twice with --append-signature intentionally adds two signatures.
+            out.push(p.clone());
+        }
     }
     Ok(out)
+}
+
+fn has_duplicate_target_identities(targets: &[PathBuf]) -> bool {
+    let mut seen = HashSet::new();
+    targets.iter().any(|target| {
+        let identity = std::fs::canonicalize(target).unwrap_or_else(|_| target.clone());
+        !seen.insert(identity)
+    })
 }
 
 fn try_sign_one_artifact_signing(target: &Path, args: &SignArgs) -> Result<String> {
@@ -1524,7 +1541,12 @@ fn reject_artifact_signing_options(args: &SignArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_sign_target, temporary_output_path};
+    use super::{
+        expand_sign_targets, has_duplicate_target_identities, insert_sign_target,
+        temporary_output_path,
+    };
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
     use std::collections::HashSet;
 
     #[test]
@@ -1552,5 +1574,30 @@ mod tests {
             temporary_output_path(&first),
             temporary_output_path(&second)
         );
+    }
+
+    #[test]
+    fn preserves_repeated_direct_targets_and_runs_them_sequentially() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target.exe");
+        std::fs::write(&target, "test").expect("write target");
+        let cli = Cli::try_parse_from([
+            "psign-tool",
+            "sign",
+            "--sha1",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "--digest",
+            "sha256",
+            target.to_str().expect("UTF-8 target"),
+            target.to_str().expect("UTF-8 target"),
+        ])
+        .expect("parse repeated targets");
+        let Command::Sign(args) = cli.command else {
+            panic!("expected sign command");
+        };
+
+        let targets = expand_sign_targets(&args).expect("expand targets");
+        assert_eq!(targets, vec![target.clone(), target]);
+        assert!(has_duplicate_target_identities(&targets));
     }
 }

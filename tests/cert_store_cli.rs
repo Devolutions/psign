@@ -499,14 +499,37 @@ fn portable_sign_sha1_replaces_existing_signature_by_default_and_appends_with_fl
         .success();
 
     let replaced = std::fs::read(&replaced).expect("read replaced PE");
-    let appended = std::fs::read(&appended).expect("read appended PE");
+    let appended_bytes = std::fs::read(&appended).expect("read appended PE");
     assert_eq!(
         verify_pe::pe_pkcs7_signed_data_entry_count(&replaced).expect("replaced PE entry count"),
         1
     );
     assert_eq!(
-        verify_pe::pe_pkcs7_signed_data_entry_count(&appended).expect("appended PE entry count"),
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended_bytes)
+            .expect("appended PE entry count"),
         2
+    );
+
+    psign_tool()
+        .args(["--mode", "portable", "sign", "--cert-store-dir"])
+        .arg(&store_dir)
+        .args([
+            "--sha1",
+            &thumbprint,
+            "--fd",
+            "SHA256",
+            "--append-signature",
+        ])
+        .arg(&appended)
+        .arg(&appended)
+        .assert()
+        .success();
+
+    let appended_twice = std::fs::read(&appended).expect("read twice-appended PE");
+    assert_eq!(
+        verify_pe::pe_pkcs7_signed_data_entry_count(&appended_twice)
+            .expect("twice-appended PE entry count"),
+        4
     );
 }
 
