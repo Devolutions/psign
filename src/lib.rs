@@ -144,6 +144,14 @@ fn portable_command_for_path(path: &std::path::Path) -> anyhow::Result<&'static 
         "msi" | "msp" => Ok("verify-msi"),
         "wim" | "esd" => Ok("verify-esd"),
         "msix" | "appx" | "msixbundle" | "appxbundle" => Ok("verify-msix"),
+        "eappx" | "eappxbundle" | "emsix" | "emsixbundle" => Err(anyhow::anyhow!(
+            "encrypted MSIX/AppX packages (.{ext}) require Windows AppxSip OS delegation; portable verify cannot rehash encrypted package stores for {}",
+            path.display()
+        )),
+        "appxupload" | "msixupload" => Err(anyhow::anyhow!(
+            "MSIX/AppX upload bundles (.{ext}) are dotnet/SignTool-style packaging containers, not AppX SIP verify subjects; prepare nested packages with `psign-tool code` instead: {}",
+            path.display()
+        )),
         "zip" => Ok("verify-zip"),
         "cat" => Ok("verify-catalog"),
         "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "vbs" | "wsf" => {

@@ -1369,6 +1369,140 @@ fn code_prepares_msixupload_nested_package_with_publisher_update() {
 }
 
 #[test]
+fn code_prepares_msixbundle_with_bundle_manifest_publisher_update() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path();
+    let input = base.join("bundle.msixbundle");
+    let output = base.join("prepared.msixbundle");
+    let extracted_child = base.join("prepared-inner.msix");
+    let nested_pe = base.join("app.signed.exe");
+    let cert = base.join("signer.der");
+    let key = base.join("signer.pkcs8");
+    write_test_rsa_cert_key(&cert, &key);
+
+    // A minimal flat child package with one nested PE payload.
+    let inner = base.join("inner.msix");
+    write_zip(
+        &inner,
+        &[
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="exe" ContentType="application/octet-stream"/><Override PartName="/AppxManifest.xml" ContentType="application/vnd.ms-appx.manifest+xml"/><Override PartName="/AppxBlockMap.xml" ContentType="application/vnd.ms-appx.blockmap+xml"/></Types>"#
+                    .as_slice(),
+            ),
+            (
+                "AppxManifest.xml",
+                br#"<Package><Identity Name="Psign.BundleChild" Publisher="CN=Old" Version="1.0.0.0" ProcessorArchitecture="x64"/></Package>"#
+                    .as_slice(),
+            ),
+            (
+                "AppxBlockMap.xml",
+                br#"<BlockMap HashMethod="http://www.w3.org/2001/04/xmlenc#sha256"/>"#
+                    .as_slice(),
+            ),
+            (
+                "app.exe",
+                &std::fs::read(
+                    repo_root().join("tests/fixtures/pe-authenticode-upstream/tiny32.efi"),
+                )
+                .unwrap(),
+            ),
+        ],
+    );
+    write_zip(
+        &input,
+        &[
+            (
+                "AppxMetadata/AppxBundleManifest.xml",
+                br#"<Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle" SchemaVersion="5.0"><Identity Name="Psign.Bundle" Publisher="CN=Old" Version="1.0.0.0"/><Packages><Package Type="application" Version="1.0.0.0" Architecture="x64" FileName="inner.msix" Publisher="CN=Old"/></Packages></Bundle>"#
+                    .as_slice(),
+            ),
+            (
+                "AppxBlockMap.xml",
+                br#"<BlockMap HashMethod="http://www.w3.org/2001/04/xmlenc#sha256"/>"#
+                    .as_slice(),
+            ),
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="msix" ContentType="application/vnd.ms-appx"/><Default Extension="xml" ContentType="application/vnd.ms-appx.bundlemanifest+xml"/><Override PartName="/AppxBlockMap.xml" ContentType="application/vnd.ms-appx.blockmap+xml"/></Types>"#
+                    .as_slice(),
+            ),
+            ("inner.msix", &std::fs::read(&inner).unwrap()),
+        ],
+    );
+
+    let mut cmd = psign();
+    cmd.args(["code", "--base-directory"])
+        .arg(base)
+        .args([
+            "--publisher-name",
+            "CN=Updated Bundle Publisher",
+            "--cert",
+            cert.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--output",
+        ])
+        .arg(&output)
+        .arg("bundle.msixbundle");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("unsigned MSIX/AppX"));
+
+    // Publisher must propagate to both the bundle Identity and the child Package mirror,
+    // and the block map must cover only the bundle manifest (AppxBundleSip semantics).
+    let mut bundle_manifest = String::new();
+    {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        archive
+            .by_name("AppxMetadata/AppxBundleManifest.xml")
+            .unwrap()
+            .read_to_string(&mut bundle_manifest)
+            .unwrap();
+        let mut block_map = String::new();
+        archive
+            .by_name("AppxBlockMap.xml")
+            .unwrap()
+            .read_to_string(&mut block_map)
+            .unwrap();
+        assert!(
+            block_map.contains(r#"Name="AppxMetadata\AppxBundleManifest.xml""#),
+            "bundle block map must list the bundle manifest with backslash separators:\n{block_map}"
+        );
+        assert!(
+            !block_map.contains("inner.msix"),
+            "bundle block map must not list child packages:\n{block_map}"
+        );
+    }
+    assert!(bundle_manifest.contains(r#"Publisher="CN=Updated Bundle Publisher""#));
+    let identity_publishers = bundle_manifest
+        .matches(r#"Publisher="CN=Updated Bundle Publisher""#)
+        .count();
+    assert_eq!(
+        identity_publishers, 2,
+        "Identity@Publisher and Package@Publisher must both be updated:\n{bundle_manifest}"
+    );
+
+    // The nested flat child gets the same publisher and its PE payload is signed.
+    extract_zip_entry(&output, "inner.msix", &extracted_child);
+    let mut info = psign();
+    info.args(["portable", "msix-manifest-info"])
+        .arg(&extracted_child)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "publisher=CN=Updated Bundle Publisher",
+        ));
+    extract_zip_entry(&extracted_child, "app.exe", &nested_pe);
+    let mut verify = psign();
+    verify
+        .args(["portable", "verify-pe"])
+        .arg(&nested_pe)
+        .assert()
+        .success();
+}
+
+#[test]
 fn code_classifies_encrypted_msix_as_os_only_and_fails_explicitly() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();

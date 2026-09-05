@@ -19,6 +19,8 @@ pub fn is_appx_family(path: &std::path::Path) -> bool {
             | "eappxbundle"
             | "emsix"
             | "emsixbundle"
+            | "appxupload"
+            | "msixupload"
     )
 }
 

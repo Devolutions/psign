@@ -43,6 +43,8 @@ pub enum PortableFileFormat {
     Cab,
     Msi,
     Msix,
+    MsixUpload,
+    MsixEncrypted,
     Catalog,
     Zip,
     NuGet,
@@ -545,10 +547,13 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
             sign_msi(&request, &output_path)?;
             false
         }
-        PortableFileFormat::Msix => {
-            sign_msix(&request, &output_path)?;
-            false
-        }
+        PortableFileFormat::Msix => sign_msix(&request, &output_path)?,
+        PortableFileFormat::MsixUpload => bail!(
+            "portable signing does not support MSIX/AppX upload bundles (.appxupload/.msixupload); they are dotnet/SignTool packaging containers whose nested flat packages should be prepared and signed individually"
+        ),
+        PortableFileFormat::MsixEncrypted => bail!(
+            "portable signing does not support encrypted MSIX/AppX packages (.eappx/.eappxbundle/.emsix/.emsixbundle); encrypted packages require Windows AppxSip OS delegation"
+        ),
         PortableFileFormat::NuGet => {
             sign_nuget(&request, &output_path)?;
             false
@@ -610,6 +615,12 @@ pub fn portable_get_signature(
         PortableFileFormat::Cab => inspect_cab(&request.path),
         PortableFileFormat::Msi => inspect_msi(&request.path),
         PortableFileFormat::Msix => inspect_msix(&request.path),
+        PortableFileFormat::MsixUpload => Err(anyhow::anyhow!(
+            "MSIX/AppX upload bundles (.appxupload/.msixupload) are dotnet/SignTool packaging containers, not AppX SIP verify subjects"
+        )),
+        PortableFileFormat::MsixEncrypted => Err(anyhow::anyhow!(
+            "encrypted MSIX/AppX packages require Windows AppxSip OS delegation; portable cleartext digest validation does not apply"
+        )),
         PortableFileFormat::NuGet => inspect_nuget(&request.path, &data),
         PortableFileFormat::Vsix => inspect_vsix_opc(&request.path, &data),
         PortableFileFormat::ClickOnceManifest => inspect_clickonce_manifest(&request.path, &data),
@@ -841,6 +852,8 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
         "cab" => PortableFileFormat::Cab,
         "msi" | "msp" => PortableFileFormat::Msi,
         "msix" | "appx" | "msixbundle" | "appxbundle" => PortableFileFormat::Msix,
+        "appxupload" | "msixupload" => PortableFileFormat::MsixUpload,
+        "eappx" | "eappxbundle" | "emsix" | "emsixbundle" => PortableFileFormat::MsixEncrypted,
         "cat" => PortableFileFormat::Catalog,
         "nupkg" | "snupkg" => PortableFileFormat::NuGet,
         "vsix" => PortableFileFormat::Vsix,
@@ -1799,20 +1812,52 @@ fn sign_msi(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))
 }
 
-fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
+const MSIX_FLAT_EXTENSIONS: [&str; 2] = ["msix", "appx"];
+const MSIX_BUNDLE_EXTENSIONS: [&str; 2] = ["msixbundle", "appxbundle"];
+
+/// Cleartext MSIX family extensions accepted by portable final signing:
+/// flat `.msix` / `.appx` packages and `.msixbundle` / `.appxbundle` bundles.
+pub fn is_portable_msix_family_extension(ext: &str) -> bool {
+    MSIX_FLAT_EXTENSIONS.contains(&ext) || MSIX_BUNDLE_EXTENSIONS.contains(&ext)
+}
+
+fn is_msix_bundle_extension(ext: &str) -> bool {
+    MSIX_BUNDLE_EXTENSIONS.contains(&ext)
+}
+
+fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<bool> {
     let ext = request
         .path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !matches!(ext.as_str(), "msix" | "appx") {
-        bail!("portable MSIX signing currently supports flat .msix/.appx packages");
+    if msix_digest::is_encrypted_msix_extension(&ext) {
+        bail!(
+            "portable MSIX signing does not support encrypted packages (.{ext}); encrypted packages require Windows AppxSip OS delegation"
+        );
+    }
+    if !is_portable_msix_family_extension(&ext) {
+        bail!(
+            "portable MSIX signing supports flat .msix/.appx packages and .msixbundle/.appxbundle bundles; got .{ext}"
+        );
     }
 
     let package =
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
-    let staged = stage_flat_msix_for_signature(&package, request.hash_algorithm)
+    if request.skip_signed && msix_digest::msix_signature_part_present(&package)? {
+        if output_path != request.path.as_path() {
+            std::fs::copy(&request.path, output_path).with_context(|| {
+                format!(
+                    "copy {} to {}",
+                    request.path.display(),
+                    output_path.display()
+                )
+            })?;
+        }
+        return Ok(true);
+    }
+    let staged = stage_msix_family_for_signature(&package, &ext, request.hash_algorithm)
         .with_context(|| format!("stage {} for MSIX signing", request.path.display()))?;
     let provider = load_signing_provider(request)?;
     let digest_algorithm = request.hash_algorithm.into();
@@ -1831,7 +1876,9 @@ fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     p7x.extend_from_slice(&pkcs7);
     let signed = replace_msix_signature_part(&staged, &p7x)
         .with_context(|| format!("embed AppxSignature.p7x in {}", request.path.display()))?;
-    std::fs::write(output_path, signed).with_context(|| format!("write {}", output_path.display()))
+    std::fs::write(output_path, signed)
+        .with_context(|| format!("write {}", output_path.display()))?;
+    Ok(false)
 }
 
 fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
@@ -2440,6 +2487,9 @@ fn apply_trust_if_requested(
         PortableFileFormat::NuGet
         | PortableFileFormat::AppInstaller
         | PortableFileFormat::Vsix
+        | PortableFileFormat::Msix
+        | PortableFileFormat::MsixUpload
+        | PortableFileFormat::MsixEncrypted
         | PortableFileFormat::ClickOnceManifest => Err(anyhow::anyhow!(
             "explicit trust verification is not yet available for format {:?} through the portable inspection path",
             format
@@ -3113,6 +3163,18 @@ fn looks_unsigned(message: &str) -> bool {
         || lower.contains("signature block")
 }
 
+fn stage_msix_family_for_signature(
+    package: &[u8],
+    ext: &str,
+    digest_algorithm: PortableDigestAlgorithm,
+) -> Result<Vec<u8>> {
+    if is_msix_bundle_extension(ext) {
+        stage_msix_bundle_for_signature(package, digest_algorithm)
+    } else {
+        stage_flat_msix_for_signature(package, digest_algorithm)
+    }
+}
+
 fn stage_flat_msix_for_signature(
     package: &[u8],
     digest_algorithm: PortableDigestAlgorithm,
@@ -3172,6 +3234,124 @@ fn stage_flat_msix_for_signature(
         writer.finish()?;
     }
     Ok(out.into_inner())
+}
+
+/// Stage a `.msixbundle` / `.appxbundle` for final AppX SIP signing.
+///
+/// Native `AppxBundleSip` semantics: the block map covers **only** the bundle manifest
+/// (`AppxMetadata/AppxBundleManifest.xml`, listed with backslash separators and a per-block
+/// `Size`), child packages stay byte-identical ZIP payload entries, and the signature part is
+/// excluded from all AXPC/AXCD digest pieces. Staged output: child payloads + bundle manifest,
+/// then `AppxBlockMap.xml`, `[Content_Types].xml`, and a `PKCX` placeholder signature part.
+fn stage_msix_bundle_for_signature(
+    package: &[u8],
+    digest_algorithm: PortableDigestAlgorithm,
+) -> Result<Vec<u8>> {
+    let mut source = ZipArchive::new(Cursor::new(package)).context("open MSIX bundle ZIP")?;
+    let mut child_payloads: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut bundle_manifest: Option<Vec<u8>> = None;
+    let mut bundle_content_types: Option<Vec<u8>> = None;
+
+    for i in 0..source.len() {
+        let mut entry = source.by_index(i).context("read MSIX bundle ZIP entry")?;
+        let name = entry.name().replace('\\', "/");
+        if name.ends_with('/') {
+            continue;
+        }
+        match name.as_str() {
+            "AppxMetadata/AppxBundleManifest.xml" => {
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data)?;
+                bundle_manifest = Some(data);
+            }
+            "[Content_Types].xml" => {
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data)?;
+                bundle_content_types = Some(data);
+            }
+            "AppxBlockMap.xml"
+            | "AppxSignature.p7x"
+            | "AppxManifest.xml"
+            | "AppxMetadata/CodeIntegrity.cat" => {}
+            _ => {
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data)?;
+                child_payloads.push((name, data));
+            }
+        }
+    }
+
+    let manifest = bundle_manifest.ok_or_else(|| {
+        anyhow::anyhow!("MSIX bundle is missing AppxMetadata/AppxBundleManifest.xml")
+    })?;
+    let content_types = bundle_content_types
+        .ok_or_else(|| anyhow::anyhow!("MSIX bundle is missing [Content_Types].xml"))?;
+    let content_types = add_msix_signature_content_type(
+        std::str::from_utf8(&content_types).context("[Content_Types].xml is not UTF-8")?,
+    )?;
+    for (name, _data) in &child_payloads {
+        let child_ext = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        if msix_digest::is_encrypted_msix_extension(&child_ext) {
+            bail!(
+                "cleartext MSIX bundle contains encrypted child package `{name}`; encrypted children require Windows AppxSip OS delegation"
+            );
+        }
+    }
+    let block_map = build_msix_bundle_block_map(&manifest, digest_algorithm)?;
+
+    let mut out = Cursor::new(Vec::new());
+    {
+        let mut writer = ZipWriter::new(&mut out);
+        let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, data) in &child_payloads {
+            writer.start_file(name, stored)?;
+            writer.write_all(data)?;
+        }
+        writer.start_file("AppxMetadata/AppxBundleManifest.xml", stored)?;
+        writer.write_all(&manifest)?;
+        writer.start_file("AppxBlockMap.xml", stored)?;
+        writer.write_all(block_map.as_bytes())?;
+        writer.start_file("[Content_Types].xml", stored)?;
+        writer.write_all(content_types.as_bytes())?;
+        writer.start_file("AppxSignature.p7x", stored)?;
+        writer.write_all(b"PKCX")?;
+        writer.finish()?;
+    }
+    Ok(out.into_inner())
+}
+
+/// Native bundle block maps list exactly one `File` — the bundle manifest — using
+/// backslash separators, the manifest's uncompressed size, and a per-block `Size`.
+fn build_msix_bundle_block_map(
+    manifest: &[u8],
+    digest_algorithm: PortableDigestAlgorithm,
+) -> Result<String> {
+    let hash_method = match digest_algorithm {
+        PortableDigestAlgorithm::Sha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
+        PortableDigestAlgorithm::Sha384 => "http://www.w3.org/2004/xmldsig-more#sha384",
+        PortableDigestAlgorithm::Sha512 => "http://www.w3.org/2001/04/xmlenc#sha512",
+    };
+    let mut xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="{hash_method}"><File Name="AppxMetadata\AppxBundleManifest.xml" Size="{}" LfhSize="65">"#,
+        manifest.len()
+    );
+    for chunk in manifest.chunks(64 * 1024) {
+        let digest = match digest_algorithm {
+            PortableDigestAlgorithm::Sha256 => sha2::Sha256::digest(chunk).to_vec(),
+            PortableDigestAlgorithm::Sha384 => sha2::Sha384::digest(chunk).to_vec(),
+            PortableDigestAlgorithm::Sha512 => sha2::Sha512::digest(chunk).to_vec(),
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
+        xml.push_str(&format!(
+            r#"<Block Hash="{encoded}" Size="{}"/>"#,
+            chunk.len()
+        ));
+    }
+    xml.push_str("</File></BlockMap>");
+    Ok(xml)
 }
 
 fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
@@ -3380,6 +3560,42 @@ mod tests {
         assert_eq!(
             infer_format(Path::new("unknown.bin")),
             PortableFileFormat::Unknown
+        );
+    }
+
+    #[test]
+    fn infers_msix_family_formats() {
+        assert_eq!(
+            infer_format(Path::new("app.msix")),
+            PortableFileFormat::Msix
+        );
+        assert_eq!(
+            infer_format(Path::new("app.appx")),
+            PortableFileFormat::Msix
+        );
+        assert_eq!(
+            infer_format(Path::new("bundle.msixbundle")),
+            PortableFileFormat::Msix
+        );
+        assert_eq!(
+            infer_format(Path::new("bundle.APPXBUNDLE")),
+            PortableFileFormat::Msix
+        );
+        assert_eq!(
+            infer_format(Path::new("upload.msixupload")),
+            PortableFileFormat::MsixUpload
+        );
+        assert_eq!(
+            infer_format(Path::new("upload.appxupload")),
+            PortableFileFormat::MsixUpload
+        );
+        assert_eq!(
+            infer_format(Path::new("enc.emsix")),
+            PortableFileFormat::MsixEncrypted
+        );
+        assert_eq!(
+            infer_format(Path::new("enc.eappxbundle")),
+            PortableFileFormat::MsixEncrypted
         );
     }
 

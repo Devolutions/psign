@@ -61,7 +61,7 @@ The roadmap choice is maintained in [`gap-analysis-signing-platforms.md`](gap-an
 
 | Gap id | Why it is high value |
 |--------|----------------------|
-| `portable-msix-bundle-upload-final-signing` | Closes the largest remaining Linux/Artifact Signing package gap after flat MSIX/AppX support. |
+| `portable-msix-upload-final-signing` | Closes the remaining Linux/Artifact Signing package gap now that flat and bundle MSIX/AppX signing are portable. |
 | `catalog-driver-package-authoring` | Turns existing catalog signing/member verification into a fuller driver/package catalog workflow. |
 | `wdac-ci-policy-signing` | Builds on detached PKCS#7/catalog primitives for a security-policy workflow that is adjacent to existing Authenticode users. |
 
