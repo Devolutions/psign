@@ -363,7 +363,7 @@ fn target_should_skip_signed(target: &Path) -> Result<bool> {
                 std::fs::read(target).with_context(|| format!("read '{}'", target.display()))?;
             Ok(psign_sip_digest::msi_digest::msi_digital_signature_pkcs7_der(&bytes).is_ok())
         }
-        "appx" | "msix" => {
+        "msix" | "appx" | "msixbundle" | "appxbundle" => {
             Ok(psign_sip_digest::msix_digest::verify_msix_digest_consistency(target).is_ok())
         }
         _ => Ok(false),
@@ -639,9 +639,15 @@ fn validate_portable_core_target(
     append_signature: bool,
 ) -> Result<psign_portable_core::PortableFileFormat> {
     let ext = target_extension_lower(target);
-    if matches!(ext.as_str(), "msixbundle" | "appxbundle") {
+    if psign_sip_digest::msix_digest::is_encrypted_msix_extension(&ext) {
         return Err(anyhow!(
-            "portable signing supports flat MSIX/AppX packages but not MSIX/AppX bundles: {}",
+            "portable signing does not support encrypted MSIX/AppX packages (.{ext}); encrypted packages require Windows AppxSip OS delegation: {}",
+            target.display()
+        ));
+    }
+    if matches!(ext.as_str(), "appxupload" | "msixupload") {
+        return Err(anyhow!(
+            "portable signing does not support MSIX/AppX upload bundles (.{ext}); upload containers wrap flat packages produced by `dotnet/SignTool`-style tooling and are not AppX SIP verify subjects: {}",
             target.display()
         ));
     }
@@ -660,7 +666,7 @@ fn validate_portable_core_target(
         }
         psign_portable_core::PortableFileFormat::Unknown => {
             return Err(anyhow!(
-                "portable native-shaped signing supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts; got {}",
+                "portable native-shaped signing supports PE/WinMD, CAB, MSI/MSP, MSIX/AppX packages and bundles, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts; got {}",
                 target.display()
             ));
         }
@@ -738,12 +744,14 @@ fn sign_one_target_artifact_signing(target: &Path, args: &SignArgs) -> Result<()
         )),
         "cab" => run_portable_sign_cab_artifact_signing(target, &tmp, args),
         "msi" | "msp" => run_portable_sign_msi_artifact_signing(target, &tmp, args),
-        "appx" | "msix" => run_portable_sign_msix_artifact_signing(target, &tmp, args),
+        "appx" | "msix" | "msixbundle" | "appxbundle" => {
+            run_portable_sign_msix_artifact_signing(target, &tmp, args)
+        }
         "cat" => Err(anyhow!(
             "portable Artifact Signing for catalog targets is available through `psign-tool portable sign-catalog ... --artifact-signing-*`; native-shaped in-place .cat signing needs a catalog-authenticode replacement path and is not implemented yet"
         )),
         _ => Err(anyhow!(
-            "portable Artifact Signing is currently implemented for PE/WinMD, PowerShell Authenticode scripts (.ps1, .psd1, .psm1, .ps1xml, .psc1, .cdxml, .mof), CAB, MSI/MSP, and flat MSIX/AppX targets; got {}",
+            "portable Artifact Signing is currently implemented for PE/WinMD, PowerShell Authenticode scripts (.ps1, .psd1, .psm1, .ps1xml, .psc1, .cdxml, .mof), CAB, MSI/MSP, and MSIX/AppX package or bundle targets; got {}",
             target.display()
         )),
     }
@@ -1448,7 +1456,7 @@ fn batch_exit_code(exit_style: SignExitCodes, successes: usize, failures: usize)
 fn reject_option(name: &str, present: bool) -> Result<()> {
     if present {
         return Err(anyhow!(
-            "portable sign does not support {name}; local PFX/certificate-store and Azure Key Vault signing support PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts, while Azure Artifact Signing supports its documented native-shaped subset"
+            "portable sign does not support {name}; local PFX/certificate-store and Azure Key Vault signing support PE/WinMD, CAB, MSI/MSP, MSIX/AppX packages and bundles, NuGet, VSIX, ClickOnce manifests, App Installer, ZIP, and PowerShell scripts, while Azure Artifact Signing supports its documented native-shaped subset"
         ));
     }
     Ok(())

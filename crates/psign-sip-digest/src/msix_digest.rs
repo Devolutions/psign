@@ -794,7 +794,13 @@ fn find_zip64_eocd(
 
 fn parse_zip_tail(buf: &[u8]) -> Result<ZipTail> {
     let (cde_pos, classic) = find_classic_eocd(buf)?;
-    if classic.disk_number != 0 || classic.disk_with_central_directory != 0 {
+    // ZIP64 archives store 0xFFFF/0xFFFFFFFF sentinels in the classic EOCD; the real
+    // disk fields live in the ZIP64 EOCD and are validated after it is parsed below.
+    let classic_disk_fields_are_sentinels =
+        classic.disk_number == u16::MAX && classic.disk_with_central_directory == u16::MAX;
+    if !classic_disk_fields_are_sentinels
+        && (classic.disk_number != 0 || classic.disk_with_central_directory != 0)
+    {
         return Err(anyhow!(
             "multi-disk ZIP archives are not valid APPX/MSIX packages"
         ));
@@ -1879,6 +1885,12 @@ pub fn verify_msix_digest_consistency(path: &Path) -> Result<()> {
 
     let buf = std::fs::read(path)?;
     verify_msix_digest_consistency_bytes(&buf, &ext)
+}
+
+/// Fast `--skip-signed` preflight: does this OPC/ZIP package already carry an `AppxSignature.p7x` part?
+pub fn msix_signature_part_present(package: &[u8]) -> Result<bool> {
+    let archive = ZipArchive::new(Cursor::new(package))?;
+    Ok(archive.file_names().any(|name| name == "AppxSignature.p7x"))
 }
 
 /// Compute the APPX Authenticode `messageDigest` blob for a cleartext MSIX / APPX package.

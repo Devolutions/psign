@@ -1,6 +1,6 @@
 # Linux signing pipelines (what works today)
 
-**`psign-tool portable`** on Linux/macOS can sign PE, CAB, MSI/MSP, flat MSIX/AppX, NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts through native-shaped portable local PFX/certificate-store or Azure Key Vault routes. It can also sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with scoped local RSA/SHA-2 commands; Azure Artifact Signing REST supports its documented native-shaped subset. It still does not provide MSIX/AppX bundle, upload, or encrypted package final signing, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
+**`psign-tool portable`** on Linux/macOS can sign PE, CAB, MSI/MSP, flat MSIX/AppX, MSIX/AppX bundles (`.msixbundle`/`.appxbundle` — children must be signed first, matching native `AppxBundleSip`), NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts through native-shaped portable local PFX/certificate-store or Azure Key Vault routes. It can also sign unsigned single-volume CAB, MSI/MSP, generic catalogs, and RDP files with scoped local RSA/SHA-2 commands; Azure Artifact Signing REST supports its documented native-shaped subset. It still does not provide MSIX/AppX upload-container or encrypted package final signing, OS catalog database policy, or WinTrust policy emulation (see [`rust-sip-gaps.md`](rust-sip-gaps.md)). This page describes **practical portable**, **hybrid**, and **verify-only** flows.
 
 For tool-by-tool gaps vs **`signtool.exe`**, AzureSignTool, and Artifact Signing, see [`gap-analysis-signing-platforms.md`](gap-analysis-signing-platforms.md). On Windows, for writable copies of native signing binaries outside protected install paths, see [`writable-signing-binaries.md`](writable-signing-binaries.md).
 
@@ -29,7 +29,7 @@ psign-tool portable sign-catalog --cert cert.der --key key.pk8 --output files.ca
 
 `sign-catalog` authors generic CTL member entries and signs the catalog PKCS#7. Pair it with `verify-catalog` and `verify-catalog-member --catalog files.cat file1.exe`; driver/INF policy and OS catalog database lookup remain Windows-only.
 
-For native-shaped in-place local signing, use either `--pfx`/`--password` or portable certificate-store material selected by `--sha1`. The route supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts; it also accepts input file lists and batch controls. Catalog targets, WSH scripts, and MSIX/AppX bundles remain explicit unsupported cases.
+For native-shaped in-place local signing, use either `--pfx`/`--password` or portable certificate-store material selected by `--sha1`. The route supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, MSIX/AppX bundles (children must be signed before the bundle), NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts; it also accepts input file lists and batch controls. Catalog targets, WSH scripts, MSIX/AppX upload containers, and encrypted packages remain explicit unsupported cases.
 
 ## 1.2 Portable signing with Azure Key Vault
 
@@ -59,11 +59,11 @@ psign-tool --mode portable sign \
   ./MyApp.exe
 ```
 
-Portable Key Vault signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. MSIX/AppX bundles, catalog targets, and WSH scripts remain unsupported by this native-shaped route. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
+Portable Key Vault signing supports SHA-256/SHA-384/SHA-512, optional chain certificates (`--chain-cert` on `portable sign-pe`, `--ac` on `--mode portable sign`), and RFC3161 sign-time timestamping through `--timestamp-url` plus `--timestamp-digest`. Catalog targets, WSH scripts, MSIX/AppX upload containers, and encrypted packages remain unsupported by this native-shaped route. `timestamp-pe-rfc3161` remains available as a separate mutation step when you already have a timestamp token or granted response.
 
 ## 1.3 Portable signing with Azure Artifact Signing REST
 
-With **`--features artifact-signing-rest`**, PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, and generic catalog signing can use Azure Artifact Signing as a REST remote signer without Microsoft client DLLs or SignTool:
+With **`--features artifact-signing-rest`**, PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, MSIX/AppX bundles, and generic catalog signing can use Azure Artifact Signing as a REST remote signer without Microsoft client DLLs or SignTool:
 
 ```bash
 psign-tool portable sign-pe ./MyApp.exe \
@@ -89,7 +89,7 @@ psign-tool --mode portable sign \
 
 This path builds Authenticode CMS locally, sends the CMS authenticated-attributes digest to Artifact Signing `:sign`, embeds the returned RSA signature and signing certificate, then attaches the RFC3161 timestamp before embedding when `timestamp-http` is enabled. For production signatures, keep timestamping enabled because Artifact Signing profile certificates are short-lived.
 
-CAB, MSI/MSP, and flat MSIX/AppX can also use the native-shaped in-place form:
+CAB, MSI/MSP, and flat MSIX/AppX plus `.msixbundle`/`.appxbundle` bundles can also use the native-shaped in-place form (children must be signed before the bundle, matching native `AppxBundleSip`):
 
 ```bash
 psign-tool --mode portable sign \
@@ -122,7 +122,7 @@ psign-tool portable sign-catalog \
   ./file1.exe ./file2.txt
 ```
 
-Non-PE sign-time timestamp mutation is still not a general `SignerTimeStampEx3` replacement for every SIP target, but CAB/MSI/catalog and flat MSIX/AppX Artifact Signing persist RFC3161 tokens in their generated PKCS#7 when built with `timestamp-http`.
+Non-PE sign-time timestamp mutation is still not a general `SignerTimeStampEx3` replacement for every SIP target, but CAB/MSI/catalog and flat MSIX/AppX + bundle Artifact Signing persist RFC3161 tokens in their generated PKCS#7 when built with `timestamp-http`.
 
 Native-shaped portable Artifact Signing batches can use `--input-file-list`, `--skip-signed`, `--continue-on-error`, and `--max-degree-of-parallelism`:
 
@@ -137,7 +137,7 @@ psign-tool --mode portable sign \
   --max-degree-of-parallelism 4
 ```
 
-The file list accepts one path or glob per line; blank lines and `#` comments are ignored. Skip detection verifies PE/WinMD Authenticode digests before skipping, and also covers CAB signatures, MSI/MSP `DigitalSignature` streams, and flat MSIX/AppX `AppxSignature.p7x` packages.
+The file list accepts one path or glob per line; blank lines and `#` comments are ignored. Skip detection verifies PE/WinMD Authenticode digests before skipping, and also covers CAB signatures, MSI/MSP `DigitalSignature` streams, and flat or bundle MSIX/AppX `AppxSignature.p7x` packages.
 
 ## 1.4 Package-native helper workflows
 

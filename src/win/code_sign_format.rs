@@ -61,7 +61,7 @@ pub fn detect(path: &Path) -> CodeSignFormat {
         }
         "winmd" => CodeSignFormat::WindowsMetadata,
         "appx" | "appxbundle" | "msix" | "msixbundle" | "eappx" | "eappxbundle" | "emsix"
-        | "emsixbundle" => CodeSignFormat::MsixFamily,
+        | "emsixbundle" | "appxupload" | "msixupload" => CodeSignFormat::MsixFamily,
         "msi" | "msp" | "mst" => CodeSignFormat::WindowsInstaller,
         "wim" | "esd" => CodeSignFormat::WimImage,
         "cat" => CodeSignFormat::Catalog,
@@ -172,6 +172,14 @@ mod tests {
             CodeSignFormat::MsixFamily
         );
         assert_eq!(detect(Path::new("pkg.eappx")), CodeSignFormat::MsixFamily);
+        assert_eq!(
+            detect(Path::new("pkg.msixupload")),
+            CodeSignFormat::MsixFamily
+        );
+        assert_eq!(
+            detect(Path::new("pkg.appxupload")),
+            CodeSignFormat::MsixFamily
+        );
         assert_eq!(
             detect(Path::new(r"C:\scripts\run.JS")),
             CodeSignFormat::WindowsScriptHost

@@ -1208,6 +1208,10 @@ fn prepare_msix_family_bytes(
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
     ensure_unsigned_msix_family(input_bytes, label)?;
+    // True bundles (.msixbundle/.appxbundle) always carry AppxMetadata/AppxBundleManifest.xml;
+    // upload containers (.appxupload/.msixupload) are dotnet packaging wrappers whose
+    // nested flat packages carry their own AppxManifest.xml.
+    let is_true_bundle = matches!(format, CodeFormat::MsixBundle | CodeFormat::AppxBundle);
     let mut updated = sign_nested_package_entries(
         input_bytes,
         label,
@@ -1226,12 +1230,25 @@ fn prepare_msix_family_bytes(
     if let Some(publisher) = publisher {
         if zip_contains_entry(&updated, "AppxManifest.xml")? {
             updated = update_msix_manifest_publisher_bytes(&updated, label, publisher)?;
+        } else if zip_contains_entry(&updated, "AppxMetadata/AppxBundleManifest.xml")? {
+            updated = update_msix_bundle_manifest_publisher_bytes(&updated, label, publisher)?;
         } else if matches!(format, CodeFormat::Msix | CodeFormat::Appx) {
             return Err(anyhow!("{label} is missing AppxManifest.xml"));
+        } else if is_true_bundle {
+            return Err(anyhow!(
+                "{label} is missing AppxMetadata/AppxBundleManifest.xml"
+            ));
         }
     }
+    // Bundle block maps cover only the bundle manifest; flat/upload layouts hash all payloads.
+    let is_bundle_layout = zip_contains_entry(&updated, "AppxMetadata/AppxBundleManifest.xml")?;
     if zip_contains_entry(&updated, "AppxBlockMap.xml")? {
-        updated = regenerate_msix_block_map_bytes(&updated, label)?;
+        let block_map = if is_bundle_layout {
+            build_msix_bundle_block_map_xml(&updated)?
+        } else {
+            build_msix_block_map_xml(&updated)?
+        };
+        updated = repack_with_block_map(&updated, label, block_map)?;
     }
     Ok(updated)
 }
@@ -1304,8 +1321,7 @@ fn update_appinstaller_publisher_bytes(bytes: &[u8], publisher: &str) -> Result<
     Ok(updated.into_bytes())
 }
 
-fn regenerate_msix_block_map_bytes(input_bytes: &[u8], label: &str) -> Result<Vec<u8>> {
-    let block_map = build_msix_block_map_xml(input_bytes)?;
+fn repack_with_block_map(input_bytes: &[u8], label: &str, block_map: Vec<u8>) -> Result<Vec<u8>> {
     let mut out = Cursor::new(Vec::new());
     repack_zip_with_updates(
         Cursor::new(input_bytes),
@@ -1317,6 +1333,76 @@ fn regenerate_msix_block_map_bytes(input_bytes: &[u8], label: &str) -> Result<Ve
         }],
     )
     .with_context(|| format!("repack {label} with regenerated AppxBlockMap.xml"))?;
+    Ok(out.into_inner())
+}
+
+/// Bundle block maps list exactly one `File` — the bundle manifest — using backslash
+/// separators and per-block `Size`, matching native `MakeAppx bundle` output.
+fn build_msix_bundle_block_map_xml(input_bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(input_bytes)).context("open MSIX/AppX bundle ZIP")?;
+    let mut manifest = archive
+        .by_name("AppxMetadata/AppxBundleManifest.xml")
+        .context("read AppxMetadata/AppxBundleManifest.xml")?;
+    let mut bytes = Vec::with_capacity(manifest.size() as usize);
+    manifest.read_to_end(&mut bytes)?;
+    drop(manifest);
+
+    let mut xml = String::new();
+    xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    xml.push_str(r#"<BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="http://www.w3.org/2001/04/xmlenc#sha256">"#);
+    xml.push_str(&format!(
+        r#"<File Name="AppxMetadata\AppxBundleManifest.xml" Size="{}">"#,
+        bytes.len()
+    ));
+    for chunk in bytes.chunks(64 * 1024) {
+        let hash = sha2::Sha256::digest(chunk);
+        xml.push_str(&format!(
+            r#"<Block Hash="{}" Size="{}"/>"#,
+            BASE64_STANDARD.encode(hash),
+            chunk.len()
+        ));
+    }
+    xml.push_str("</File></BlockMap>");
+    Ok(xml.into_bytes())
+}
+
+fn update_msix_bundle_manifest_publisher_bytes(
+    input_bytes: &[u8],
+    label: &str,
+    publisher: &str,
+) -> Result<Vec<u8>> {
+    if publisher.is_empty() {
+        return Err(anyhow!("MSIX/AppX publisher cannot be empty"));
+    }
+    let escaped = xml_escape_attr(publisher);
+    let mut archive = zip::ZipArchive::new(Cursor::new(input_bytes))
+        .with_context(|| format!("open MSIX/AppX bundle {label}"))?;
+    let mut manifest = archive
+        .by_name("AppxMetadata/AppxBundleManifest.xml")
+        .with_context(|| format!("read AppxMetadata/AppxBundleManifest.xml in {label}"))?;
+    let mut text = String::new();
+    manifest
+        .read_to_string(&mut text)
+        .context("read AppxMetadata/AppxBundleManifest.xml as UTF-8")?;
+    drop(manifest);
+
+    // Identity@Publisher describes the bundle; Package@Publisher mirrors the child packages
+    // so both stay in sync with the requested signing subject.
+    let mut updated = update_attr_for_local_tags(&text, "Identity", "Publisher", &escaped)?;
+    updated = update_attr_for_local_tags(&updated, "Package", "Publisher", &escaped)?;
+
+    let mut out = Cursor::new(Vec::new());
+    repack_zip_with_updates(
+        Cursor::new(input_bytes),
+        &mut out,
+        vec![ZipEntryUpdate {
+            name: "AppxMetadata/AppxBundleManifest.xml".to_owned(),
+            bytes: updated.into_bytes(),
+            compression: zip::CompressionMethod::Deflated,
+        }],
+    )
+    .with_context(|| format!("repack {label} with updated AppxBundleManifest.xml"))?;
     Ok(out.into_inner())
 }
 

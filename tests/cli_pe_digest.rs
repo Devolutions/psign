@@ -1424,6 +1424,67 @@ fn msix_manifest_info_and_set_publisher_update_identity() {
 }
 
 #[test]
+fn msix_manifest_info_and_set_publisher_support_bundles() {
+    let input = repo_root().join("tests/fixtures/generated-unsigned/msix/sample.msixbundle");
+
+    let mut info = portable_cmd();
+    info.arg("msix-manifest-info").arg(&input);
+    info.assert()
+        .success()
+        .stdout(predicate::str::contains("package_name=Psign.ParityMinimal"))
+        .stdout(predicate::str::contains(
+            "publisher=CN=Test Code Signing Certificate",
+        ))
+        .stdout(predicate::str::contains("version=2026.514.1330.0"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("updated.msixbundle");
+    let publisher = "CN=Updated Bundle Publisher";
+    let mut update = portable_cmd();
+    update
+        .arg("msix-set-publisher")
+        .arg(&input)
+        .arg("--publisher")
+        .arg(publisher)
+        .arg("--output")
+        .arg(&output);
+    update.assert().success().stdout(predicate::str::contains(
+        "publisher=CN=Updated Bundle Publisher",
+    ));
+
+    // Both Identity@Publisher and Package@Publisher mirrors are updated, and the
+    // bundle manifest stays readable by the same helper afterwards.
+    let mut updated_info = portable_cmd();
+    updated_info.arg("msix-manifest-info").arg(&output);
+    updated_info
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "publisher=CN=Updated Bundle Publisher",
+        ))
+        .stdout(predicate::str::contains(
+            "package_publisher=CN=Updated Bundle Publisher",
+        ));
+
+    let mut manifest = String::new();
+    {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
+        archive
+            .by_name("AppxMetadata/AppxBundleManifest.xml")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+    }
+    assert_eq!(
+        manifest
+            .matches(r#"Publisher="CN=Updated Bundle Publisher""#)
+            .count(),
+        2,
+        "Identity@Publisher and Package@Publisher must both be updated:\n{manifest}"
+    );
+}
+
+#[test]
 fn clickonce_deploy_info_and_copy_payload_use_content_name() {
     let dir = tempfile::tempdir().unwrap();
     let deployed = dir.path().join("app.exe.deploy");
@@ -6059,6 +6120,185 @@ fn mode_portable_artifact_signing_signs_flat_msix() {
     let mut verify = portable_cmd();
     verify.arg("verify-msix").arg(&msix_path);
     verify.assert().success();
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
+fn mode_portable_artifact_signing_signs_msixbundle() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["sample.msixbundle", "sample.appxbundle"] {
+        // Native AppxBundleSip requires child packages to be signed before the bundle:
+        // sign the flat child first, then repack an unsigned bundle around it.
+        let child_ext = if name.ends_with("msixbundle") {
+            "sample.msix"
+        } else {
+            "sample.appx"
+        };
+        let child_path = dir.path().join(child_ext);
+        std::fs::copy(
+            repo_root().join(format!(
+                "tests/fixtures/generated-unsigned/msix/{child_ext}"
+            )),
+            &child_path,
+        )
+        .expect("copy unsigned child package fixture");
+        let (mut child_guard, child_endpoint) = spawn_psign_artifact_signing_server(2);
+        let mut child_cmd = Command::cargo_bin("psign-tool").unwrap();
+        child_cmd
+            .arg("--mode")
+            .arg("portable")
+            .arg("sign")
+            .arg("--digest")
+            .arg("sha256")
+            .arg("--artifact-signing-account-name")
+            .arg("acct")
+            .arg("--artifact-signing-profile-name")
+            .arg("prof")
+            .arg("--artifact-signing-access-token")
+            .arg("test-token")
+            .arg("--artifact-signing-endpoint-base-url")
+            .arg(&child_endpoint)
+            .arg(&child_path);
+        child_cmd
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Signed:"));
+        let status = child_guard.0.wait().expect("child server exit");
+        assert!(status.success(), "child server failed with {status}");
+
+        let bundle_path = repack_unsigned_bundle(&dir, &child_path, name);
+        let (mut guard, endpoint) = spawn_psign_artifact_signing_server(2);
+        let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+        cmd.arg("--mode")
+            .arg("portable")
+            .arg("sign")
+            .arg("--digest")
+            .arg("sha256")
+            .arg("--artifact-signing-account-name")
+            .arg("acct")
+            .arg("--artifact-signing-profile-name")
+            .arg("prof")
+            .arg("--artifact-signing-access-token")
+            .arg("test-token")
+            .arg("--artifact-signing-endpoint-base-url")
+            .arg(&endpoint)
+            .arg(&bundle_path);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains("Signed:"));
+        let status = guard.0.wait().expect("server exit");
+        assert!(status.success(), "server failed with {status}");
+
+        let mut verify = portable_cmd();
+        verify.arg("verify-msix").arg(&bundle_path);
+        verify.assert().success();
+    }
+}
+
+/// Copy the unsigned bundle fixture and swap in `child` under its original entry name,
+/// preserving the rest of the native MakeAppx layout.
+fn repack_unsigned_bundle(dir: &tempfile::TempDir, child: &Path, bundle_name: &str) -> PathBuf {
+    use std::io::Write as _;
+    let fixture = repo_root().join(format!(
+        "tests/fixtures/generated-unsigned/msix/{bundle_name}"
+    ));
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(&fixture).unwrap()).unwrap();
+    let child_entry = archive
+        .file_names()
+        .find(|n| n.ends_with(".msix") || n.ends_with(".appx"))
+        .expect("child entry in bundle fixture")
+        .to_owned();
+    let bundle_path = dir.path().join(bundle_name);
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(&bundle_path).unwrap());
+    let stored =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).unwrap();
+        if entry.name().ends_with('/') {
+            continue;
+        }
+        let name = entry.name().to_owned();
+        writer.start_file(&name, stored).unwrap();
+        if name == child_entry {
+            writer.write_all(&std::fs::read(child).unwrap()).unwrap();
+        } else {
+            std::io::copy(&mut entry, &mut writer).unwrap();
+        }
+    }
+    writer.finish().unwrap();
+    bundle_path
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "azure-kv-sign"))]
+#[test]
+fn mode_portable_sign_uses_azure_key_vault_for_msixbundle() {
+    let dir = tempfile::tempdir().unwrap();
+    // Native AppxBundleSip requires child packages to be signed before the bundle.
+    let child_path = dir.path().join("sample.msix");
+    std::fs::copy(
+        repo_root().join("tests/fixtures/generated-unsigned/msix/sample.msix"),
+        &child_path,
+    )
+    .expect("copy unsigned child package fixture");
+    let (_child_guard, url, certificate) = spawn_psign_azure_key_vault_server(0);
+    let mut child_cmd = Command::cargo_bin("psign-tool").unwrap();
+    child_cmd
+        .arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&child_path);
+    child_cmd
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+
+    let bundle_path = repack_unsigned_bundle(&dir, &child_path, "sample.msixbundle");
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&bundle_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+
+    psign_sip_digest::msix_digest::verify_msix_digest_consistency(&bundle_path)
+        .expect("signed MSIX bundle verifies with portable AppxBundleSip digest semantics");
+
+    // --skip-signed must detect the freshly signed bundle as signed.
+    let mut skip = Command::cargo_bin("psign-tool").unwrap();
+    skip.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--skip-signed")
+        .arg("--azure-key-vault-url")
+        .arg(&url)
+        .arg("--azure-key-vault-certificate")
+        .arg(&certificate)
+        .arg("--azure-key-vault-accesstoken")
+        .arg("test-token")
+        .arg(&bundle_path);
+    skip.assert()
+        .success()
+        .stdout(predicate::str::contains("Skipped (already signed):"));
 }
 
 #[cfg(all(

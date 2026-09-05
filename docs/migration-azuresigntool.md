@@ -1,6 +1,6 @@
 # Migrating from AzureSignTool
 
-This project can replace **AzureSignTool** for Windows signing when built with **`--features azure-kv-sign`**. **`psign-tool portable`** covers digest checks, verification, and (with **`--features azure-kv-sign-portable`**) Key Vault **`keys/sign`** on digest files plus portable PE Authenticode signing through **`portable sign-pe`**. Native-shaped **`--mode portable sign --azure-key-vault-*`** supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell Authenticode script formats (`.ps1`, `.psd1`, `.psm1`, `.ps1xml`, `.psc1`, `.cdxml`, `.mof`). Windows mode remains the broader native-shaped signing path.
+This project can replace **AzureSignTool** for Windows signing when built with **`--features azure-kv-sign`**. **`psign-tool portable`** covers digest checks, verification, and (with **`--features azure-kv-sign-portable`**) Key Vault **`keys/sign`** on digest files plus portable PE Authenticode signing through **`portable sign-pe`**. Native-shaped **`--mode portable sign --azure-key-vault-*`** supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, MSIX/AppX bundles (`.msixbundle`/`.appxbundle` — children must be signed before the bundle), NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell Authenticode script formats (`.ps1`, `.psd1`, `.psm1`, `.ps1xml`, `.psc1`, `.cdxml`, `.mof`). Windows mode remains the broader native-shaped signing path.
 
 **Azure Artifact Signing (Trusted Signing)** via Microsoft’s decoupled **`Azure.CodeSigning.Dlib.dll`** is **not** the Key Vault path: use **`--dlib`** / **`--trusted-signing-dlib-root`** with **`--dmdf`** only (never mixed with **`--azure-key-vault-url`**). See [`migration-artifact-signing.md`](migration-artifact-signing.md). PowerShell OpenAuthenticode overlap (inspect JSON, REST submit, EKU prefix selection) is summarized in [`psa-interoperability.md`](psa-interoperability.md).
 
@@ -101,7 +101,7 @@ psign-tool --mode portable sign \
   ./MyApp.exe
 ```
 
-The portable Key Vault path supports SHA-2 digests, Key Vault signer certificates, optional **`--ac` / `--chain-cert`** certificates, and RFC3161 sign-time timestamping. MSIX/AppX bundles, catalog targets, and WSH scripts remain unsupported by this native-shaped route; use the dedicated catalog command where applicable. Use **`psign-tool portable timestamp-pe-rfc3161`** as a second portable step only when you already have a timestamp token/response.
+The portable Key Vault path supports SHA-2 digests, Key Vault signer certificates, optional **`--ac` / `--chain-cert`** certificates, and RFC3161 sign-time timestamping. MSIX/AppX upload containers and encrypted packages, catalog targets, and WSH scripts remain unsupported by this native-shaped route; use the dedicated catalog command where applicable. Use **`psign-tool portable timestamp-pe-rfc3161`** as a second portable step only when you already have a timestamp token/response.
 
 ### Linux / CI: Key Vault **`keys/sign`** on a raw digest
 

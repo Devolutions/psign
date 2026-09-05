@@ -412,6 +412,7 @@ struct MsixManifestInfo {
     publisher: Option<String>,
     version: Option<String>,
     processor_architecture: Option<String>,
+    package_publisher: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1141,13 +1142,19 @@ fn inspect_msix_manifest_path(path: &Path) -> Result<MsixManifestInfo> {
     reject_encrypted_msix_path(path)?;
     let manifest = read_msix_manifest(path)?;
     let identity = first_tag(&manifest, "Identity")
-        .ok_or_else(|| anyhow!("MSIX/AppX AppxManifest.xml is missing Identity"))?;
-    Ok(MsixManifestInfo {
+        .ok_or_else(|| anyhow!("MSIX/AppX package manifest is missing Identity"))?;
+    let mut info = MsixManifestInfo {
         package_name: xml_attr(identity, "Name"),
         publisher: xml_attr(identity, "Publisher"),
         version: xml_attr(identity, "Version"),
         processor_architecture: xml_attr(identity, "ProcessorArchitecture"),
-    })
+        package_publisher: None,
+    };
+    if let Some(package) = first_start_tag_by_local_name(&manifest, "Package")? {
+        // Bundle manifests additionally mirror the child package publisher.
+        info.package_publisher = xml_attr(package, "Publisher");
+    }
+    Ok(info)
 }
 
 fn set_msix_manifest_publisher_path(input: &Path, output: &Path, publisher: &str) -> Result<()> {
@@ -1176,16 +1183,25 @@ fn reject_encrypted_msix_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read the package manifest, preferring the flat `AppxManifest.xml` and falling back to
+/// `AppxMetadata/AppxBundleManifest.xml` for `.msixbundle` / `.appxbundle` inputs.
 fn read_msix_manifest(path: &Path) -> Result<String> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("open MSIX/AppX ZIP")?;
-    let mut manifest = archive
-        .by_name("AppxManifest.xml")
-        .context("read AppxManifest.xml")?;
+    if let Ok(mut manifest) = archive.by_name("AppxManifest.xml") {
+        let mut text = String::new();
+        manifest
+            .read_to_string(&mut text)
+            .context("read AppxManifest.xml as UTF-8")?;
+        return Ok(text);
+    }
+    let mut bundle_manifest = archive
+        .by_name("AppxMetadata/AppxBundleManifest.xml")
+        .context("read AppxManifest.xml or AppxMetadata/AppxBundleManifest.xml")?;
     let mut text = String::new();
-    manifest
+    bundle_manifest
         .read_to_string(&mut text)
-        .context("read AppxManifest.xml as UTF-8")?;
+        .context("read AppxMetadata/AppxBundleManifest.xml as UTF-8")?;
     Ok(text)
 }
 
@@ -1199,6 +1215,12 @@ where
     if input.by_name("AppxSignature.p7x").is_ok() {
         return Err(anyhow!(
             "MSIX/AppX package already contains AppxSignature.p7x; update the unsigned package before final signing"
+        ));
+    }
+    let is_bundle = input.by_name("AppxManifest.xml").is_err();
+    if is_bundle && input.by_name("AppxMetadata/AppxBundleManifest.xml").is_err() {
+        return Err(anyhow!(
+            "MSIX/AppX package is missing AppxManifest.xml (or AppxMetadata/AppxBundleManifest.xml for bundles)"
         ));
     }
     let mut output = zip::ZipWriter::new(writer);
@@ -1220,13 +1242,24 @@ where
             let updated = update_attr_for_tags(&text, "Identity", "Publisher", &escaped)?;
             output.write_all(updated.as_bytes())?;
             updated_manifest = true;
+        } else if name == "AppxMetadata/AppxBundleManifest.xml" {
+            let mut text = String::new();
+            file.read_to_string(&mut text)
+                .context("read AppxMetadata/AppxBundleManifest.xml as UTF-8")?;
+            // Bundle manifests carry Identity@Publisher plus per-child Package@Publisher mirrors.
+            let mut updated = update_attr_for_local_tags(&text, "Identity", "Publisher", &escaped)?;
+            updated = update_attr_for_local_tags(&updated, "Package", "Publisher", &escaped)?;
+            output.write_all(updated.as_bytes())?;
+            updated_manifest = true;
         } else {
             std::io::copy(&mut file, &mut output)?;
         }
     }
 
     if !updated_manifest {
-        return Err(anyhow!("MSIX/AppX package is missing AppxManifest.xml"));
+        return Err(anyhow!(
+            "MSIX/AppX package is missing AppxManifest.xml (or AppxMetadata/AppxBundleManifest.xml for bundles)"
+        ));
     }
     output.finish()?;
     Ok(())
@@ -5019,6 +5052,9 @@ where
                 "processor_architecture={}",
                 info.processor_architecture.unwrap_or("-".to_string())
             );
+            if let Some(package_publisher) = info.package_publisher {
+                println!("package_publisher={package_publisher}");
+            }
         }
         Command::MsixSetPublisher {
             path,
