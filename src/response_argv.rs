@@ -39,11 +39,11 @@ fn utf16_bytes_to_string(bytes: &[u8], big_endian: bool) -> Result<String> {
         ));
     }
     let mut units = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let u = if big_endian {
-            u16::from_be_bytes([pair[0], pair[1]])
+            u16::from_be_bytes(*pair)
         } else {
-            u16::from_le_bytes([pair[0], pair[1]])
+            u16::from_le_bytes(*pair)
         };
         units.push(u);
     }

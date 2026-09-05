@@ -388,8 +388,10 @@ fn read_rdp_hash_algorithm_oid() -> Result<Option<String>> {
         return Err(anyhow!("read RDP HashAlgorithm registry value: {status:?}"));
     }
     let words: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .take_while(|&w| w != 0)
         .collect();
     Ok(Some(String::from_utf16_lossy(&words)))

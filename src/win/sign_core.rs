@@ -566,9 +566,11 @@ pub(crate) fn infer_digest_for_cert(cert: *const CERT_CONTEXT) -> Result<DigestA
         )?;
     }
     let wide: Vec<u16> = buf
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .take_while(|&x| x != 0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
+        .take_while(|x| *x != 0)
         .collect();
     let s = String::from_utf16_lossy(&wide).to_ascii_uppercase();
     if s.contains("SHA512") {

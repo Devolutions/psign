@@ -76,14 +76,18 @@ fn markers(family: MarkerFamily) -> (Vec<u16>, Vec<u16>, Vec<u16>, Vec<u16>) {
 pub fn file_utf16_units(raw: &[u8]) -> Vec<u16> {
     if raw.len() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE {
         return raw[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
     }
     if raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
         return raw[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
     }
     let lossy = String::from_utf8_lossy(raw);

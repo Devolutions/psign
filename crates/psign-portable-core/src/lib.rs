@@ -3607,8 +3607,10 @@ mod tests {
         assert_eq!(
             String::from_utf16(
                 &signed_le[2..]
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| u16::from_le_bytes(*bytes))
                     .collect::<Vec<_>>()
             )
             .expect("UTF-16LE script"),
@@ -3620,8 +3622,10 @@ mod tests {
         assert_eq!(
             String::from_utf16(
                 &signed_be[2..]
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|bytes| u16::from_be_bytes(*bytes))
                     .collect::<Vec<_>>()
             )
             .expect("UTF-16BE script"),
