@@ -8,9 +8,8 @@ use crate::policy::{AuthenticodeTrustPolicy, OnlineTrustOptions};
 use anyhow::{Result, anyhow};
 use cms::cert::CertificateChoices;
 use cms::signed_data::SignedData;
-use der::Decode;
-use der::Encode;
 use der::asn1::ObjectIdentifier;
+use der::{Decode, Encode, Header, Reader, SliceReader, Tag};
 use picky::x509::certificate::Cert;
 use picky::x509::date::UtcDate;
 use picky::x509::pkcs7::authenticode::AuthenticodeSignature;
@@ -21,20 +20,76 @@ use psign_sip_digest::pkcs7::{
 };
 use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use x509_cert::Certificate;
-use x509_cert::ext::pkix::ExtendedKeyUsage;
 
 const EKU_EXTENSION_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 /// **`id-kp-codeSigning`** (RFC 5280).
 const CODE_SIGNING_EKU_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.3");
+
+/// Validate canonical base-128 subidentifiers without imposing a fixed integer width on each arc.
+fn oid_value_is_well_formed(value: &[u8]) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+
+    let mut starts_subidentifier = true;
+    for &byte in value {
+        if starts_subidentifier && byte == 0x80 {
+            return false;
+        }
+        starts_subidentifier = byte & 0x80 == 0;
+    }
+
+    starts_subidentifier
+}
+
+/// Search an EKU sequence without decoding unrelated OIDs into `u32` arcs.
+///
+/// Azure Artifact Signing identity EKUs contain valid five-byte arcs which `const-oid 0.9`
+/// rejects, even though the code-signing OID itself is representable by that dependency.
+fn extended_key_usage_contains(der: &[u8], expected: ObjectIdentifier) -> Result<bool> {
+    let mut outer =
+        SliceReader::new(der).map_err(|e| anyhow!("ExtendedKeyUsage extension reader: {e}"))?;
+    let header = Header::decode(&mut outer)
+        .map_err(|e| anyhow!("ExtendedKeyUsage extension header: {e}"))?;
+    if header.tag != Tag::Sequence {
+        return Err(anyhow!("ExtendedKeyUsage extension is not a SEQUENCE"));
+    }
+    let body = outer
+        .read_slice(header.length)
+        .map_err(|e| anyhow!("ExtendedKeyUsage extension body: {e}"))?;
+    outer
+        .finish(())
+        .map_err(|e| anyhow!("ExtendedKeyUsage extension trailing data: {e}"))?;
+
+    let mut entries =
+        SliceReader::new(body).map_err(|e| anyhow!("ExtendedKeyUsage extension entries: {e}"))?;
+    let mut found = false;
+    while !entries.is_finished() {
+        let header = Header::decode(&mut entries)
+            .map_err(|e| anyhow!("ExtendedKeyUsage OID header: {e}"))?;
+        if header.tag != Tag::ObjectIdentifier {
+            return Err(anyhow!(
+                "ExtendedKeyUsage entry is not an OBJECT IDENTIFIER"
+            ));
+        }
+        let value = entries
+            .read_slice(header.length)
+            .map_err(|e| anyhow!("ExtendedKeyUsage OID value: {e}"))?;
+        if !oid_value_is_well_formed(value) {
+            return Err(anyhow!("ExtendedKeyUsage contains a malformed OID"));
+        }
+        found |= value == expected.as_bytes();
+    }
+
+    Ok(found)
+}
 
 fn x509_cert_has_code_signing_eku(cert: &Certificate) -> Result<bool> {
     let Some(exts) = &cert.tbs_certificate.extensions else {
         return Ok(false);
     };
     for ext in exts.iter().filter(|e| e.extn_id == EKU_EXTENSION_OID) {
-        let eku = ExtendedKeyUsage::from_der(ext.extn_value.as_bytes())
-            .map_err(|e| anyhow!("ExtendedKeyUsage extension: {e}"))?;
-        if eku.0.contains(&CODE_SIGNING_EKU_OID) {
+        if extended_key_usage_contains(ext.extn_value.as_bytes(), CODE_SIGNING_EKU_OID)? {
             return Ok(true);
         }
     }
@@ -324,4 +379,94 @@ pub fn verify_pkcs9_message_digest_pkcs7_trust(
         verification_instant,
         verbose_chain,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_base128(mut value: u64) -> Vec<u8> {
+        let mut encoded = vec![(value & 0x7f) as u8];
+        value >>= 7;
+        while value != 0 {
+            encoded.push(((value & 0x7f) as u8) | 0x80);
+            value >>= 7;
+        }
+        encoded.reverse();
+        encoded
+    }
+
+    fn encode_oid(arcs: &[u64]) -> Vec<u8> {
+        assert!(arcs.len() >= 2);
+        let mut value = encode_base128(arcs[0] * 40 + arcs[1]);
+        for &arc in &arcs[2..] {
+            value.extend(encode_base128(arc));
+        }
+
+        let mut encoded = vec![Tag::ObjectIdentifier.into(), value.len() as u8];
+        encoded.extend(value);
+        encoded
+    }
+
+    fn encode_extended_key_usage(oids: &[&[u64]]) -> Vec<u8> {
+        let body: Vec<u8> = oids.iter().flat_map(|oid| encode_oid(oid)).collect();
+        let mut encoded = vec![Tag::Sequence.into(), body.len() as u8];
+        encoded.extend(body);
+        encoded
+    }
+
+    const CODE_SIGNING: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 3, 3];
+    const TEST_LIFETIME_SIGNING: &[u64] = &[1, 3, 6, 1, 4, 1, 311, 10, 3, 13];
+    const TEST_IDENTITY: &[u64] = &[
+        1,
+        3,
+        6,
+        1,
+        4,
+        1,
+        311,
+        97,
+        1,
+        2,
+        548_345_392,
+        570_456_524,
+        348_779_735,
+        628_493_769,
+    ];
+    const PUBLIC_TRUST: &[u64] = &[1, 3, 6, 1, 4, 1, 311, 97, 1, 0];
+    const PRODUCTION_IDENTITY: &[u64] = &[
+        1,
+        3,
+        6,
+        1,
+        4,
+        1,
+        311,
+        97,
+        872_172_236,
+        817_999_856,
+        585_183_201,
+        971_782_747,
+    ];
+
+    #[test]
+    fn accepts_azure_test_signing_extended_key_usages() {
+        let der = encode_extended_key_usage(&[TEST_LIFETIME_SIGNING, TEST_IDENTITY, CODE_SIGNING]);
+
+        assert!(extended_key_usage_contains(&der, CODE_SIGNING_EKU_OID).unwrap());
+    }
+
+    #[test]
+    fn accepts_azure_production_signing_extended_key_usages() {
+        let der = encode_extended_key_usage(&[PUBLIC_TRUST, PRODUCTION_IDENTITY, CODE_SIGNING]);
+
+        assert!(extended_key_usage_contains(&der, CODE_SIGNING_EKU_OID).unwrap());
+    }
+
+    #[test]
+    fn rejects_malformed_unknown_extended_key_usage() {
+        let der = [0x30, 0x03, 0x06, 0x01, 0x80];
+
+        assert!(extended_key_usage_contains(&der, CODE_SIGNING_EKU_OID).is_err());
+    }
 }
