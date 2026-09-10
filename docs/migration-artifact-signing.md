@@ -40,6 +40,23 @@ cargo build -p psign-digest-cli --features artifact-signing-rest --locked
 
 Optional debug logs: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 
+### Retrieve the profile root certificate
+
+The feature-gated **`artifact-signing-root`** helper retrieves the root certificate currently associated with a certificate profile and validates the bounded response as an X.509 DER CA certificate before writing it:
+
+```bash
+psign-tool artifact-signing-root \
+  --endpoint https://wus.artifactsigning.azure.net \
+  --account-name myAccount \
+  --profile-name myProfile \
+  --output ./artifact-signing-root.cer \
+  --managed-identity
+```
+
+The caller needs access to the profile; Microsoft's [Artifact Signing FAQ](https://learn.microsoft.com/azure/artifact-signing/faq) identifies the **Artifact Signing Certificate Profile Signer** role for retrieving a Private Trust profile root. The command follows Microsoft's preview [`Get-AzArtifactSigningCertificateRoot`](https://learn.microsoft.com/powershell/module/az.artifactsigning/get-azartifactsigningcertificateroot) operation and therefore uses a separate preview API-version default. Override **`--api-version`** only when the service contract you target requires it.
+
+For credential safety, **`--endpoint`** must be an HTTPS origin below **`codesigning.azure.net`** or **`artifactsigning.azure.net`**, with no path, query, fragment, user information, or non-default port. psign validates the endpoint before acquiring a credential and rejects successful responses that are not valid certificate DER. Treat the downloaded certificate as a trust anchor only after the profile identity and execution context have been authenticated as intended.
+
 ## Pure REST portable signing (no Microsoft client tools)
 
 For PE/WinMD, prefer the first-class portable signer instead of manually staging a digest:

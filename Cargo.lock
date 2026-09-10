@@ -2092,9 +2092,12 @@ dependencies = [
  "anyhow",
  "base64",
  "mockito",
+ "rcgen",
  "reqwest",
  "serde",
  "serde_json",
+ "url",
+ "x509-cert",
 ]
 
 [[package]]
