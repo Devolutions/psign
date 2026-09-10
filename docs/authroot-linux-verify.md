@@ -6,6 +6,8 @@ By default, **`psign-tool portable trust-verify-*`** and bare **`psign-tool --mo
 
 Set **`PSIGN_NO_AUTO_TRUST=1`** (also accepts `true` or `yes`) to disable automatic AuthRoot use. Set **`PSIGN_AUTHROOT_MAX_AGE_DAYS=<days>`** to change the staleness window. Advanced/offline environments can set **`PSIGN_AUTHROOT_CACHE_DIR`** or **`PSIGN_AUTHROOT_URL`** for an alternate cache location or mirror. Explicit **`--authroot-cab`**, **`--anchor-dir`**, or repeatable **`--trusted-ca`** inputs take precedence and suppress automatic AuthRoot resolution.
 
+Use repeatable **`--additional-trusted-ca`** inputs when a private or test root should augment, rather than replace, the selected trust set. With no explicit **`--authroot-cab`**, **`--anchor-dir`**, or **`--trusted-ca`**, automatic Microsoft AuthRoot discovery remains enabled. Because every additional certificate becomes a trust anchor for that invocation, obtain it from an authenticated source and validate its expected identity in security-sensitive automation.
+
 ## Phase A — anchor directory (recommended first ship)
 
 1. On a Windows machine with updates, sync roots you trust, for example:
@@ -59,7 +61,15 @@ psign-tool portable trust-verify-pe \
   ./signed.exe
 ```
 
-The unified CLI uses the same trust path without writing to the Windows or Linux OS trust store. With **`--mode portable verify`**, supported formats route to the corresponding portable **`trust-verify-*`** command by default when automatic AuthRoot is enabled. Explicit trust inputs such as **`--trusted-ca`**, **`--anchor-dir`**, **`--authroot-cab`**, AIA/OCSP/CRL flags, and timestamp policy flags still route to the same trust commands:
+Add a test or private root while retaining automatic Microsoft AuthRoot trust:
+
+```bash
+psign-tool portable trust-verify-pe \
+  --additional-trusted-ca ./downloaded-test-root.cer \
+  ./signed.exe
+```
+
+The unified CLI uses the same trust path without writing to the Windows or Linux OS trust store. With **`--mode portable verify`**, supported formats route to the corresponding portable **`trust-verify-*`** command by default when automatic AuthRoot is enabled. Trust inputs such as **`--trusted-ca`**, **`--additional-trusted-ca`**, **`--anchor-dir`**, **`--authroot-cab`**, AIA/OCSP/CRL flags, and timestamp policy flags still route to the same trust commands:
 
 ```bash
 psign-tool --mode portable verify \

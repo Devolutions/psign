@@ -79,7 +79,7 @@ pub fn load_trust_material(opts: &TrustVerifyPeOptions) -> Result<(AnchorStore, 
 
     if anchor_store.thumbprint_count() == 0 {
         return Err(anyhow!(
-            "no trust anchors configured (use --anchor-dir and/or --authroot-cab)"
+            "no trust anchors configured (use --anchor-dir, --trusted-ca, --additional-trusted-ca, and/or --authroot-cab)"
         ));
     }
 
