@@ -1,4 +1,5 @@
 use super::pe_digest::{ParsedPe, PeAuthenticodeHashKind, pe_authenticode_digest};
+use crate::pe_embed::pe_validate_attribute_certificate_table_alignment;
 use crate::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use anyhow::{Result, anyhow};
 use authenticode::{
@@ -56,6 +57,7 @@ pub fn verify_pe_authenticode_digest_consistency_if_signed(
 fn verify_pe_authenticode_digest_consistency_status(
     bytes: &[u8],
 ) -> Result<PeDigestConsistencyStatus> {
+    pe_validate_attribute_certificate_table_alignment(bytes)?;
     let parsed = ParsedPe::parse(bytes)?;
     let pe = parsed.as_pe_trait();
     let Some(iter) = AttributeCertificateIterator::new(pe)

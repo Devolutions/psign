@@ -4385,6 +4385,12 @@ where
                     })?
                     .0;
             }
+            pe = pe_embed::pe_prepare_for_authenticode_signing(pe).with_context(|| {
+                format!(
+                    "prepare PE certificate table alignment for {}",
+                    path.display()
+                )
+            })?;
             let has_local = cert.is_some() || key.is_some();
             let has_kv = azure_key_vault_url
                 .as_deref()

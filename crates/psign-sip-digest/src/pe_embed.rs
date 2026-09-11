@@ -1,7 +1,8 @@
 //! Grow the PE attribute certificate table with an additional **`WIN_CERTIFICATE`** wrapping PKCS#7 (**Authenticode**).
 //!
 //! This module performs **file layout only**: it does **not** build a valid CMS **`SignedData`**, re-hash the PE for signing,
-//! or match **`SignerSignEx3`** output byte-for-byte. **`pe_append_authenticode_pkcs7_certificate`** does refresh **`CheckSum`**
+//! or match **`SignerSignEx3`** output byte-for-byte. Call [`pe_prepare_for_authenticode_signing`] before computing that digest so
+//! the attribute certificate table can begin at a quadword-aligned offset. **`pe_append_authenticode_pkcs7_certificate`** refreshes **`CheckSum`**
 //! (**`pe_compute_image_checksum`**) after mutation. It exists so Linux-side tooling
 //! can experiment with **multi-signature** placement and so future portable signers can call into a single embed helper.
 //!
@@ -22,6 +23,7 @@ const PE32_MAGIC: u16 = 0x10b;
 const PE32PLUS_MAGIC: u16 = 0x20b;
 
 const IMAGE_DIRECTORY_ENTRY_SECURITY: usize = 4;
+const ATTRIBUTE_CERTIFICATE_ALIGNMENT: usize = 8;
 
 /// Byte offset from the start of the optional header to **`CheckSum`** (** DWORD**, PE32 and PE32+).
 const OPTIONAL_HEADER_CHECKSUM_OFFSET: usize = 64;
@@ -175,10 +177,64 @@ fn write_security_data_directory(pe: &mut [u8], cert_file_ptr: u32, cert_size: u
     Ok(())
 }
 
+fn validate_attribute_certificate_table_alignment(
+    cert_file_ptr: u32,
+    cert_size: u32,
+) -> Result<()> {
+    if cert_file_ptr == 0 && cert_size == 0 {
+        return Ok(());
+    }
+    if cert_file_ptr == 0 || cert_size == 0 {
+        return Err(anyhow!(
+            "incomplete PE certificate table directory: offset {cert_file_ptr}, size {cert_size}"
+        ));
+    }
+    if !(cert_file_ptr as usize).is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT) {
+        return Err(anyhow!(
+            "PE certificate table offset {cert_file_ptr} is not 8-byte aligned"
+        ));
+    }
+    if !(cert_size as usize).is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT) {
+        return Err(anyhow!(
+            "PE certificate table size {cert_size} is not 8-byte aligned"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn pe_validate_attribute_certificate_table_alignment(pe_image: &[u8]) -> Result<()> {
+    let (cert_file_ptr, cert_size) = read_security_data_directory(pe_image)?;
+    validate_attribute_certificate_table_alignment(cert_file_ptr, cert_size)
+}
+
+/// Pad an unsigned PE image so a subsequently embedded attribute certificate table starts on a
+/// quadword boundary. The padding is part of the Authenticode-hashed region, so callers must invoke
+/// this helper before computing the digest that will be stored in PKCS#7.
+///
+/// An existing certificate table is left unchanged when it is aligned. A malformed or misaligned
+/// table is rejected because relocating it would invalidate its existing signatures.
+pub fn pe_prepare_for_authenticode_signing(mut pe_image: Vec<u8>) -> Result<Vec<u8>> {
+    let (cert_file_ptr, cert_size) = read_security_data_directory(&pe_image)?;
+    validate_attribute_certificate_table_alignment(cert_file_ptr, cert_size)?;
+    if cert_file_ptr != 0 {
+        return Ok(pe_image);
+    }
+
+    let remainder = pe_image.len() % ATTRIBUTE_CERTIFICATE_ALIGNMENT;
+    let padding = (ATTRIBUTE_CERTIFICATE_ALIGNMENT - remainder) % ATTRIBUTE_CERTIFICATE_ALIGNMENT;
+    let padded_len = pe_image
+        .len()
+        .checked_add(padding)
+        .ok_or_else(|| anyhow!("PE image length overflow while aligning certificate table"))?;
+    pe_image.resize(padded_len, 0);
+    Ok(pe_image)
+}
+
 /// Append **`pkcs7_der`** as a new **`WIN_CERT_TYPE_PKCS_SIGNED_DATA`** row after the existing attribute certificate table.
 ///
-/// - When the security directory is **empty** (**`VirtualAddress`** and **`Size`** are zero), the blob is appended at the **current EOF**
-///   and the directory is initialized (**`VirtualAddress`** is the **file offset** to the table for PE files).
+/// - When the security directory is **empty** (**`VirtualAddress`** and **`Size`** are zero), the current EOF must already be
+///   quadword-aligned (see [`pe_prepare_for_authenticode_signing`]). The blob is appended there and the directory is initialized
+///   (**`VirtualAddress`** is the **file offset** to the table for PE files).
 /// - When a table **already exists**, new bytes are appended immediately after **`VirtualAddress + Size`**; the file is truncated
 ///   first if it is longer than that end offset (defensive).
 ///
@@ -189,10 +245,23 @@ pub fn pe_append_authenticode_pkcs7_certificate(
 ) -> Result<Vec<u8>> {
     let wrapped = wrap_pkcs7_der_authenticode_win_certificate(pkcs7_der);
     let (va, size) = read_security_data_directory(&pe_image)?;
+    validate_attribute_certificate_table_alignment(va, size)?;
     if va == 0 && size == 0 {
-        let off = pe_image.len() as u32;
+        if !pe_image
+            .len()
+            .is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT)
+        {
+            return Err(anyhow!(
+                "PE image length {} is not 8-byte aligned; prepare it before computing the Authenticode digest",
+                pe_image.len()
+            ));
+        }
+        let off = u32::try_from(pe_image.len())
+            .map_err(|_| anyhow!("PE certificate table offset exceeds u32"))?;
+        let wrapped_len = u32::try_from(wrapped.len())
+            .map_err(|_| anyhow!("WIN_CERTIFICATE size exceeds u32"))?;
         pe_image.extend_from_slice(&wrapped);
-        write_security_data_directory(&mut pe_image, off, wrapped.len() as u32)?;
+        write_security_data_directory(&mut pe_image, off, wrapped_len)?;
         pe_refresh_image_checksum(&mut pe_image)?;
         return Ok(pe_image);
     }
@@ -215,8 +284,10 @@ pub fn pe_append_authenticode_pkcs7_certificate(
         ));
     }
     pe_image.extend_from_slice(&wrapped);
+    let wrapped_len =
+        u32::try_from(wrapped.len()).map_err(|_| anyhow!("WIN_CERTIFICATE size exceeds u32"))?;
     let new_size = size
-        .checked_add(wrapped.len() as u32)
+        .checked_add(wrapped_len)
         .ok_or_else(|| anyhow!("certificate table size overflow"))?;
     write_security_data_directory(&mut pe_image, va, new_size)?;
     pe_refresh_image_checksum(&mut pe_image)?;
@@ -355,6 +426,80 @@ mod tests {
             u16::from_le_bytes(w[6..8].try_into().unwrap()),
             WIN_CERT_TYPE_PKCS_SIGNED_DATA
         );
+    }
+
+    #[test]
+    fn prepare_unsigned_pe_aligns_every_eof_residue_before_signing() {
+        let fixture = include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.efi");
+
+        for overlay_len in 0..ATTRIBUTE_CERTIFICATE_ALIGNMENT {
+            let mut input = fixture.to_vec();
+            input.extend(std::iter::repeat_n(0xa5, overlay_len));
+            let original_len = input.len();
+
+            let prepared = pe_prepare_for_authenticode_signing(input.clone()).expect("prepare PE");
+            let expected_padding = (ATTRIBUTE_CERTIFICATE_ALIGNMENT
+                - original_len % ATTRIBUTE_CERTIFICATE_ALIGNMENT)
+                % ATTRIBUTE_CERTIFICATE_ALIGNMENT;
+
+            assert_eq!(&prepared[..original_len], input);
+            assert_eq!(prepared.len(), original_len + expected_padding);
+            assert!(prepared[original_len..].iter().all(|byte| *byte == 0));
+            assert!(
+                prepared
+                    .len()
+                    .is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT)
+            );
+        }
+    }
+
+    #[test]
+    fn append_rejects_unaligned_unsigned_pe_that_was_not_prepared() {
+        let mut pe =
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.efi").to_vec();
+        pe.push(0xa5);
+
+        let err = pe_append_authenticode_pkcs7_certificate(pe, &[0x30, 0x00])
+            .expect_err("unaligned PE must be rejected");
+
+        assert!(err.to_string().contains("prepare it before computing"));
+    }
+
+    #[test]
+    fn append_places_certificate_table_at_prepared_aligned_eof() {
+        let mut pe =
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.efi").to_vec();
+        pe.extend_from_slice(&[0xa5, 0xa5, 0xa5]);
+        let original_len = pe.len();
+        let prepared = pe_prepare_for_authenticode_signing(pe).expect("prepare PE");
+        let expected_offset = prepared.len();
+
+        let signed = pe_append_authenticode_pkcs7_certificate(prepared, &[0x30, 0x00])
+            .expect("append certificate");
+        let (cert_file_ptr, _) = read_security_data_directory(&signed).expect("security directory");
+
+        assert_eq!(cert_file_ptr as usize, expected_offset);
+        assert!(expected_offset.is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT));
+        assert_eq!(expected_offset - original_len, 5);
+    }
+
+    #[test]
+    fn verifier_rejects_misaligned_existing_certificate_table() {
+        let mut signed =
+            include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi")
+                .to_vec();
+        let (cert_file_ptr, cert_size) =
+            read_security_data_directory(&signed).expect("security directory");
+        write_security_data_directory(&mut signed, cert_file_ptr + 1, cert_size)
+            .expect("misalign security directory");
+
+        let prepare_err = pe_prepare_for_authenticode_signing(signed.clone())
+            .expect_err("append-signature preparation must reject misaligned table");
+        let err = verify_pe_authenticode_digest_consistency(&signed)
+            .expect_err("misaligned certificate table must be rejected");
+
+        assert!(prepare_err.to_string().contains("not 8-byte aligned"));
+        assert!(err.to_string().contains("not 8-byte aligned"));
     }
 
     #[test]

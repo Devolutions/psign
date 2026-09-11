@@ -415,6 +415,8 @@ pub fn msix_spc_indirect_data(
 ///
 /// This is the portable CMS producer used before format-specific embedding (for PE, `pe_embed` wraps the
 /// returned DER in a `WIN_CERTIFICATE`). It intentionally supports the modern RSA/SHA-2 subset first.
+/// Call [`crate::pe_embed::pe_prepare_for_authenticode_signing`] on an unsigned image before passing
+/// it here so the digest includes any padding required to align the attribute certificate table.
 pub fn create_pe_authenticode_pkcs7_der_rsa(
     pe_image: &[u8],
     digest_algorithm: AuthenticodeSigningDigest,
