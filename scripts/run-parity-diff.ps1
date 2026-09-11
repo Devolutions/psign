@@ -473,6 +473,33 @@ function Get-RustSignCredentialArgs {
     return $out
 }
 
+function Copy-PeWithUnalignedEof {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    $length = (Get-Item -LiteralPath $Destination).Length
+    $appendCount = [int]((1 - ($length % 8) + 8) % 8)
+    if ($appendCount -eq 0) {
+        $appendCount = 8
+    }
+
+    $stream = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Append)
+    try {
+        $stream.Write([byte[]]::new($appendCount), 0, $appendCount)
+    }
+    finally {
+        $stream.Dispose()
+    }
+
+    $unalignedLength = (Get-Item -LiteralPath $Destination).Length
+    if (($unalignedLength % 8) -ne 1) {
+        throw "Failed to prepare unaligned PE test input: length=$unalignedLength"
+    }
+}
+
 function Get-RustMsixCredentialArgs {
     # Prefer store thumbprint when CI bootstrap imported the test cert into `CurrentUser\My` — Rust `SignerSignEx3`
     # + MSIX SIP often succeeds with `--cert-sha1` while `--pfx` can hit `CRYPT_E_NO_PROVIDER` on some hosts.
@@ -527,6 +554,7 @@ if ($env:PSIGN_UNSIGNED_FIXTURE -and $env:PSIGN_TEST_PFX) {
         "artifact_sign_verify_semantic",
         "artifact_sign_two_pe_exit_parity",
         "artifact_verify_print_description_match",
+        "portable_sign_pe_unaligned_eof_native_verify",
         "sign_pe_fixture_sha256_match_native",
         "verify_pe_fixture_pa_exit_match"
     )
@@ -627,6 +655,57 @@ if ($env:PSIGN_UNSIGNED_FIXTURE -and $env:PSIGN_TEST_PFX) {
         classification = if ($nativePeVerifyExit -ne $rustPeVerifyExit) { "semantic_mismatch" }
         elseif ($nativePeVerifyExit -ne 0 -and $rustPeVerifyExit -ne 0) { "shared_failure" }
         else { "exit_match" }
+    }
+
+    # Reproduce the portable PE alignment boundary with a CI-built executable rather than a
+    # committed fixture. The portable signer must pad before hashing so native WinVerifyTrust
+    # accepts the resulting certificate table.
+    $tmpUnalignedPe = Join-Path $env:TEMP "psign_portable_unaligned_eof.exe"
+    $tmpPortableSignedPe = Join-Path $env:TEMP "psign_portable_unaligned_eof_signed.exe"
+    $tmpPortableStore = Join-Path $env:TEMP "psign_portable_alignment_cert_store"
+    $tmpPortableCert = Join-Path $env:TEMP "psign_portable_test_cert.der"
+    $tmpPortableKey = Join-Path $env:TEMP "psign_portable_test_key.pem"
+    Remove-Item -LiteralPath $tmpUnalignedPe, $tmpPortableSignedPe, $tmpPortableStore, $tmpPortableCert, $tmpPortableKey -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-PeWithUnalignedEof -Source $env:PSIGN_UNSIGNED_FIXTURE -Destination $tmpUnalignedPe
+    $pfxPassword = if ($null -eq $env:PSIGN_TEST_PFX_PASSWORD) { "" } else { $env:PSIGN_TEST_PFX_PASSWORD }
+    $pfxFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+    $pfxCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:PSIGN_TEST_PFX, $pfxPassword, $pfxFlags)
+    $portableThumbprint = $pfxCertificate.Thumbprint
+    $pfxCertificate.Dispose()
+    $savedUnalignedPe = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $importPfxArgs = @("cert-store", "import-pfx", "--cert-store-dir", $tmpPortableStore)
+    if ($env:PSIGN_TEST_PFX_PASSWORD) {
+        $importPfxArgs += @("--password", $env:PSIGN_TEST_PFX_PASSWORD)
+    }
+    $importPfxArgs += $env:PSIGN_TEST_PFX
+    & "$rustBin" @importPfxArgs 2>&1 | Out-Null
+    & "$rustBin" cert-store export `
+        --cert-store-dir $tmpPortableStore `
+        --sha1 $portableThumbprint `
+        --out $tmpPortableCert `
+        --with-key `
+        --key-out $tmpPortableKey 2>&1 | Out-Null
+    $rustUnalignedSign = @(
+        "portable", "sign-pe", $tmpUnalignedPe,
+        "--cert", $tmpPortableCert,
+        "--key", $tmpPortableKey,
+        "--digest", "sha256",
+        "--output", $tmpPortableSignedPe
+    )
+    & "$rustBin" @rustUnalignedSign 2>&1 | Out-Null
+    $rustUnalignedSignExit = $LASTEXITCODE
+    & "$nativeSignTool" verify /pa $tmpPortableSignedPe 2>&1 | Out-Null
+    $nativeUnalignedVerifyExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedUnalignedPe
+    Remove-Item -LiteralPath $tmpUnalignedPe, $tmpPortableSignedPe, $tmpPortableStore, $tmpPortableCert, $tmpPortableKey -Recurse -Force -ErrorAction SilentlyContinue
+
+    $results += [PSCustomObject]@{
+        id = "portable_sign_pe_unaligned_eof_native_verify"
+        nativeExitCode = $nativeUnalignedVerifyExit
+        rustExitCode = $rustUnalignedSignExit
+        classification = if ($rustUnalignedSignExit -eq 0 -and $nativeUnalignedVerifyExit -eq 0) { "artifact_semantic_match" }
+        else { "semantic_mismatch" }
     }
 
     # Sign with /d + /du then verify /pa /v /d: Authenticode program name + URL must match native output lines.
