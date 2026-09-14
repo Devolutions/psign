@@ -1795,9 +1795,9 @@ fn sign_msi(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         std::fs::read(&request.path).with_context(|| format!("read {}", request.path.display()))?;
     let provider = load_signing_provider(request)?;
     let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
-    let msi_digest =
-        msi_digest::compute_msi_authenticode_digest(&msi, digest_algorithm.pe_hash_kind())?;
-    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, &msi_digest)?;
+    let prepared =
+        msi_digest::prepare_msi_for_authenticode_signing(&msi, digest_algorithm.pe_hash_kind())?;
+    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, prepared.digest())?;
     let pkcs7 = provider
         .create_authenticode_pkcs7(indirect, digest_algorithm)
         .with_context(|| {
@@ -1808,7 +1808,7 @@ fn sign_msi(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         })?;
     let pkcs7 = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
-    msi_digest::msi_embed_authenticode_pkcs7_signature(&request.path, output_path, &pkcs7)
+    msi_digest::msi_embed_prepared_authenticode_pkcs7_signature(&prepared, output_path, &pkcs7)
         .with_context(|| format!("embed Authenticode signature in {}", request.path.display()))
 }
 

@@ -2123,7 +2123,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: PathBuf,
     },
-    /// Sign an MSI/MSP OLE package with portable Authenticode CMS and a DigitalSignature stream.
+    /// Sign an MSI/MSP OLE package with portable Authenticode CMS and the required MSI signature streams.
     SignMsi {
         /// Input MSI/MSP path.
         #[arg(value_name = "PATH")]
@@ -3790,15 +3790,13 @@ fn create_cab_authenticode_pkcs7_der_artifact_signing(
 
 #[cfg(feature = "artifact-signing-rest")]
 fn create_msi_authenticode_pkcs7_der_artifact_signing(
-    msi: &[u8],
+    msi_digest: &[u8],
     digest: PortableSignDigest,
     chain_certs: Vec<PathBuf>,
     args: &ArtifactSigningPortableOptions,
 ) -> Result<Vec<u8>> {
     let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
-    let msi_digest =
-        msi_digest::compute_msi_authenticode_digest(msi, digest_algorithm.pe_hash_kind())?;
-    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, &msi_digest)?;
+    let indirect = pkcs7::msi_spc_indirect_data(digest_algorithm, msi_digest)?;
     create_authenticode_pkcs7_der_artifact_signing_from_indirect(
         indirect,
         digest,
@@ -4659,6 +4657,11 @@ where
             output,
         } => {
             let msi = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let digest_algorithm: pkcs7::AuthenticodeSigningDigest = digest.into();
+            let prepared = msi_digest::prepare_msi_for_authenticode_signing(
+                &msi,
+                digest_algorithm.pe_hash_kind(),
+            )?;
             let has_artifact = artifact_signing_requested(&artifact_signing);
             if has_artifact && (cert.is_some() || key.is_some()) {
                 return Err(anyhow!(
@@ -4669,7 +4672,7 @@ where
                 #[cfg(feature = "artifact-signing-rest")]
                 {
                     create_msi_authenticode_pkcs7_der_artifact_signing(
-                        &msi,
+                        prepared.digest(),
                         digest,
                         chain_certs,
                         &artifact_signing,
@@ -4701,8 +4704,8 @@ where
                 let private_key = rdp::parse_rsa_private_key(&key_bytes)
                     .with_context(|| format!("parse RSA private key {}", key.display()))?;
                 pkcs7::create_msi_authenticode_pkcs7_der_rsa(
-                    &msi,
-                    digest.into(),
+                    prepared.image(),
+                    digest_algorithm,
                     signer_cert,
                     load_chain_certs(chain_certs)?,
                     private_key,
@@ -4720,7 +4723,9 @@ where
                 timestamp_digest,
                 "portable sign-msi",
             )?;
-            msi_digest::msi_embed_authenticode_pkcs7_signature(&path, &output, &pkcs7)
+            msi_digest::msi_embed_prepared_authenticode_pkcs7_signature(
+                &prepared, &output, &pkcs7,
+            )
                 .with_context(|| format!("embed Authenticode signature in {}", path.display()))?;
             println!(
                 "sign-msi: ok output={} digest={:?} pkcs7_len={}",
