@@ -91,8 +91,9 @@ MSIX minimal pack layout (CI-generated unsigned package):
 
 - `msix-minimal/AppxManifest.xml` — Identity publisher `CN=Test Code Signing Certificate` (matches Devolutions test signing cert). CI copies `target/debug/psign-tool.exe` as `noop.exe` and adds `Assets/StoreLogo.png` before `MakeAppx pack`.
 
-Optional MSI parity (`scripts/run-parity-diff.ps1`):
-- `PSIGN_MSI_UNSIGNED_FIXTURE` -> path to an unsigned `.msi` (not bundled in-repo)
+MSI parity (`scripts/run-parity-diff.ps1`):
+- `PSIGN_MSI_UNSIGNED_FIXTURE` -> path to an unsigned `.msi`; exhaustive Windows CI generates
+  a valid no-op package with `scripts/ci/create-minimal-msi.ps1`
 - Reuses `PSIGN_TEST_PFX` / `_PASSWORD` with PE parity
 - Optional `PSIGN_MSI_TIMESTAMP_URL` for sign-time RFC3161 (native `/tr` `/td SHA256`)
 

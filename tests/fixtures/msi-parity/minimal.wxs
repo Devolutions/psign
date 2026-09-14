@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="psign MSI parity fixture"
+    Language="1033"
+    Version="1.0.0"
+    Manufacturer="Devolutions"
+    UpgradeCode="{892BEEDD-1EA1-46DC-A04D-85EBFA26AD8B}">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+    <MediaTemplate />
+    <Feature Id="ProductFeature" Title="psign MSI parity fixture" Level="1" />
+  </Product>
+</Wix>
