@@ -3421,7 +3421,12 @@ fn build_flat_msix_block_map(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="{hash_method}">"#
     );
     for (name, data) in payloads {
-        let escaped_name = xml_escape_attr(name);
+        // `AppxBlockMap.xml` `File/@Name` uses Windows-style backslash separators
+        // (matching native `AppxSip`/`makeappx` output), even though the physical
+        // ZIP entry name uses forward slashes. Getting this wrong makes real Windows
+        // AppX package validation fail with 0x80080205 ("block map is not valid").
+        let block_map_name = name.replace('/', "\\");
+        let escaped_name = xml_escape_attr(&block_map_name);
         xml.push_str(&format!(
             r#"<File Name="{escaped_name}" Size="{}" LfhSize="{}">"#,
             data.len(),
@@ -3597,6 +3602,128 @@ mod tests {
             infer_format(Path::new("enc.eappxbundle")),
             PortableFileFormat::MsixEncrypted
         );
+    }
+
+    /// Regression test for the HRESULT 0x80080205 ("The Appx package's block map
+    /// is invalid") corruption reported against `--mode portable sign` for flat
+    /// `.msix`/`.appx` packages.
+    ///
+    /// Root cause: `build_flat_msix_block_map` emitted `AppxBlockMap.xml`
+    /// `File/@Name` attributes using the physical ZIP entry's forward-slash path
+    /// separators (e.g. `Assets/StoreLogo.png`), but native AppX packages (as
+    /// produced by `makeappx`/`AppxSip.dll`, and required by the real Windows
+    /// AppX package validator) always use backslash separators in the block map
+    /// (`Assets\StoreLogo.png`) even though the physical ZIP entry name itself
+    /// stays forward-slash. This test signs a real MSIX fixture and then
+    /// independently re-parses the produced ZIP container (via a fresh
+    /// `ZipArchive` read, not by reusing `msix_digest`'s internal state) to
+    /// assert that every `AppxBlockMap.xml` `File/@Name` uses backslash
+    /// separators, while the physical ZIP entry names remain forward-slash.
+    #[test]
+    fn signed_flat_msix_block_map_uses_backslash_separators() {
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let source = PathBuf::from("../../tests/fixtures/generated-unsigned/msix/sample.msix");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-msix-blockmap-sep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let output = temp_dir.join("sample.signed.msix");
+
+        portable_sign(PortableSignRequest {
+            path: source,
+            output_path: Some(output.clone()),
+            pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("sign flat MSIX package");
+
+        let signed_bytes = std::fs::read(&output).expect("read signed MSIX package");
+        let mut archive =
+            ZipArchive::new(std::io::Cursor::new(&signed_bytes)).expect("open signed MSIX zip");
+
+        // Independently collect the physical ZIP entry names: these must stay
+        // forward-slash (this is the correct, unaffected convention).
+        let mut physical_names = Vec::new();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).expect("read zip entry");
+            physical_names.push(entry.name().to_string());
+        }
+        assert!(
+            physical_names.iter().any(|n| n == "Assets/StoreLogo.png"),
+            "expected physical zip entry with forward-slash name, got: {physical_names:?}"
+        );
+        assert!(
+            !physical_names.iter().any(|n| n.contains('\\')),
+            "physical zip entry names must never contain backslashes, got: {physical_names:?}"
+        );
+
+        let block_map_xml = {
+            let mut entry = archive
+                .by_name("AppxBlockMap.xml")
+                .expect("AppxBlockMap.xml entry present");
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut buf).expect("read AppxBlockMap.xml");
+            buf
+        };
+
+        // Independently extract every `File Name="..."` attribute value using a
+        // small ad-hoc parse (deliberately not reusing any block-map-writing
+        // helper from this module).
+        let mut file_names = Vec::new();
+        let marker = "<File Name=\"";
+        let mut rest = block_map_xml.as_str();
+        while let Some(start) = rest.find(marker) {
+            rest = &rest[start + marker.len()..];
+            let end = rest.find('"').expect("closing quote for File Name");
+            file_names.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+        assert!(
+            !file_names.is_empty(),
+            "expected at least one File entry in AppxBlockMap.xml"
+        );
+
+        let logo_entry = file_names
+            .iter()
+            .find(|n| n.contains("StoreLogo.png"))
+            .unwrap_or_else(|| panic!("expected StoreLogo.png entry in {file_names:?}"));
+        assert_eq!(
+            logo_entry, "Assets\\StoreLogo.png",
+            "AppxBlockMap.xml File/@Name must use backslash separators to match \
+             native AppX semantics, got: {logo_entry}"
+        );
+        assert!(
+            !file_names.iter().any(|n| n.contains('/')),
+            "AppxBlockMap.xml File/@Name values must not contain forward slashes, \
+             got: {file_names:?}"
+        );
+
+        // Every payload entry present in the physical zip (other than the
+        // signature part, which is never listed in the block map) must have a
+        // corresponding, backslash-converted entry in the block map.
+        for physical in &physical_names {
+            if matches!(
+                physical.as_str(),
+                "AppxSignature.p7x" | "AppxBlockMap.xml" | "[Content_Types].xml"
+            ) {
+                continue;
+            }
+            let expected = physical.replace('/', "\\");
+            assert!(
+                file_names.contains(&expected),
+                "physical entry {physical:?} missing from AppxBlockMap.xml (expected \
+                 Name={expected:?}); block map entries: {file_names:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

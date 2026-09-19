@@ -693,8 +693,8 @@ fn run_portable_core_sign(
     let companion = (format == psign_portable_core::PortableFileFormat::AppInstaller)
         .then(|| appinstaller_companion_path(&output));
     let result = psign_portable_core::portable_sign(request)
-        .map(|_| ())
         .with_context(|| format!("{operation} '{}'", target.display()))
+        .and_then(|response| ensure_valid_signature_response(&response, &target))
         .and_then(|_| {
             std::fs::copy(&output, &target)
                 .with_context(|| format!("replace '{}' with signed output", target.display()))?;
@@ -715,6 +715,28 @@ fn run_portable_core_sign(
         let _ = std::fs::remove_file(companion);
     }
     result
+}
+
+/// Guard against silently shipping a package whose `portable_sign()` self-check
+/// flagged the freshly produced signature as inconsistent (e.g. an
+/// `AXPC`/`AXCD`/`AXCT`/`AXBM` digest mismatch). Without this check the CLI
+/// would still copy the (possibly corrupted) staged output over the original
+/// target, discarding the only signal that something went wrong.
+fn ensure_valid_signature_response(
+    response: &psign_portable_core::PortableSignResponse,
+    target: &Path,
+) -> Result<()> {
+    if response.skipped {
+        return Ok(());
+    }
+    match response.signature.status {
+        psign_portable_core::PortableSignatureStatus::Valid => Ok(()),
+        status => Err(anyhow!(
+            "portable sign produced a signature that failed self-verification for '{}': {status:?} ({})",
+            target.display(),
+            response.signature.status_message
+        )),
+    }
 }
 
 fn appinstaller_companion_path(path: &Path) -> PathBuf {
@@ -1093,14 +1115,13 @@ fn run_portable_sign_portable_core_artifact_signing(
         artifact_signing_exclude_credentials: std::mem::take(&mut exclude_credentials),
         ..Default::default()
     };
-    psign_portable_core::portable_sign(request)
-        .map(|_| ())
-        .with_context(|| {
-            format!(
-                "portable Artifact Signing {target_kind} target '{}'",
-                target.display()
-            )
-        })
+    let response = psign_portable_core::portable_sign(request).with_context(|| {
+        format!(
+            "portable Artifact Signing {target_kind} target '{}'",
+            target.display()
+        )
+    })?;
+    ensure_valid_signature_response(&response, target)
 }
 
 #[cfg(not(feature = "artifact-signing-rest"))]
@@ -1556,6 +1577,7 @@ mod tests {
     use crate::cli::{Cli, Command};
     use clap::Parser;
     use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn deduplicates_existing_path_aliases() {
@@ -1607,5 +1629,72 @@ mod tests {
         let targets = expand_sign_targets(&args).expect("expand targets");
         assert_eq!(targets, vec![target.clone(), target]);
         assert!(has_duplicate_target_identities(&targets));
+    }
+
+    #[test]
+    fn ensure_valid_signature_response_accepts_valid_status() {
+        let response = fake_sign_response(psign_portable_core::PortableSignatureStatus::Valid);
+        super::ensure_valid_signature_response(&response, Path::new("target.msix"))
+            .expect("Valid status must not be rejected");
+    }
+
+    #[test]
+    fn ensure_valid_signature_response_rejects_hash_mismatch_status() {
+        // Regression guard: the `--mode portable sign` CLI must not silently
+        // replace the original file when the internal digest self-check
+        // (AXPC/AXCD/AXCT/AXBM consistency for MSIX, or equivalent for other
+        // formats) reports anything other than `Valid`.
+        let response =
+            fake_sign_response(psign_portable_core::PortableSignatureStatus::HashMismatch);
+        let err = super::ensure_valid_signature_response(&response, Path::new("target.msix"))
+            .expect_err("HashMismatch status must fail the sign command");
+        let message = err.to_string();
+        assert!(
+            message.contains("target.msix"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("HashMismatch"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_valid_signature_response_ignores_status_when_skipped() {
+        let mut response =
+            fake_sign_response(psign_portable_core::PortableSignatureStatus::HashMismatch);
+        response.skipped = true;
+        super::ensure_valid_signature_response(&response, Path::new("target.msix"))
+            .expect("skipped responses bypass the status check");
+    }
+
+    fn fake_sign_response(
+        status: psign_portable_core::PortableSignatureStatus,
+    ) -> psign_portable_core::PortableSignResponse {
+        psign_portable_core::PortableSignResponse {
+            schema_version: 1,
+            input_path: PathBuf::from("target.msix"),
+            output_path: PathBuf::from("target.msix"),
+            format: psign_portable_core::PortableFileFormat::Msix,
+            signature: psign_portable_core::PortableSignatureResponse {
+                schema_version: 1,
+                path: PathBuf::from("target.msix"),
+                format: psign_portable_core::PortableFileFormat::Msix,
+                status,
+                status_message: "test fixture".to_string(),
+                trust_status: None,
+                signature_count: 1,
+                signer_index: None,
+                signer_certificate_der_base64: None,
+                timestamper_certificate_der_base64: None,
+                embedded_certificate_count: 0,
+                digest_algorithm: None,
+                timestamp_kinds: Vec::new(),
+                timestamp_signing_time: None,
+                pkcs7_der_base64: None,
+                diagnostics: Vec::new(),
+            },
+            skipped: false,
+        }
     }
 }
