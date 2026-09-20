@@ -484,22 +484,39 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_misaligned_existing_certificate_table() {
-        let mut signed =
+    fn preparation_and_verification_reject_misaligned_certificate_table_fields() {
+        let signed =
             include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.signed.efi")
                 .to_vec();
         let (cert_file_ptr, cert_size) =
             read_security_data_directory(&signed).expect("security directory");
-        write_security_data_directory(&mut signed, cert_file_ptr + 1, cert_size)
-            .expect("misalign security directory");
+        assert!((cert_file_ptr as usize).is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT));
+        assert!((cert_size as usize).is_multiple_of(ATTRIBUTE_CERTIFICATE_ALIGNMENT));
+        let misaligned_size = cert_size
+            .checked_sub(1)
+            .expect("non-empty certificate table");
+        let cases = [
+            ("offset", cert_file_ptr + 1, cert_size),
+            ("size", cert_file_ptr, misaligned_size),
+        ];
 
-        let prepare_err = pe_prepare_for_authenticode_signing(signed.clone())
-            .expect_err("append-signature preparation must reject misaligned table");
-        let err = verify_pe_authenticode_digest_consistency(&signed)
-            .expect_err("misaligned certificate table must be rejected");
+        for (field, malformed_ptr, malformed_size) in cases {
+            let mut malformed = signed.clone();
+            write_security_data_directory(&mut malformed, malformed_ptr, malformed_size)
+                .expect("misalign security directory");
 
-        assert!(prepare_err.to_string().contains("not 8-byte aligned"));
-        assert!(err.to_string().contains("not 8-byte aligned"));
+            let prepare_err = pe_prepare_for_authenticode_signing(malformed.clone())
+                .expect_err("append-signature preparation must reject misaligned table");
+            let verify_err = verify_pe_authenticode_digest_consistency(&malformed)
+                .expect_err("misaligned certificate table must be rejected");
+            let expected = format!("certificate table {field}");
+
+            assert!(
+                prepare_err.to_string().contains(&expected),
+                "{prepare_err:#}"
+            );
+            assert!(verify_err.to_string().contains(&expected), "{verify_err:#}");
+        }
     }
 
     #[test]
