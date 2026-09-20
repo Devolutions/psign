@@ -31,6 +31,9 @@ jobs:
       - name: Portable digest CLI integration test
         run: cargo test -p psign --test cli_pe_digest --locked
 
+      - name: Portable MSIX/AppX native makeappx.exe validation
+        run: cargo test -p psign --test msix_native_makeappx --locked
+
       - name: Cross-CLI parity (portable verify-pe vs Windows rust-sip PE digest routine)
         run: cargo test -p psign --test cross_cli_windows --locked
 

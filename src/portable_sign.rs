@@ -726,9 +726,13 @@ fn ensure_valid_signature_response(
     response: &psign_portable_core::PortableSignResponse,
     target: &Path,
 ) -> Result<()> {
-    if response.skipped {
-        return Ok(());
-    }
+    // Do NOT special-case `response.skipped`: a skip (e.g. `--skip-signed`) can
+    // still carry a failed self-check when `target_should_skip_signed` treats
+    // mere `AppxSignature.p7x` presence as "already signed" even though the
+    // embedded signature's digests don't match the package. Requiring `Valid`
+    // unconditionally preserves the exact silent-success case this guard
+    // exists to prevent; a genuinely valid skipped file already reports
+    // `Valid` here.
     match response.signature.status {
         psign_portable_core::PortableSignatureStatus::Valid => Ok(()),
         status => Err(anyhow!(
@@ -1660,12 +1664,30 @@ mod tests {
     }
 
     #[test]
-    fn ensure_valid_signature_response_ignores_status_when_skipped() {
+    fn ensure_valid_signature_response_rejects_hash_mismatch_even_when_skipped() {
+        // Regression guard for the reviewer-identified silent-success case:
+        // `--skip-signed` can report `skipped: true` for an MSIX whose
+        // embedded signature is already present but fails digest
+        // verification (`target_should_skip_signed` only checks for
+        // `AppxSignature.p7x` presence, not validity). The status must still
+        // gate the CLI even when `skipped` is set.
         let mut response =
             fake_sign_response(psign_portable_core::PortableSignatureStatus::HashMismatch);
         response.skipped = true;
+        let err = super::ensure_valid_signature_response(&response, Path::new("target.msix"))
+            .expect_err("a skipped response with a failed self-check must still fail");
+        assert!(
+            err.to_string().contains("HashMismatch"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_valid_signature_response_accepts_valid_status_when_skipped() {
+        let mut response = fake_sign_response(psign_portable_core::PortableSignatureStatus::Valid);
+        response.skipped = true;
         super::ensure_valid_signature_response(&response, Path::new("target.msix"))
-            .expect("skipped responses bypass the status check");
+            .expect("a genuinely valid skipped file must still pass");
     }
 
     fn fake_sign_response(
