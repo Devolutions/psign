@@ -209,6 +209,10 @@ fn append_portable_trust_args(args: &crate::cli::VerifyArgs, argv: &mut Vec<std:
         argv.push(std::ffi::OsString::from("--trusted-ca"));
         argv.push(ca.as_os_str().to_os_string());
     }
+    for ca in &args.additional_trusted_ca {
+        argv.push(std::ffi::OsString::from("--additional-trusted-ca"));
+        argv.push(ca.as_os_str().to_os_string());
+    }
     if let Some(cab) = &args.authroot_cab {
         argv.push(std::ffi::OsString::from("--authroot-cab"));
         argv.push(cab.as_os_str().to_os_string());
@@ -272,6 +276,7 @@ fn append_portable_trust_args(args: &crate::cli::VerifyArgs, argv: &mut Vec<std:
 fn portable_verify_explicit_trust_requested(args: &crate::cli::VerifyArgs) -> bool {
     args.anchor_dir.is_some()
         || !args.trusted_ca.is_empty()
+        || !args.additional_trusted_ca.is_empty()
         || args.authroot_cab.is_some()
         || args.expect_authroot_cab_sha256.is_some()
         || args.verbose_chain

@@ -647,6 +647,9 @@ pub struct VerifyArgs {
     /// Portable trust anchor CA certificate file; repeatable and does not modify OS certificate stores.
     #[arg(long, action = clap::ArgAction::Append)]
     pub trusted_ca: Vec<PathBuf>,
+    /// Additional portable trust anchor CA certificate file; repeatable and preserves automatic anchors.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub additional_trusted_ca: Vec<PathBuf>,
     /// Portable trust: fetch missing issuers from AIA `caIssuers` HTTP URLs.
     #[arg(long)]
     pub online_aia: bool,
