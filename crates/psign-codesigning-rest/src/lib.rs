@@ -18,6 +18,11 @@ const DEFAULT_SCOPE: &str = "https://codesigning.azure.net/.default";
 const MI_RESOURCE: &str = "https://codesigning.azure.net";
 const MAX_PROFILE_ROOT_BYTES: usize = 1024 * 1024;
 const MAX_PROFILE_ROOT_ERROR_BYTES: usize = 64 * 1024;
+const PROFILE_ROOT_CONTENT_TYPES: [&str; 3] = [
+    "application/x-x509-ca-cert",
+    "application/pkix-cert",
+    "application/octet-stream",
+];
 const AZURE_DATA_PLANE_SUFFIXES: [&str; 2] =
     [".codesigning.azure.net", ".artifactsigning.azure.net"];
 
@@ -750,10 +755,10 @@ fn validate_root_certificate_response(content_type: Option<&str>, body: &[u8]) -
     }
     if let Some(content_type) = content_type {
         let media_type = content_type.split(';').next().unwrap_or_default().trim();
-        if !matches!(
-            media_type,
-            "application/x-x509-ca-cert" | "application/pkix-cert" | "application/octet-stream"
-        ) {
+        if !PROFILE_ROOT_CONTENT_TYPES
+            .iter()
+            .any(|allowed| media_type.eq_ignore_ascii_case(allowed))
+        {
             return Err(anyhow!(
                 "Artifact Signing returned unexpected root certificate content type {media_type}"
             ));
@@ -939,6 +944,15 @@ mod tests {
 
         let empty_error = validate_root_certificate_response(None, &[]).unwrap_err();
         assert!(empty_error.to_string().contains("empty"), "{empty_error:#}");
+    }
+
+    #[test]
+    fn root_certificate_response_accepts_case_insensitive_media_type() {
+        validate_root_certificate_response(
+            Some("Application/X-X509-CA-Cert; charset=binary"),
+            TEST_ROOT_DER,
+        )
+        .expect("mixed-case certificate media type");
     }
 
     #[test]

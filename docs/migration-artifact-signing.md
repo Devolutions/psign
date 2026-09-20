@@ -45,7 +45,7 @@ Optional debug logs: **`SIGNTOOL_PORTABLE_DEBUG=1`**.
 The feature-gated **`artifact-signing-root`** helper retrieves the root certificate currently associated with a certificate profile and validates the bounded response as an X.509 DER CA certificate before writing it:
 
 ```bash
-psign-tool artifact-signing-root \
+psign-tool portable artifact-signing-root \
   --endpoint https://wus.artifactsigning.azure.net \
   --account-name myAccount \
   --profile-name myProfile \
