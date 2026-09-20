@@ -36,6 +36,10 @@ $msixOut = Join-Path $rt "psign_parity_minimal.msix"
 $env:PSIGN_MSIX_UNSIGNED_FIXTURE = $msixOut
 $env:PSIGN_UNSIGNED_FIXTURE = $unsignedPe
 
+$msiOut = Join-Path $rt "psign_parity_minimal.msi"
+& (Join-Path $PSScriptRoot "create-minimal-msi.ps1") -OutputMsi $msiOut
+$env:PSIGN_MSI_UNSIGNED_FIXTURE = $msiOut
+
 $winmdOut = Join-Path $rt "psign_parity_minimal.winmd"
 & (Join-Path $PSScriptRoot "pack-minimal-winmd.ps1") -PeSource $unsignedPe -OutputWinmd $winmdOut
 $env:PSIGN_WINMD_UNSIGNED_FIXTURE = $winmdOut
@@ -45,6 +49,7 @@ if ($env:PSIGN_TIMESTAMP_URL) {
 
 if ($env:GITHUB_ENV) {
     Add-Content -LiteralPath $env:GITHUB_ENV -Value "PSIGN_MSIX_UNSIGNED_FIXTURE=$msixOut"
+    Add-Content -LiteralPath $env:GITHUB_ENV -Value "PSIGN_MSI_UNSIGNED_FIXTURE=$msiOut"
     Add-Content -LiteralPath $env:GITHUB_ENV -Value "PSIGN_UNSIGNED_FIXTURE=$unsignedPe"
     Add-Content -LiteralPath $env:GITHUB_ENV -Value "PSIGN_WINMD_UNSIGNED_FIXTURE=$winmdOut"
     if ($env:PSIGN_WINMD_TIMESTAMP_URL) {

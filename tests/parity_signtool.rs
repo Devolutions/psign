@@ -88,6 +88,21 @@ fn native_signtool_optional_path() -> Option<PathBuf> {
         })
 }
 
+fn assert_native_signtool_accepts(signtool: &Path, path: &Path, label: &str) {
+    let output = Command::new(signtool)
+        .arg("verify")
+        .arg("/pa")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| panic!("verify {label} with native signtool: {error}"));
+    assert!(
+        output.status.success(),
+        "native signtool rejected {label}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 #[ignore = "requires PSIGN_UNSIGNED_FIXTURE,PSIGN_TEST_PFX,PSIGN_TEST_PFX_PASSWORD"]
 fn sign_semantic_parity_creates_verifiable_signature() {
@@ -893,14 +908,14 @@ fn msi_sign_aligns_with_native_sip_stack() {
         .arg("/fd")
         .arg("SHA256")
         .arg("/f")
-        .arg(&pfx)
-        .arg(&tmp_nat);
+        .arg(&pfx);
     if let Some(ref p) = pw {
         native_cmd.arg("/p").arg(p);
     }
     if let Some(ref u) = ts {
         native_cmd.arg("/tr").arg(u).arg("/td").arg("SHA256");
     }
+    native_cmd.arg(&tmp_nat);
     let native_out = native_cmd.output().expect("native sign msi");
     assert!(
         native_out.status.success(),
@@ -910,12 +925,13 @@ fn msi_sign_aligns_with_native_sip_stack() {
 
     let mut rust_cmd = Command::cargo_bin("psign-tool").expect("binary available");
     rust_cmd
+        .arg("--mode")
+        .arg("portable")
         .arg("sign")
         .arg("--pfx")
         .arg(&pfx)
         .arg("--digest")
-        .arg("sha256")
-        .arg(&tmp_rust);
+        .arg("sha256");
     if let Some(p) = pw {
         rust_cmd.arg("--password").arg(p);
     }
@@ -926,6 +942,7 @@ fn msi_sign_aligns_with_native_sip_stack() {
             .arg("--timestamp-digest")
             .arg("sha256");
     }
+    rust_cmd.arg(&tmp_rust);
     let rust_out = rust_cmd.output().expect("rust sign msi");
     assert!(
         rust_out.status.success(),
@@ -933,34 +950,8 @@ fn msi_sign_aligns_with_native_sip_stack() {
         String::from_utf8_lossy(&rust_out.stderr)
     );
 
-    let nat_bytes = std::fs::read(&tmp_nat).expect("read native signed");
-    let rust_bytes = std::fs::read(&tmp_rust).expect("read rust signed");
-
-    let nv_rust = Command::new(&native_exe)
-        .arg("verify")
-        .arg("/pa")
-        .arg(&tmp_rust)
-        .output()
-        .expect("native verify rust-signed msi");
-    assert!(
-        nv_rust.status.success(),
-        "{}",
-        String::from_utf8_lossy(&nv_rust.stdout)
-    );
-
-    if nat_bytes != rust_bytes {
-        let nv_nat = Command::new(&native_exe)
-            .arg("verify")
-            .arg("/pa")
-            .arg(&tmp_nat)
-            .output()
-            .expect("native verify native-signed msi");
-        assert!(
-            nv_nat.status.success(),
-            "{}",
-            String::from_utf8_lossy(&nv_nat.stdout)
-        );
-    }
+    assert_native_signtool_accepts(&native_exe, &tmp_nat, "native-signed MSI baseline");
+    assert_native_signtool_accepts(&native_exe, &tmp_rust, "portable-signed MSI");
 }
 
 /// Windows metadata `.winmd`: PE-based CLI assembly; OS Authenticode SIP (`SignerSignEx3` / `WinVerifyTrust`).

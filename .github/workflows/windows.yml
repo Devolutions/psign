@@ -28,6 +28,15 @@ jobs:
       - name: Unit tests (workspace libs + bins)
         run: cargo test --workspace --lib --bins
 
+      - name: Portable MSI signing accepted by Windows SIP
+        shell: pwsh
+        run: |
+          ./scripts/ci/bootstrap-devolutions-authenticode.ps1
+          $msi = Join-Path $env:RUNNER_TEMP "psign_parity_minimal.msi"
+          ./scripts/ci/create-minimal-msi.ps1 -OutputMsi $msi
+          $env:PSIGN_MSI_UNSIGNED_FIXTURE = $msi
+          cargo test -p psign --test parity_signtool msi_sign_aligns_with_native_sip_stack -- --ignored --nocapture
+
       - name: Portable digest CLI integration test
         run: cargo test -p psign --test cli_pe_digest --locked
 
