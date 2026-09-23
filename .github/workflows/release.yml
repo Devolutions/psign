@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version to build/publish (for example 0.6.3)
+        description: Release version to build/publish (for example 0.7.0)
         required: true
         type: string
       publish_nuget:
@@ -97,6 +97,17 @@ jobs:
           }
 
           $releaseTag = "v$releaseVersion"
+          $manifestVersionMatch = Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
+          if (-not $manifestVersionMatch) {
+            throw 'Unable to resolve the psign package version from Cargo.toml.'
+          }
+
+          $manifestVersion = $manifestVersionMatch.Matches[0].Groups[1].Value
+          if ($manifestVersion -ne $releaseVersion) {
+            throw "Release version $releaseVersion does not match Cargo.toml package version $manifestVersion."
+          }
+
           $isMasterBranch = $sourceBranch -eq 'master'
           $publishNuget = Parse-BoolOrDefault '${{ github.event.inputs.publish_nuget }}' $false
           $publishPsgallery = Parse-BoolOrDefault '${{ github.event.inputs.publish_psgallery }}' $false
