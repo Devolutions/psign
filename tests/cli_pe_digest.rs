@@ -2765,6 +2765,27 @@ fn unified_verify_mode_portable_accepts_trusted_ca_without_os_store() {
 }
 
 #[test]
+fn unified_verify_mode_portable_accepts_additional_trusted_ca_without_os_store() {
+    let fixture = tiny32_fixture();
+    let bytes = std::fs::read(&fixture).expect("read fixture");
+    let root = pe_first_pkcs7_terminal_root(&bytes).expect("terminal root");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root_path = dir.path().join("additional-root.cer");
+    std::fs::write(&root_path, root.to_der().expect("root DER")).expect("write anchor");
+
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.env("PSIGN_NO_AUTO_TRUST", "1")
+        .args(["--mode", "portable", "verify", "--additional-trusted-ca"])
+        .arg(&root_path)
+        .arg("--allow-loose-signing-cert")
+        .args(["--as-of", "2023-07-01"])
+        .arg(&fixture);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("trust-verify-pe: ok"));
+}
+
+#[test]
 fn unified_verify_mode_portable_uses_digest_only_when_auto_trust_disabled() {
     let mut cmd = Command::cargo_bin("psign-tool").unwrap();
     cmd.env("PSIGN_NO_AUTO_TRUST", "1")
