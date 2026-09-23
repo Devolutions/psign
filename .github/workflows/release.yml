@@ -57,6 +57,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate release version across manifests and lockfile
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+        run: ./scripts/bump-version.ps1 -Version $env:RELEASE_VERSION -Check
+
       - name: Resolve release info
         id: info
         shell: pwsh

@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
-    [switch]$SkipCargoLock
+    [switch]$SkipCargoLock,
+
+    [switch]$Check
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,10 @@ if ($Version.StartsWith("v")) {
 
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
     throw "Invalid version format: $Version (expected 1.2.3 or 1.2.3-suffix)."
+}
+
+if ($Check -and $SkipCargoLock) {
+    throw "-Check cannot be combined with -SkipCargoLock."
 }
 
 function Set-FileText {
@@ -47,21 +53,26 @@ function Update-RequiredRegex {
 
     $text = [System.IO.File]::ReadAllText($Path)
     $regex = [regex]::new($Pattern)
-    $script:replaceCount = 0
+    $count = $regex.Matches($text).Count
+    if ($count -ne 1) {
+        throw "Expected exactly one $Description match in $Path; found $count."
+    }
+
     $updated = $regex.Replace(
         $text,
         [System.Text.RegularExpressions.MatchEvaluator] {
             param($match)
-            $script:replaceCount++
             & $Replacement $match
         },
         1
     )
-    $count = $script:replaceCount
-    $script:replaceCount = 0
 
-    if ($count -ne 1) {
-        throw "Expected exactly one $Description match in $Path; found $count."
+    if ($Check) {
+        if ($updated -ne $text) {
+            throw "$Description in $Path does not match version $Version."
+        }
+        Write-Host "Verified $Description in $Path"
+        return
     }
 
     if ($updated -ne $text) {
@@ -126,6 +137,10 @@ function Update-PowerShellModuleManifestVersion {
             return
         }
 
+        if ($Check) {
+            throw "PowerShell module prerelease in $Path does not match version $Version."
+        }
+
         $regex = [regex]::new('(?m)^(\s*)PSData\s*=\s*@\{(\r?\n)')
         $script:replaceCount = 0
         $updated = $regex.Replace(
@@ -151,10 +166,48 @@ function Update-PowerShellModuleManifestVersion {
     }
 
     $regex = [regex]::new("(?m)^\s*Prerelease\s*=\s*'[^']*'\r?\n?")
+    if ($Check) {
+        if ($regex.IsMatch($text)) {
+            throw "PowerShell module prerelease in $Path does not match version $Version."
+        }
+        return
+    }
     $updated = $regex.Replace($text, '', 1)
     if ($updated -ne $text) {
         Set-FileText -Path $Path -Text $updated
         Write-Host "Removed PowerShell module prerelease in $Path"
+    }
+}
+
+function Assert-CargoLockVersions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Manifests
+    )
+
+    $lockPath = Join-Path $repoRoot "Cargo.lock"
+    $lockText = [System.IO.File]::ReadAllText($lockPath)
+    foreach ($manifest in $Manifests) {
+        $manifestText = [System.IO.File]::ReadAllText($manifest)
+        $packageBlock = [regex]::Match($manifestText, '(?ms)^\[package\]\r?\n(.*?)(?=^\[|\z)')
+        if (-not $packageBlock.Success) {
+            throw "Missing [package] section in $manifest."
+        }
+
+        $nameMatches = [regex]::Matches($packageBlock.Groups[1].Value, '(?m)^name\s*=\s*"([^"]+)"')
+        if ($nameMatches.Count -ne 1) {
+            throw "Expected exactly one package name in $manifest; found $($nameMatches.Count)."
+        }
+
+        $packageName = $nameMatches[0].Groups[1].Value
+        $pattern = '(?m)^\[\[package\]\]\r?\nname = "{0}"\r?\nversion = "([^"]+)"' -f [regex]::Escape($packageName)
+        $lockMatches = [regex]::Matches($lockText, $pattern)
+        if ($lockMatches.Count -ne 1) {
+            throw "Expected exactly one Cargo.lock entry for $packageName; found $($lockMatches.Count)."
+        }
+        if ($lockMatches[0].Groups[1].Value -ne $Version) {
+            throw "Cargo.lock entry for $packageName is $($lockMatches[0].Groups[1].Value), expected $Version."
+        }
     }
 }
 
@@ -204,14 +257,25 @@ Update-RequiredRegex `
     }
 
 if (-not $SkipCargoLock) {
-    Push-Location $repoRoot
-    try {
-        cargo metadata --format-version 1 --quiet | Out-Null
+    if (-not $Check) {
+        Push-Location $repoRoot
+        try {
+            cargo metadata --format-version 1 --quiet | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "cargo metadata failed with exit code $LASTEXITCODE; Cargo.lock may be stale."
+            }
+        }
+        finally {
+            Pop-Location
+        }
     }
-    finally {
-        Pop-Location
-    }
-    Write-Host "Refreshed Cargo.lock"
+    Assert-CargoLockVersions -Manifests $cargoManifests
+    Write-Host "$(if ($Check) { 'Verified' } else { 'Refreshed' }) Cargo.lock"
 }
 
-Write-Host "Version bumped to $Version"
+if ($Check) {
+    Write-Host "Version $Version is consistent"
+}
+else {
+    Write-Host "Version bumped to $Version"
+}
