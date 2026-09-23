@@ -304,6 +304,7 @@
       {"name": "inspect-authenticode", "maps_to_native_concept": "Portable PKCS#7 inspection JSON (PE or raw)"},
       {"name": "artifact-signing-metadata-check", "maps_to_native_concept": "Validate --dmdf-style JSON shape (no network)"},
       {"name": "artifact-signing-submit", "maps_to_native_concept": "Trusted Signing :sign LRO (feature artifact-signing-rest); hash file in, JSON out; PE/WinMD embedding is handled by sign-pe --artifact-signing-*"},
+      {"name": "artifact-signing-root", "maps_to_native_concept": "Retrieve and validate the current Artifact Signing profile root CA certificate (feature artifact-signing-rest; preview profile-root API; bounded response)"},
       {"name": "azure-key-vault-sign-digest", "maps_to_native_concept": "KV keys/sign on digest file (feature azure-kv-sign-portable); AzureSignTool remote step analogue"},
       {"name": "nupkg-signature-info", "maps_to_native_concept": "NuGet package-signature marker inspection for `.signature.p7s` (not SIP; groundwork for dotnet nuget sign-compatible portable signing)"},
       {"name": "nupkg-digest", "maps_to_native_concept": "Unsigned NuGet package byte hash used by the package-signature properties document (SHA-256/384/512; rejects already signed packages)"},

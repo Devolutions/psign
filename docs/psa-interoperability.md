@@ -18,6 +18,7 @@ This note maps PSA behaviors to this repo; see also [`plan-openauthenticode-pari
 | PSA | psign |
 |-----|-------------|
 | **Azure Trusted Signing** via **`Azure.CodeSigning.Sdk`** REST | **`artifact-signing-submit`** (with **`--features artifact-signing-rest`**) — same data-plane **`CertificateProfileOperations_Sign`** LRO as swagger **`2023-06-15-preview`**; **plus** existing **`--dlib`** / **`--trusted-signing-dlib-root`** decoupled path |
+| Retrieve the current Artifact Signing profile root | **`artifact-signing-root`** (with **`--features artifact-signing-rest`**) — authenticated preview operation; validates the bounded response as an X.509 DER CA certificate before writing it |
 | **Azure Key Vault** | **`--azure-key-vault-url`** path (**`--features azure-kv-sign`**) — RSA **and EC** leaf certs (`RS256`/`ES256`-style JWA algorithms) |
 | Select Trusted Signing profile leaf by EKU prefix **`1.3.6.1.4.1.311.97.`** | **`--signing-cert-eku-prefix`** when selecting from a certificate store |
 

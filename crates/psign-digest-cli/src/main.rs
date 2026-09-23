@@ -23,9 +23,10 @@ use psign_azure_kv_rest::{
 };
 #[cfg(feature = "artifact-signing-rest")]
 use psign_codesigning_rest::{
-    CodesigningAuth, CodesigningAuthInput, CodesigningCredentialType, CodesigningSubmitParams,
-    DEFAULT_API_VERSION, resolve_codesigning_auth, submit_codesign_hash_blocking,
-    submit_codesign_hash_signature_blocking,
+    CodesigningAuth, CodesigningAuthInput, CodesigningCredentialType, CodesigningProfileParams,
+    CodesigningSubmitParams, DEFAULT_API_VERSION, DEFAULT_PROFILE_ROOT_API_VERSION,
+    get_codesigning_root_certificate_blocking, resolve_codesigning_auth,
+    submit_codesign_hash_blocking, submit_codesign_hash_signature_blocking,
 };
 use psign_opc_sign::{nuget, vsix};
 use psign_sip_digest::cab_digest::{self,
@@ -2555,6 +2556,12 @@ enum Command {
         #[command(flatten)]
         args: ArtifactSigningSubmitPortableArgs,
     },
+    /// Retrieve the root certificate currently associated with an authenticated Artifact Signing profile.
+    #[cfg(feature = "artifact-signing-rest")]
+    ArtifactSigningRoot {
+        #[command(flatten)]
+        args: ArtifactSigningRootPortableArgs,
+    },
     /// Azure Key Vault **`keys/sign`** over a **precomputed digest file** (RSA PKCS#1 or ECDSA). Requires **`--features azure-kv-sign-portable`**. Does **not** embed Authenticode — use **`psign-tool`** for that.
     #[cfg(feature = "azure-kv-sign-portable")]
     AzureKeyVaultSignDigest {
@@ -3300,21 +3307,7 @@ enum ArtifactSigningCredentialType {
 
 #[cfg(feature = "artifact-signing-rest")]
 #[derive(Args, Debug, Clone)]
-struct ArtifactSigningSubmitPortableArgs {
-    #[arg(long)]
-    region: String,
-    #[arg(long)]
-    account_name: String,
-    #[arg(long)]
-    profile_name: String,
-    #[arg(long)]
-    digest_file: PathBuf,
-    #[arg(long, default_value = "RS256")]
-    signature_algorithm: String,
-    #[arg(long, default_value = DEFAULT_API_VERSION)]
-    api_version: String,
-    #[arg(long)]
-    correlation_id: Option<String>,
+struct ArtifactSigningAuthPortableArgs {
     #[arg(long)]
     access_token: Option<String>,
     #[arg(long)]
@@ -3333,9 +3326,50 @@ struct ArtifactSigningSubmitPortableArgs {
     federated_token_file: Option<String>,
     #[arg(long)]
     authority: Option<String>,
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+#[derive(Args, Debug, Clone)]
+struct ArtifactSigningSubmitPortableArgs {
+    #[arg(long)]
+    region: String,
+    #[arg(long)]
+    account_name: String,
+    #[arg(long)]
+    profile_name: String,
+    #[arg(long)]
+    digest_file: PathBuf,
+    #[arg(long, default_value = "RS256")]
+    signature_algorithm: String,
+    #[arg(long, default_value = DEFAULT_API_VERSION)]
+    api_version: String,
+    #[arg(long)]
+    correlation_id: Option<String>,
+    #[command(flatten)]
+    auth: ArtifactSigningAuthPortableArgs,
     /// Override data-plane origin for deterministic local tests.
     #[arg(long, hide = true)]
     endpoint_base_url: Option<String>,
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+#[derive(Args, Debug, Clone)]
+struct ArtifactSigningRootPortableArgs {
+    /// Public Azure Artifact Signing data-plane origin, for example
+    /// `https://wus.artifactsigning.azure.net`.
+    #[arg(long)]
+    endpoint: String,
+    #[arg(long)]
+    account_name: String,
+    #[arg(long)]
+    profile_name: String,
+    /// Preview API used by the profile root-certificate operation.
+    #[arg(long, default_value = DEFAULT_PROFILE_ROOT_API_VERSION)]
+    api_version: String,
+    #[arg(long)]
+    output: PathBuf,
+    #[command(flatten)]
+    auth: ArtifactSigningAuthPortableArgs,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -3384,12 +3418,14 @@ struct ArtifactSigningPortableOptions {
 
 #[cfg(feature = "artifact-signing-rest")]
 fn validate_portable_submit_args(args: &ArtifactSigningSubmitPortableArgs) -> Result<()> {
-    portable_submit_auth(args)?;
+    portable_artifact_signing_auth(&args.auth)?;
     Ok(())
 }
 
 #[cfg(feature = "artifact-signing-rest")]
-fn portable_submit_auth(args: &ArtifactSigningSubmitPortableArgs) -> Result<CodesigningAuth> {
+fn portable_artifact_signing_auth(
+    args: &ArtifactSigningAuthPortableArgs,
+) -> Result<CodesigningAuth> {
     portable_submit_auth_parts(
         args.access_token.as_deref(),
         args.managed_identity,
@@ -3411,7 +3447,7 @@ fn run_portable_artifact_signing_submit(args: ArtifactSigningSubmitPortableArgs)
     if digest.is_empty() {
         return Err(anyhow!("digest file is empty"));
     }
-    let auth = portable_submit_auth(&args)?;
+    let auth = portable_artifact_signing_auth(&args.auth)?;
     let params = CodesigningSubmitParams {
         region: args.region,
         account_name: args.account_name,
@@ -3420,7 +3456,7 @@ fn run_portable_artifact_signing_submit(args: ArtifactSigningSubmitPortableArgs)
         signature_algorithm: args.signature_algorithm,
         api_version: args.api_version,
         correlation_id: args.correlation_id,
-        authority: args.authority,
+        authority: args.auth.authority,
         auth,
         endpoint_base_url: args.endpoint_base_url,
     };
@@ -3431,6 +3467,26 @@ fn run_portable_artifact_signing_submit(args: ArtifactSigningSubmitPortableArgs)
         }
     })?;
     println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+#[cfg(feature = "artifact-signing-rest")]
+fn run_portable_artifact_signing_root(args: ArtifactSigningRootPortableArgs) -> Result<()> {
+    let auth = portable_artifact_signing_auth(&args.auth)?;
+    let params = CodesigningProfileParams {
+        account_name: args.account_name,
+        profile_name: args.profile_name,
+        api_version: args.api_version,
+        authority: args.auth.authority,
+        auth,
+        endpoint_base_url: args.endpoint,
+    };
+    let root = get_codesigning_root_certificate_blocking(&params)?;
+    psign_authenticode_trust::anchor::parse_cert_bytes(&root)
+        .context("parse Artifact Signing root certificate")?;
+    std::fs::write(&args.output, root)
+        .with_context(|| format!("write {}", args.output.display()))?;
+    println!("output={}", args.output.display());
     Ok(())
 }
 
@@ -5409,6 +5465,10 @@ where
         #[cfg(feature = "artifact-signing-rest")]
         Command::ArtifactSigningSubmit { args } => {
             run_portable_artifact_signing_submit(args)?;
+        }
+        #[cfg(feature = "artifact-signing-rest")]
+        Command::ArtifactSigningRoot { args } => {
+            run_portable_artifact_signing_root(args)?;
         }
         #[cfg(feature = "azure-kv-sign-portable")]
         Command::AzureKeyVaultSignDigest { args } => {

@@ -49,7 +49,9 @@ fn matrix_portable_commands() -> BTreeSet<String> {
         .collect::<BTreeSet<_>>();
 
     if !cfg!(feature = "artifact-signing-rest") {
-        commands.remove("artifact-signing-submit");
+        for command in ["artifact-signing-submit", "artifact-signing-root"] {
+            commands.remove(command);
+        }
     }
     if !cfg!(feature = "azure-kv-sign") {
         commands.remove("azure-key-vault-sign-digest");

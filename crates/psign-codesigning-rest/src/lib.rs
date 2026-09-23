@@ -5,12 +5,26 @@ use anyhow::{Context as _, Result, anyhow};
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::Value;
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
+use url::Url;
+use x509_cert::{Certificate, der::Decode as _, ext::pkix::BasicConstraints};
 
 pub const DEFAULT_API_VERSION: &str = "2024-06-15";
+/// Preview API version used by the profile root-certificate operation.
+pub const DEFAULT_PROFILE_ROOT_API_VERSION: &str = "2022-06-15-preview";
 const DEFAULT_SCOPE: &str = "https://codesigning.azure.net/.default";
 const MI_RESOURCE: &str = "https://codesigning.azure.net";
+const MAX_PROFILE_ROOT_BYTES: usize = 1024 * 1024;
+const MAX_PROFILE_ROOT_ERROR_BYTES: usize = 64 * 1024;
+const PROFILE_ROOT_CONTENT_TYPES: [&str; 3] = [
+    "application/x-x509-ca-cert",
+    "application/pkix-cert",
+    "application/octet-stream",
+];
+const AZURE_DATA_PLANE_SUFFIXES: [&str; 2] =
+    [".codesigning.azure.net", ".artifactsigning.azure.net"];
 
 /// Authentication mode for **`codesigning.azure.net`**.
 #[derive(Debug, Clone)]
@@ -73,6 +87,18 @@ pub struct CodesigningSubmitParams {
     /// Default: `https://{region}.codesigning.azure.net`. Used by integration tests;
     /// omit in production unless pointing at a non-standard endpoint.
     pub endpoint_base_url: Option<String>,
+}
+
+/// Parameters for authenticated certificate-profile metadata reads.
+#[derive(Debug, Clone)]
+pub struct CodesigningProfileParams {
+    pub account_name: String,
+    pub profile_name: String,
+    pub api_version: String,
+    pub authority: Option<String>,
+    pub auth: CodesigningAuth,
+    /// HTTPS data-plane origin in the public Azure cloud, without a path, query, or fragment.
+    pub endpoint_base_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,8 +444,8 @@ fn acquire_workload_identity_token(
     Ok(j.access_token)
 }
 
-fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String> {
-    match &params.auth {
+fn acquire_codesigning_token(auth: &CodesigningAuth, authority: Option<&str>) -> Result<String> {
+    match auth {
         CodesigningAuth::Bearer(tok) => {
             let t = tok.trim();
             if t.is_empty() {
@@ -435,22 +461,12 @@ fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String>
             tenant_id,
             client_id,
             client_secret,
-        } => acquire_client_credentials_token(
-            params.authority.as_deref(),
-            tenant_id,
-            client_id,
-            client_secret,
-        ),
+        } => acquire_client_credentials_token(authority, tenant_id, client_id, client_secret),
         CodesigningAuth::WorkloadIdentity {
             tenant_id,
             client_id,
             federated_token_file,
-        } => acquire_workload_identity_token(
-            params.authority.as_deref(),
-            tenant_id,
-            client_id,
-            federated_token_file,
-        ),
+        } => acquire_workload_identity_token(authority, tenant_id, client_id, federated_token_file),
         CodesigningAuth::DefaultChain {
             exclude_credentials,
         } => {
@@ -463,12 +479,7 @@ fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String>
                 env_text("AZURE_CLIENT_ID"),
                 env_text("AZURE_CLIENT_SECRET"),
             ) {
-                match acquire_client_credentials_token(
-                    params.authority.as_deref(),
-                    &tenant,
-                    &client,
-                    &secret,
-                ) {
+                match acquire_client_credentials_token(authority, &tenant, &client, &secret) {
                     Ok(token) => return Ok(token),
                     Err(e) => errors.push(format!("EnvironmentCredential: {e:#}")),
                 }
@@ -480,12 +491,7 @@ fn acquire_codesigning_token(params: &CodesigningSubmitParams) -> Result<String>
                     env_text("AZURE_FEDERATED_TOKEN_FILE"),
                 )
             {
-                match acquire_workload_identity_token(
-                    params.authority.as_deref(),
-                    &tenant,
-                    &client,
-                    &token_file,
-                ) {
+                match acquire_workload_identity_token(authority, &tenant, &client, &token_file) {
                     Ok(token) => return Ok(token),
                     Err(e) => errors.push(format!("WorkloadIdentityCredential: {e:#}")),
                 }
@@ -553,7 +559,7 @@ pub fn submit_codesign_hash_blocking(
         return Err(anyhow!("digest is empty"));
     }
 
-    let token = acquire_codesigning_token(params)?;
+    let token = acquire_codesigning_token(&params.auth, params.authority.as_deref())?;
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
@@ -632,6 +638,160 @@ pub fn submit_codesign_hash_blocking(
     poll_operation(&http, &token, &poll_url)
 }
 
+/// Retrieve the root certificate currently associated with an Artifact Signing profile.
+pub fn get_codesigning_root_certificate_blocking(
+    params: &CodesigningProfileParams,
+) -> Result<Vec<u8>> {
+    let url = profile_root_certificate_url(params)?;
+    let token = acquire_codesigning_token(&params.auth, params.authority.as_deref())?;
+    let http = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    fetch_profile_root_certificate(&http, &token, url)
+}
+
+fn profile_root_certificate_url(params: &CodesigningProfileParams) -> Result<Url> {
+    let account = params.account_name.trim();
+    let profile = params.profile_name.trim();
+    let api = params.api_version.trim();
+    if account.is_empty() || profile.is_empty() || api.is_empty() {
+        return Err(anyhow!(
+            "Artifact Signing account, profile, and API version must not be empty"
+        ));
+    }
+
+    let mut url = validated_artifact_signing_origin(&params.endpoint_base_url)?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("Artifact Signing endpoint cannot be a base URL"))?
+        .extend([
+            "codesigningaccounts",
+            account,
+            "certificateprofiles",
+            profile,
+            "sign",
+            "rootcert",
+        ]);
+    url.query_pairs_mut().append_pair("api-version", api);
+    Ok(url)
+}
+
+fn validated_artifact_signing_origin(endpoint: &str) -> Result<Url> {
+    let url = Url::parse(endpoint.trim()).context("parse Artifact Signing endpoint")?;
+    if url.scheme() != "https" {
+        return Err(anyhow!("Artifact Signing endpoint must use HTTPS"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!(
+            "Artifact Signing endpoint must not contain user information"
+        ));
+    }
+    if url.port().is_some_and(|port| port != 443) {
+        return Err(anyhow!(
+            "Artifact Signing endpoint must use the default HTTPS port"
+        ));
+    }
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!(
+            "Artifact Signing endpoint must be an origin without a path, query, or fragment"
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("Artifact Signing endpoint must include a host"))?;
+    if !AZURE_DATA_PLANE_SUFFIXES
+        .iter()
+        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+    {
+        return Err(anyhow!(
+            "Artifact Signing endpoint host must be a public Azure Artifact Signing data-plane host"
+        ));
+    }
+    Ok(url)
+}
+
+fn fetch_profile_root_certificate(
+    http: &reqwest::blocking::Client,
+    token: &str,
+    url: Url,
+) -> Result<Vec<u8>> {
+    let response = http
+        .get(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/x-x509-ca-cert")
+        .send()
+        .context("Artifact Signing root certificate GET")?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let max_body_bytes = if status.is_success() {
+        MAX_PROFILE_ROOT_BYTES
+    } else {
+        MAX_PROFILE_ROOT_ERROR_BYTES
+    };
+    let body = read_bounded_body(response, max_body_bytes).with_context(|| {
+        format!("read Artifact Signing root certificate HTTP {status} response")
+    })?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Artifact Signing root certificate HTTP {}: {}",
+            status,
+            String::from_utf8_lossy(&body)
+        ));
+    }
+    validate_root_certificate_response(content_type.as_deref(), &body)?;
+    Ok(body.to_vec())
+}
+
+fn validate_root_certificate_response(content_type: Option<&str>, body: &[u8]) -> Result<()> {
+    if body.is_empty() {
+        return Err(anyhow!(
+            "Artifact Signing returned an empty root certificate"
+        ));
+    }
+    if let Some(content_type) = content_type {
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        if !PROFILE_ROOT_CONTENT_TYPES
+            .iter()
+            .any(|allowed| media_type.eq_ignore_ascii_case(allowed))
+        {
+            return Err(anyhow!(
+                "Artifact Signing returned unexpected root certificate content type {media_type}"
+            ));
+        }
+    }
+    let certificate =
+        Certificate::from_der(body).context("parse Artifact Signing root certificate DER")?;
+    let basic_constraints = certificate
+        .tbs_certificate
+        .get::<BasicConstraints>()
+        .context("parse Artifact Signing root certificate Basic Constraints")?;
+    if !basic_constraints.is_some_and(|(_, constraints)| constraints.ca) {
+        return Err(anyhow!(
+            "Artifact Signing returned a certificate that is not a CA"
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded_body(reader: impl Read, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    reader
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut body)
+        .context("read HTTP response body")?;
+    if body.len() > max_bytes {
+        return Err(anyhow!(
+            "Artifact Signing root certificate response exceeds {max_bytes} bytes"
+        ));
+    }
+    Ok(body)
+}
+
 fn sign_result_object(v: &Value) -> &Value {
     v.get("result").unwrap_or(v)
 }
@@ -668,6 +828,176 @@ pub fn submit_codesign_hash_signature_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+    use rcgen::{CertificateParams, KeyPair};
+
+    const TEST_ROOT_DER: &[u8] =
+        include_bytes!("../../../tests/fixtures/devolutions-authenticode/authenticode-test-ca.crt");
+
+    fn profile_params(endpoint: &str) -> CodesigningProfileParams {
+        CodesigningProfileParams {
+            account_name: "the account".into(),
+            profile_name: "the/profile".into(),
+            api_version: DEFAULT_PROFILE_ROOT_API_VERSION.into(),
+            authority: None,
+            auth: CodesigningAuth::Bearer("fake-token".into()),
+            endpoint_base_url: endpoint.into(),
+        }
+    }
+
+    #[test]
+    fn profile_root_url_accepts_supported_azure_origins_and_encodes_names() {
+        for endpoint in [
+            "https://wus.codesigning.azure.net",
+            "https://wus.artifactsigning.azure.net/",
+        ] {
+            let url = profile_root_certificate_url(&profile_params(endpoint)).unwrap();
+            let expected_origin = endpoint.trim_end_matches('/');
+            assert_eq!(
+                url.as_str(),
+                format!(
+                    "{expected_origin}/codesigningaccounts/the%20account/certificateprofiles/\
+                     the%2Fprofile/sign/rootcert?api-version=2022-06-15-preview"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn profile_root_url_rejects_untrusted_or_non_origin_endpoints() {
+        for endpoint in [
+            "http://wus.codesigning.azure.net",
+            "https://example.com",
+            "https://codesigning.azure.net",
+            "https://user@wus.codesigning.azure.net",
+            "https://wus.codesigning.azure.net:444",
+            "https://wus.codesigning.azure.net/path",
+            "https://wus.codesigning.azure.net?query=value",
+            "https://wus.codesigning.azure.net#fragment",
+        ] {
+            assert!(
+                profile_root_certificate_url(&profile_params(endpoint)).is_err(),
+                "accepted unsafe endpoint {endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_is_validated_before_credentials_are_acquired() {
+        let mut params = profile_params("http://example.com");
+        params.auth = CodesigningAuth::Bearer(" ".into());
+
+        let error = get_codesigning_root_certificate_blocking(&params).unwrap_err();
+        assert!(error.to_string().contains("must use HTTPS"), "{error:#}");
+    }
+
+    #[test]
+    fn fetches_and_validates_profile_root_certificate() {
+        let mut server = Server::new();
+        let root_mock = server
+            .mock(
+                "GET",
+                "/codesigningaccounts/theacct/certificateprofiles/theprof/sign/rootcert",
+            )
+            .match_query(Matcher::UrlEncoded(
+                "api-version".into(),
+                DEFAULT_PROFILE_ROOT_API_VERSION.into(),
+            ))
+            .match_header("authorization", "Bearer fake-token")
+            .with_status(200)
+            .with_header("content-type", "application/x-x509-ca-cert")
+            .with_body(TEST_ROOT_DER)
+            .create();
+        let url = Url::parse(&format!(
+            "{}/codesigningaccounts/theacct/certificateprofiles/theprof/sign/rootcert?api-version={}",
+            server.url(),
+            DEFAULT_PROFILE_ROOT_API_VERSION
+        ))
+        .unwrap();
+        let http = reqwest::blocking::Client::new();
+
+        let root = fetch_profile_root_certificate(&http, "fake-token", url).unwrap();
+
+        assert_eq!(root, TEST_ROOT_DER);
+        root_mock.assert();
+    }
+
+    #[test]
+    fn root_certificate_response_rejects_json_and_invalid_der() {
+        let json_error = validate_root_certificate_response(
+            Some("application/json; charset=utf-8"),
+            br#"{"error":"not a certificate"}"#,
+        )
+        .unwrap_err();
+        assert!(
+            json_error.to_string().contains("unexpected"),
+            "{json_error:#}"
+        );
+
+        let der_error =
+            validate_root_certificate_response(Some("application/x-x509-ca-cert"), b"not DER")
+                .unwrap_err();
+        assert!(
+            der_error.to_string().contains("certificate DER"),
+            "{der_error:#}"
+        );
+
+        let empty_error = validate_root_certificate_response(None, &[]).unwrap_err();
+        assert!(empty_error.to_string().contains("empty"), "{empty_error:#}");
+    }
+
+    #[test]
+    fn root_certificate_response_accepts_case_insensitive_media_type() {
+        validate_root_certificate_response(
+            Some("Application/X-X509-CA-Cert; charset=binary"),
+            TEST_ROOT_DER,
+        )
+        .expect("mixed-case certificate media type");
+    }
+
+    #[test]
+    fn root_certificate_response_rejects_non_ca_certificate() {
+        let key = KeyPair::generate().expect("leaf key");
+        let params = CertificateParams::new(vec!["leaf.test".into()]).expect("leaf params");
+        let leaf = params.self_signed(&key).expect("self-signed leaf");
+
+        let error =
+            validate_root_certificate_response(Some("application/x-x509-ca-cert"), leaf.der())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("not a CA"), "{error:#}");
+    }
+
+    #[test]
+    fn response_body_reader_enforces_the_byte_limit() {
+        assert_eq!(read_bounded_body(&b"1234"[..], 4).unwrap(), b"1234");
+
+        let error = read_bounded_body(&b"12345"[..], 4).unwrap_err();
+        assert!(error.to_string().contains("exceeds 4 bytes"), "{error:#}");
+    }
+
+    #[test]
+    fn profile_root_http_error_includes_status_and_body() {
+        let mut server = Server::new();
+        let root_mock = server
+            .mock("GET", "/rootcert")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"forbidden"}"#)
+            .create();
+        let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let url = Url::parse(&format!("{}/rootcert", server.url())).unwrap();
+
+        let error = fetch_profile_root_certificate(&http, "fake-token", url).unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("403"), "{message}");
+        assert!(message.contains("forbidden"), "{message}");
+        root_mock.assert();
+    }
 
     #[test]
     fn bearer_empty_rejected() {
@@ -683,7 +1013,7 @@ mod tests {
             auth: CodesigningAuth::Bearer("  ".into()),
             endpoint_base_url: None,
         };
-        assert!(acquire_codesigning_token(&p).is_err());
+        assert!(acquire_codesigning_token(&p.auth, p.authority.as_deref()).is_err());
     }
 
     #[test]
