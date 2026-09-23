@@ -1716,6 +1716,12 @@ fn sign_pe(request: &PortableSignRequest, output_path: &Path) -> Result<bool> {
             })?
             .0;
     }
+    pe = pe_embed::pe_prepare_for_authenticode_signing(pe).with_context(|| {
+        format!(
+            "prepare PE certificate table alignment for {}",
+            request.path.display()
+        )
+    })?;
     let provider = load_signing_provider(request)?;
     let digest_algorithm: AuthenticodeSigningDigest = request.hash_algorithm.into();
     let pe_digest = pe_digest::pe_authenticode_digest(&pe, digest_algorithm.pe_hash_kind())?;
@@ -4062,6 +4068,72 @@ mod tests {
         assert_eq!(appended_signature.signature_count, 2);
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn pe_sign_aligns_certificate_table_and_hashes_padding_for_every_eof_residue() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-pe-alignment-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let fixture = include_bytes!("../../../tests/fixtures/pe-authenticode-upstream/tiny32.efi");
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        for overlay_len in 0..8 {
+            let input_path = temp_dir.join(format!("input-{overlay_len}.efi"));
+            let output_path = temp_dir.join(format!("signed-{overlay_len}.efi"));
+            let mut input = fixture.to_vec();
+            input.extend(std::iter::repeat_n(0xa5, overlay_len));
+            let original_len = input.len();
+            std::fs::write(&input_path, input).expect("write PE input");
+
+            portable_sign(PortableSignRequest {
+                path: input_path,
+                output_path: Some(output_path.clone()),
+                pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+                pfx_password: Some("CodeSign123!".to_string()),
+                ..default_sign_request()
+            })
+            .expect("sign PE");
+
+            let signed = std::fs::read(output_path).expect("read signed PE");
+            let cert_offset = pe_certificate_table_offset(&signed);
+            assert!(cert_offset.is_multiple_of(8));
+            assert!(
+                signed[original_len..cert_offset]
+                    .iter()
+                    .all(|byte| *byte == 0)
+            );
+            verify_pe_authenticode_digest_consistency_if_signed(&signed)
+                .expect("verify PE digest consistency")
+                .expect("signed PE");
+        }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    fn pe_certificate_table_offset(pe: &[u8]) -> usize {
+        let pe_offset = u32::from_le_bytes(pe[0x3c..0x40].try_into().unwrap()) as usize;
+        let optional_header = pe_offset + 24;
+        let magic =
+            u16::from_le_bytes(pe[optional_header..optional_header + 2].try_into().unwrap());
+        let first_data_directory = optional_header
+            + match magic {
+                0x10b => 96,
+                0x20b => 112,
+                _ => panic!("unsupported PE optional-header magic {magic:#x}"),
+            };
+        let security_directory = first_data_directory + 4 * 8;
+        u32::from_le_bytes(
+            pe[security_directory..security_directory + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize
     }
 
     #[test]

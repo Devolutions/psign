@@ -1,5 +1,7 @@
 use crate::pe_digest::{PeAuthenticodeHashKind, pe_authenticode_digest};
-use crate::pe_embed::pe_append_authenticode_pkcs7_certificate;
+use crate::pe_embed::{
+    pe_append_authenticode_pkcs7_certificate, pe_prepare_for_authenticode_signing,
+};
 use crate::pkcs7::{encode_pkcs7_content_info_signed_data_der, parse_pkcs7_signed_data_der};
 use crate::rdp::{parse_certificate, parse_rsa_private_key};
 use anyhow::{Context, Result, anyhow};
@@ -31,12 +33,13 @@ pub fn sign_pe_image_rsa_sha256(
     signer_cert_der: &[u8],
     private_key_bytes: &[u8],
 ) -> Result<Vec<u8>> {
-    let digest = pe_authenticode_digest(pe_image, PeAuthenticodeHashKind::Sha256)
+    let pe_image = pe_prepare_for_authenticode_signing(pe_image.to_vec())
+        .context("prepare PE certificate table alignment")?;
+    let digest = pe_authenticode_digest(&pe_image, PeAuthenticodeHashKind::Sha256)
         .context("compute PE Authenticode SHA-256 digest")?;
     let pkcs7 =
         build_pe_authenticode_pkcs7_rsa_sha256(&digest, signer_cert_der, private_key_bytes)?;
-    pe_append_authenticode_pkcs7_certificate(pe_image.to_vec(), &pkcs7)
-        .context("embed Authenticode PKCS#7")
+    pe_append_authenticode_pkcs7_certificate(pe_image, &pkcs7).context("embed Authenticode PKCS#7")
 }
 
 pub fn build_pe_authenticode_pkcs7_rsa_sha256(

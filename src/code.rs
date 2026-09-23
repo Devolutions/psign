@@ -2133,9 +2133,10 @@ impl CodeSigner {
             );
         }
 
-        let pe_digest =
-            pe_digest::pe_authenticode_digest(input_bytes, signing_digest.pe_hash_kind())
-                .context("compute PE/WinMD Authenticode digest")?;
+        let prepared = pe_embed::pe_prepare_for_authenticode_signing(input_bytes.to_vec())
+            .context("prepare PE certificate table alignment")?;
+        let pe_digest = pe_digest::pe_authenticode_digest(&prepared, signing_digest.pe_hash_kind())
+            .context("compute PE/WinMD Authenticode digest")?;
         let indirect = pkcs7::pe_spc_indirect_data(signing_digest, &pe_digest)?;
         let prehash =
             pkcs7::authenticode_remote_rsa_signed_attrs_digest(&indirect, signing_digest)?;
@@ -2148,7 +2149,7 @@ impl CodeSigner {
             remote.chain,
             &remote.signature,
         )?;
-        pe_embed::pe_append_authenticode_pkcs7_certificate(input_bytes.to_vec(), &pkcs7)
+        pe_embed::pe_append_authenticode_pkcs7_certificate(prepared, &pkcs7)
             .context("embed Authenticode PKCS#7")
     }
 
