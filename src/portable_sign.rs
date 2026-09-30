@@ -1067,13 +1067,12 @@ fn run_portable_sign_portable_core_artifact_signing(
     let correlation_id = text_opt(args.artifact_signing_correlation_id.as_deref())
         .map(ToOwned::to_owned)
         .or_else(|| metadata.as_ref().and_then(|m| m.CorrelationId.clone()));
-    if correlation_id.is_some()
-        || text_present(&args.artifact_signing_signature_algorithm)
+    if text_present(&args.artifact_signing_signature_algorithm)
         || text_present(&args.artifact_signing_api_version)
         || text_present(&args.artifact_signing_authority)
     {
         return Err(anyhow!(
-            "native-shaped portable {target_kind} Artifact Signing does not yet support correlation ID, signature-algorithm, api-version, or authority overrides"
+            "native-shaped portable {target_kind} Artifact Signing does not yet support signature-algorithm, api-version, or authority overrides"
         ));
     }
 
@@ -1117,6 +1116,7 @@ fn run_portable_sign_portable_core_artifact_signing(
         )
         .map(ToOwned::to_owned),
         artifact_signing_exclude_credentials: std::mem::take(&mut exclude_credentials),
+        artifact_signing_correlation_id: correlation_id,
         ..Default::default()
     };
     let response = psign_portable_core::portable_sign(request).with_context(|| {

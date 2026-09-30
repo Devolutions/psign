@@ -6124,6 +6124,48 @@ fn mode_portable_artifact_signing_signs_and_timestamps_psd1() {
 
 #[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
 #[test]
+fn mode_portable_artifact_signing_forwards_correlation_id_for_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let script_path = dir.path().join("sample.artifact-correlation.psd1");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unsigned-sample.psd1"),
+        &script_path,
+    )
+    .expect("copy unsigned psd1");
+
+    let (mut guard, endpoint) = spawn_psign_artifact_signing_server_with_args(
+        2,
+        &["--expect-correlation-id", "build-42_suffix"],
+    );
+    let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+    cmd.arg("--mode")
+        .arg("portable")
+        .arg("sign")
+        .arg("--digest")
+        .arg("sha256")
+        .arg("--artifact-signing-account-name")
+        .arg("acct")
+        .arg("--artifact-signing-profile-name")
+        .arg("prof")
+        .arg("--artifact-signing-correlation-id")
+        .arg("build-42_suffix")
+        .arg("--artifact-signing-access-token")
+        .arg("test-token")
+        .arg("--artifact-signing-endpoint")
+        .arg(&endpoint)
+        .arg(&script_path);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Signed:"));
+    let status = guard.0.wait().expect("Artifact Signing server exit");
+    assert!(
+        status.success(),
+        "Artifact Signing server failed with {status}"
+    );
+}
+
+#[cfg(all(feature = "timestamp-server", feature = "artifact-signing-rest"))]
+#[test]
 fn mode_portable_artifact_signing_signs_flat_msix() {
     let dir = tempfile::tempdir().unwrap();
     let msix_path = dir.path().join("sample.msix");
