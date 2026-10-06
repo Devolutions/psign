@@ -351,6 +351,8 @@ pub struct PortableSignRequest {
     pub artifact_signing_federated_token_file: Option<String>,
     #[serde(default)]
     pub artifact_signing_exclude_credentials: Vec<String>,
+    #[serde(default)]
+    pub artifact_signing_correlation_id: Option<String>,
 }
 
 impl Default for PortableSignRequest {
@@ -392,6 +394,7 @@ impl Default for PortableSignRequest {
             artifact_signing_client_secret: None,
             artifact_signing_federated_token_file: None,
             artifact_signing_exclude_credentials: Vec::new(),
+            artifact_signing_correlation_id: None,
         }
     }
 }
@@ -1195,6 +1198,7 @@ struct ArtifactSigningProvider {
     endpoint: String,
     account_name: String,
     profile_name: String,
+    correlation_id: Option<String>,
     auth: psign_codesigning_rest::CodesigningAuth,
     chain: Vec<x509_cert::Certificate>,
 }
@@ -1391,7 +1395,7 @@ impl SigningProvider {
                     digest: digest.to_vec(),
                     signature_algorithm: artifact_signature_algorithm(digest_algorithm).to_string(),
                     api_version: psign_codesigning_rest::DEFAULT_API_VERSION.to_string(),
-                    correlation_id: None,
+                    correlation_id: provider.correlation_id.clone(),
                     authority: None,
                     auth: provider.auth.clone(),
                     endpoint_base_url: Some(provider.endpoint.clone()),
@@ -1509,6 +1513,7 @@ fn load_artifact_signing_provider(request: &PortableSignRequest) -> Result<Signi
             endpoint: endpoint.trim_end_matches('/').to_string(),
             account_name,
             profile_name,
+            correlation_id: text_opt(request.artifact_signing_correlation_id.as_deref()),
             auth,
             chain,
         },
@@ -4382,6 +4387,7 @@ mod tests {
             artifact_signing_client_secret: None,
             artifact_signing_federated_token_file: None,
             artifact_signing_exclude_credentials: Vec::new(),
+            artifact_signing_correlation_id: None,
         }
     }
 }
