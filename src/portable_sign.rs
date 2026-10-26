@@ -1715,6 +1715,8 @@ mod tests {
                 timestamp_signing_time: None,
                 pkcs7_der_base64: None,
                 diagnostics: Vec::new(),
+                artifact_signing: None,
+                artifact_signing_verification: None,
             },
             skipped: false,
         }

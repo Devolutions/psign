@@ -6,6 +6,8 @@
 
 - `Set-PsignSignature`
 - `Get-PsignSignature`
+- `Get-PsignArtifactSigningPublisherId`
+- `Test-PsignArtifactSigning`
 
 Both cmdlets accept `-FilePath` and `-LiteralPath`. `-LiteralPath` accepts the same `PSPath` and `LP` aliases as the built-in Authenticode cmdlets. When the input is a directory, the module treats it as a PowerShell module tree and recursively processes PowerShell files plus newly supported portable signing neighbors such as `.dll`, `.exe`, `.nupkg`, `.snupkg`, `.vsix`, `.manifest`, `.application`, `.vsto`, and `.appinstaller`.
 
@@ -45,6 +47,22 @@ Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificatePath .\root.cer
 Get-PsignSignature -LiteralPath .\tool.exe -AnchorDirectory .\anchors
 Get-PsignSignature -LiteralPath .\tool.exe -TrustedCertificate $rootCertificate -AsOf (Get-Date) -RevocationMode Off
 ```
+
+### Azure Artifact Signing
+
+Artifact Signing validation replaces anchors with the pinned Microsoft Identity Verification Root CA 2020 (signer and timestamp chains). It requires the certificate-profile identity EKU and checks certificate validity at the trusted timestamp. It is the same policy as `psign-tool verify --artifact-signing…`. Generic trust parameters (`-TrustedCertificate`, `-AnchorDirectory`, `-AuthRootCab`) cannot be combined with it, and AuthRoot is not downloaded.
+
+```powershell
+# Publisher ID (certificate profile EKU suffix) of the signer; no trust decision:
+Get-PsignArtifactSigningPublisherId .\tool.exe
+Get-PsignArtifactSigningPublisherId -Certificate $signerCertificate
+
+# Azure Artifact Signing validation pinned to Microsoft's root and to one certificate profile:
+Test-PsignArtifactSigning .\tool.exe -PublisherId 285218949.549339218.252840042.443064405
+Get-PsignSignature .\tool.exe -ArtifactSigningPublisherId 285218949.549339218.252840042.443064405
+```
+
+Every result exposes `ArtifactSigning` (decoded identity) and `ArtifactSigningPublisherId`. Validated results also carry `ArtifactSigningVerification` (root thumbprint, timestamp time). See [artifact-signing-validation.md](artifact-signing-validation.md).
 
 The output object is portable-specific, but its compatibility properties mirror the built-in Authenticode shape: `Status` is a `System.Management.Automation.SignatureStatus`, `SignatureType` is a `System.Management.Automation.SignatureType`, and `SignerCertificate`, `TimeStamperCertificate`, `StatusMessage`, `Path`, `IsOSBinary`, and `SubjectAlternativeName` are exposed by the same names. Portable-specific details remain available through `Format`, `PortableStatus`, `TrustStatus`, `PortableTrustStatus`, `TimestampKinds`, `TimestampSigningTime`, `SignatureCount`, and `PortableDiagnostics`.
 

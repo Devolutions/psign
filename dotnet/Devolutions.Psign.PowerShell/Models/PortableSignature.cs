@@ -64,6 +64,17 @@ public sealed class PortableSignature
     [JsonPropertyName("diagnostics")]
     public string[] PortableDiagnostics { get; init; } = [];
 
+    /// <summary>Azure Artifact Signing identity of the signer certificate (decoded, not trust-verified).</summary>
+    [JsonPropertyName("artifact_signing")]
+    public PsignArtifactSigningIdentity? ArtifactSigning { get; init; }
+
+    /// <summary>Set when Azure Artifact Signing validation was requested and succeeded.</summary>
+    [JsonPropertyName("artifact_signing_verification")]
+    public PsignArtifactSigningVerification? ArtifactSigningVerification { get; init; }
+
+    [JsonIgnore]
+    public string? ArtifactSigningPublisherId => ArtifactSigning?.PublisherId;
+
     [JsonIgnore]
     public X509Certificate2? SignerCertificate
     {

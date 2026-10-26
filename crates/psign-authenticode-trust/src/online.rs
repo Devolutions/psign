@@ -9,7 +9,7 @@ use picky::x509::date::UtcDate;
 use rsa::pkcs1v15::{Signature as RsaPkcs1v15Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
-use sha2::Sha256;
+use sha2::{Sha256, Sha384, Sha512};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use x509_cert::Certificate;
@@ -25,9 +25,40 @@ const OCSP_BASIC_OID_DER: &[u8] = &[
 const SHA1_ALGORITHM_IDENTIFIER_DER: &[u8] = &[
     0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
 ];
+#[cfg(test)]
 const SHA256_WITH_RSA_ENCRYPTION_DER: &[u8] = &[
     0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00,
 ];
+/// `1.2.840.113549.1.1` (PKCS #1) OID content octets without the final arc.
+const PKCS1_OID_PREFIX: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
+
+/// RSASSA-PKCS1-v1_5 digests accepted for CRL and OCSP response signatures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RsaPkcs1v15Hash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl RsaPkcs1v15Hash {
+    /// Map a DER `AlgorithmIdentifier` to `sha{256,384,512}WithRSAEncryption`.
+    ///
+    /// RFC 4055 §5 requires NULL parameters but also requires accepting them absent.
+    fn from_algorithm_identifier_tlv(tlv: &[u8]) -> Option<Self> {
+        let body = expect_tlv(tlv, 0x30).ok()?;
+        let mut pos = 0usize;
+        let oid = expect_tlv(read_tlv(body, &mut pos).ok()?, 0x06).ok()?;
+        if pos != body.len() && body[pos..] != [0x05, 0x00] {
+            return None;
+        }
+        match oid.strip_prefix(PKCS1_OID_PREFIX)? {
+            [0x0b] => Some(Self::Sha256),
+            [0x0c] => Some(Self::Sha384),
+            [0x0d] => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+}
 
 pub fn issuer_candidates_from_aia(cert: &Cert, options: &OnlineTrustOptions) -> Result<Vec<Cert>> {
     if !options.enable_aia && options.aia_url_override.is_none() {
@@ -152,7 +183,8 @@ fn check_one_cert_ocsp(
     .with_context(|| format!("POST OCSP request to {url}"))?;
     let parsed = parse_ocsp_response_der(&response)
         .with_context(|| format!("parse OCSP response from {url}"))?;
-    verify_rsa_sha256_signature(
+    verify_rsa_pkcs1v15_signature(
+        parsed.signature_hash,
         &parsed.tbs_response_data_tlv,
         &parsed.signature,
         issuer,
@@ -237,6 +269,7 @@ pub fn ocsp_urls(cert: &Cert) -> Result<Vec<String>> {
 
 struct ParsedOcspResponse {
     tbs_response_data_tlv: Vec<u8>,
+    signature_hash: RsaPkcs1v15Hash,
     signature: Vec<u8>,
     responses: Vec<ParsedOcspSingleResponse>,
 }
@@ -277,9 +310,8 @@ fn parse_basic_ocsp_response_der(input: &[u8]) -> Result<ParsedOcspResponse> {
         .context("BasicOCSPResponse.tbsResponseData")?
         .to_vec();
     let sig_alg = read_tlv(outer, &mut pos).context("BasicOCSPResponse.signatureAlgorithm")?;
-    if sig_alg != SHA256_WITH_RSA_ENCRYPTION_DER {
-        return Err(anyhow!("unsupported OCSP signature algorithm"));
-    }
+    let signature_hash = RsaPkcs1v15Hash::from_algorithm_identifier_tlv(sig_alg)
+        .ok_or_else(|| anyhow!("unsupported OCSP signature algorithm"))?;
     let signature_body = expect_tlv(
         read_tlv(outer, &mut pos).context("BasicOCSPResponse.signature")?,
         0x03,
@@ -345,6 +377,7 @@ fn parse_basic_ocsp_response_der(input: &[u8]) -> Result<ParsedOcspResponse> {
 
     Ok(ParsedOcspResponse {
         tbs_response_data_tlv,
+        signature_hash,
         signature: signature_body[1..].to_vec(),
         responses: parsed_responses,
     })
@@ -352,7 +385,7 @@ fn parse_basic_ocsp_response_der(input: &[u8]) -> Result<ParsedOcspResponse> {
 
 struct ParsedCrl {
     tbs_tlv: Vec<u8>,
-    signature_algorithm_tlv: Vec<u8>,
+    signature_hash: RsaPkcs1v15Hash,
     signature: Vec<u8>,
     this_update: UtcDate,
     next_update: UtcDate,
@@ -372,9 +405,8 @@ fn parse_certificate_list_der(input: &[u8]) -> Result<ParsedCrl> {
     if pos != outer.len() {
         return Err(anyhow!("CertificateList has trailing fields"));
     }
-    if signature_algorithm_tlv != SHA256_WITH_RSA_ENCRYPTION_DER {
-        return Err(anyhow!("unsupported CRL signature algorithm"));
-    }
+    let signature_hash = RsaPkcs1v15Hash::from_algorithm_identifier_tlv(&signature_algorithm_tlv)
+        .ok_or_else(|| anyhow!("unsupported CRL signature algorithm"))?;
     let signature_body = expect_tlv(signature_tlv, 0x03).context("CRL signature BIT STRING")?;
     if signature_body.first().copied() != Some(0) {
         return Err(anyhow!("CRL signature BIT STRING has unused bits"));
@@ -385,7 +417,13 @@ fn parse_certificate_list_der(input: &[u8]) -> Result<ParsedCrl> {
     if tbs.get(tbs_pos).copied() == Some(0x02) {
         read_tlv(tbs, &mut tbs_pos).context("TBSCertList.version")?;
     }
-    read_tlv(tbs, &mut tbs_pos).context("TBSCertList.signature")?;
+    let tbs_signature_algorithm_tlv =
+        read_tlv(tbs, &mut tbs_pos).context("TBSCertList.signature")?;
+    if tbs_signature_algorithm_tlv != signature_algorithm_tlv.as_slice() {
+        return Err(anyhow!(
+            "CRL signatureAlgorithm does not match TBSCertList.signature"
+        ));
+    }
     read_tlv(tbs, &mut tbs_pos).context("TBSCertList.issuer")?;
     let this_update =
         parse_der_time_tlv(read_tlv(tbs, &mut tbs_pos).context("TBSCertList.thisUpdate")?)
@@ -418,7 +456,7 @@ fn parse_certificate_list_der(input: &[u8]) -> Result<ParsedCrl> {
 
     Ok(ParsedCrl {
         tbs_tlv,
-        signature_algorithm_tlv,
+        signature_hash,
         signature: signature_body[1..].to_vec(),
         this_update,
         next_update,
@@ -427,13 +465,17 @@ fn parse_certificate_list_der(input: &[u8]) -> Result<ParsedCrl> {
 }
 
 fn verify_crl_signature(crl: &ParsedCrl, issuer: &Cert) -> Result<()> {
-    if crl.signature_algorithm_tlv != SHA256_WITH_RSA_ENCRYPTION_DER {
-        return Err(anyhow!("unsupported CRL signature algorithm"));
-    }
-    verify_rsa_sha256_signature(&crl.tbs_tlv, &crl.signature, issuer, "CRL")
+    verify_rsa_pkcs1v15_signature(
+        crl.signature_hash,
+        &crl.tbs_tlv,
+        &crl.signature,
+        issuer,
+        "CRL",
+    )
 }
 
-fn verify_rsa_sha256_signature(
+fn verify_rsa_pkcs1v15_signature(
+    hash: RsaPkcs1v15Hash,
     signed_tlv: &[u8],
     signature: &[u8],
     issuer: &Cert,
@@ -453,9 +495,18 @@ fn verify_rsa_sha256_signature(
         .map_err(|e| anyhow!("{label} issuer RSA public key parse failed: {e}"))?;
     let signature = RsaPkcs1v15Signature::try_from(signature)
         .map_err(|e| anyhow!("{label} RSA signature parse failed: {e}"))?;
-    VerifyingKey::<Sha256>::new(public_key)
-        .verify(signed_tlv, &signature)
-        .map_err(|e| anyhow!("{label} signature verification failed: {e}"))
+    match hash {
+        RsaPkcs1v15Hash::Sha256 => {
+            VerifyingKey::<Sha256>::new(public_key).verify(signed_tlv, &signature)
+        }
+        RsaPkcs1v15Hash::Sha384 => {
+            VerifyingKey::<Sha384>::new(public_key).verify(signed_tlv, &signature)
+        }
+        RsaPkcs1v15Hash::Sha512 => {
+            VerifyingKey::<Sha512>::new(public_key).verify(signed_tlv, &signature)
+        }
+    }
+    .map_err(|e| anyhow!("{label} signature verification failed: {e}"))
 }
 
 fn cert_serial_tlv(cert: &Cert) -> Result<Vec<u8>> {
@@ -872,12 +923,108 @@ mod tests {
         assert!(parsed.revoked_serial_tlvs.is_empty());
     }
 
+    fn pkcs1_algorithm_identifier(last_arc: u8, params: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut oid = PKCS1_OID_PREFIX.to_vec();
+        oid.push(last_arc);
+        push_tlv(&mut body, 0x06, &oid);
+        body.extend_from_slice(params);
+        let mut out = Vec::new();
+        push_tlv(&mut out, 0x30, &body);
+        out
+    }
+
+    #[test]
+    fn maps_rsa_pkcs1v15_signature_algorithms() {
+        assert_eq!(
+            RsaPkcs1v15Hash::from_algorithm_identifier_tlv(SHA256_WITH_RSA_ENCRYPTION_DER),
+            Some(RsaPkcs1v15Hash::Sha256)
+        );
+        for (arc, hash) in [
+            (0x0b, RsaPkcs1v15Hash::Sha256),
+            (0x0c, RsaPkcs1v15Hash::Sha384),
+            (0x0d, RsaPkcs1v15Hash::Sha512),
+        ] {
+            let with_null = pkcs1_algorithm_identifier(arc, &[0x05, 0x00]);
+            let absent = pkcs1_algorithm_identifier(arc, &[]);
+            assert_eq!(
+                RsaPkcs1v15Hash::from_algorithm_identifier_tlv(&with_null),
+                Some(hash)
+            );
+            assert_eq!(
+                RsaPkcs1v15Hash::from_algorithm_identifier_tlv(&absent),
+                Some(hash)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_or_malformed_signature_algorithms() {
+        // sha1WithRSAEncryption, RSASSA-PSS, and non-NULL parameters.
+        for tlv in [
+            pkcs1_algorithm_identifier(0x05, &[0x05, 0x00]),
+            pkcs1_algorithm_identifier(0x0a, &[0x30, 0x00]),
+            pkcs1_algorithm_identifier(0x0c, &[0x04, 0x00]),
+        ] {
+            assert_eq!(RsaPkcs1v15Hash::from_algorithm_identifier_tlv(&tlv), None);
+        }
+    }
+
+    #[test]
+    fn rejects_crl_with_mismatched_inner_signature_algorithm() {
+        let sha384 = pkcs1_algorithm_identifier(0x0c, &[0x05, 0x00]);
+        let mut tbs = Vec::new();
+        tbs.extend_from_slice(&[0x02, 0x01, 0x01]);
+        tbs.extend_from_slice(SHA256_WITH_RSA_ENCRYPTION_DER);
+        tbs.extend_from_slice(&[0x30, 0x00]);
+        push_tlv(&mut tbs, 0x17, b"240101000000Z");
+        push_tlv(&mut tbs, 0x17, b"250101000000Z");
+        let mut crl_body = Vec::new();
+        push_tlv(&mut crl_body, 0x30, &tbs);
+        crl_body.extend_from_slice(&sha384);
+        push_tlv(&mut crl_body, 0x03, &[0x00, 0x11]);
+        let mut crl = Vec::new();
+        push_tlv(&mut crl, 0x30, &crl_body);
+
+        let err = parse_certificate_list_der(&crl)
+            .err()
+            .expect("mismatch rejected");
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    fn artifact_signing_fixture(name: &str) -> Vec<u8> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/artifact-signing")
+            .join(name);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    }
+
+    #[test]
+    fn verifies_real_sha384_rsa_crl_signature() {
+        let crl = parse_certificate_list_der(&artifact_signing_fixture(
+            "microsoft-public-rsa-timestamping-ca-2020.crl",
+        ))
+        .expect("parse Microsoft CRL");
+        assert_eq!(crl.signature_hash, RsaPkcs1v15Hash::Sha384);
+        let issuer = parse_cert_bytes(&artifact_signing_fixture(
+            "microsoft-public-rsa-timestamping-ca-2020.pem",
+        ))
+        .expect("issuer");
+        verify_crl_signature(&crl, &issuer).expect("SHA-384 CRL signature");
+
+        let mut tampered = crl;
+        let last = tampered.tbs_tlv.len() - 1;
+        tampered.tbs_tlv[last] ^= 0x01;
+        assert!(verify_crl_signature(&tampered, &issuer).is_err());
+    }
+
     #[test]
     fn ocsp_lookup_uses_status_from_matching_cert_id_only() {
         let d1 = UtcDate::ymd(2024, 1, 1).unwrap();
         let d2 = UtcDate::ymd(2049, 1, 1).unwrap();
         let parsed = ParsedOcspResponse {
             tbs_response_data_tlv: Vec::new(),
+            signature_hash: RsaPkcs1v15Hash::Sha256,
             signature: Vec::new(),
             responses: vec![
                 ParsedOcspSingleResponse {

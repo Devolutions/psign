@@ -236,6 +236,25 @@ psign-tool portable trust-verify-pe ./MyApp.exe \
   --authroot-cab ./authroot.stl.cab
 ```
 
+### Artifact Signing-specific trust (pinned Microsoft root + publisher ID)
+
+**`trust-verify-pe`** accepts any root in AuthRoot. To require that a file was signed **by Azure Artifact Signing**, and optionally by one specific certificate profile, add the **`--artifact-signing…`** options. They behave the same in Windows and portable modes and across PE, CAB, MSI, WIM/ESD, catalog, ZIP, PowerShell script, and detached signatures:
+
+```bash
+# Publisher ID (certificate profile identity EKU suffix) of each signer; no trust decision.
+psign-tool portable artifact-signing-publisher-id ./MyApp.exe
+psign-tool portable artifact-signing-publisher-id ./signer.cer --input cert
+
+# Full validation, pinned to Microsoft's Artifact Signing root and to one certificate profile.
+psign-tool verify --artifact-signing-publisher-id 285218949.549339218.252840042.443064405 ./MyApp.exe
+```
+
+```powershell
+Test-PsignArtifactSigning .\MyApp.exe -PublisherId 285218949.549339218.252840042.443064405
+```
+
+This checks the signer's identity EKU, pins the signer **and** timestamp chains to **Microsoft Identity Verification Root Certificate Authority 2020** instead of AuthRoot, and evaluates the 72-hour certificate at the trusted timestamp time. **[artifact-signing-validation.md](artifact-signing-validation.md)** covers how the publisher ID is encoded, which roots are pinned and why, the full validation algorithm, Private Trust (`--artifact-signing-private-trust-root`), and known limitations.
+
 ## MSIX / APPX
 
 MSIX uses the same **`SignerSignEx3`** SIP stack and the same decoupled **`--dlib` / `--dmdf`** bridge. **`--page-hashes`** for MSIX requires decoupled digest inputs. See also [`rust-sip-spec-refs.md`](rust-sip-spec-refs.md).

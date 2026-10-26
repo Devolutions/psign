@@ -58,7 +58,7 @@ Use these labels in issues and release notes when scoping non-goals vs future wo
 
 | ID | Topic |
 |----|--------|
-| **`linux_trust_crl_limited`** | CRL checks use explicit HTTP CDP URLs or URL overrides, verify issuing-CA RSA/SHA-256 signatures, reject revoked serials, and enforce `thisUpdate` / `nextUpdate` freshness. No indirect/delta CRLs or **`CERT_CHAIN_REVOCATION_CHECK_*`** parity yet. |
+| **`linux_trust_crl_limited`** | CRL checks use explicit HTTP CDP URLs or URL overrides, verify issuing-CA RSA PKCS#1 v1.5 signatures (SHA-256/384/512; no RSA-PSS or ECDSA), reject revoked serials, and enforce `thisUpdate` / `nextUpdate` freshness. No indirect/delta CRLs or **`CERT_CHAIN_REVOCATION_CHECK_*`** parity yet. |
 | **`linux_trust_ocsp_limited`** | OCSP checks support issuing-CA-signed HTTP BasicOCSPResponse good/revoked/unknown status, exact CertID matching, and `thisUpdate` / `nextUpdate` freshness. No delegated responders, nonce policy, or broad error-status matrix yet. |
 | **`linux_trust_no_pinrules`** | No **`PinRulesSTL`** / auto-update pinning semantics. |
 | **`linux_trust_no_disallowed_stl`** | No **`disallowedcertstl.cab`** fail-closed thumbprint set (only explicit anchors today). |

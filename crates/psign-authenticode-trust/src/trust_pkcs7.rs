@@ -385,6 +385,46 @@ pub fn verify_pkcs9_message_digest_pkcs7_trust(
     )
 }
 
+/// How a PKCS#7 binds to the signed subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pkcs7DigestBinding {
+    /// Authenticode `SpcIndirectDataContent` digest (PE, CAB, MSI, WIM/ESD, scripts, ZIP).
+    AuthenticodeIndirect,
+    /// PKCS#9 `messageDigest` over external content (catalogs, detached CMS).
+    Pkcs9MessageDigest,
+}
+
+/// [`verify_authenticode_pkcs7_trust`] or [`verify_pkcs9_message_digest_pkcs7_trust`] by binding.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pkcs7_trust_with_binding(
+    binding: Pkcs7DigestBinding,
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    digest: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    policy: &AuthenticodeTrustPolicy,
+    online: &OnlineTrustOptions,
+    verification_instant: &UtcDate,
+    verbose_chain: bool,
+) -> Result<()> {
+    let verify = match binding {
+        Pkcs7DigestBinding::AuthenticodeIndirect => verify_authenticode_pkcs7_trust,
+        Pkcs7DigestBinding::Pkcs9MessageDigest => verify_pkcs9_message_digest_pkcs7_trust,
+    };
+    verify(
+        pkcs7_der,
+        pkcs7_index,
+        digest,
+        anchors,
+        anchor_certs,
+        policy,
+        online,
+        verification_instant,
+        verbose_chain,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

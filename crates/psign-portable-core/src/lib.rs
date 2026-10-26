@@ -16,8 +16,10 @@ use picky::x509::Cert as PickyCert;
 use picky::x509::date::UtcDate;
 use psign_authenticode_trust::policy::{OnlineTrustOptions, RevocationMode};
 use psign_authenticode_trust::{
-    AuthenticodeTrustPolicy, TrustVerifyPeOptions, inspect_authenticode_pkcs7_der,
-    inspect_pe_authenticode, trust_verify_cab_bytes, trust_verify_msi_bytes, trust_verify_pe_bytes,
+    ArtifactSigningIdentity, ArtifactSigningPolicy, ArtifactSigningVerifiedSignature,
+    AuthenticodeTrustPolicy, TrustVerifyPeOptions, artifact_signing_identity_from_cert_bytes,
+    inspect_authenticode_pkcs7_der, inspect_pe_authenticode, trust_verify_cab_bytes,
+    trust_verify_catalog_bytes, trust_verify_msi_bytes, trust_verify_pe_bytes,
     trust_verify_script_bytes, trust_verify_zip_bytes,
 };
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
@@ -156,6 +158,32 @@ pub struct PortableGetSignatureRequest {
     pub online_ocsp: bool,
     #[serde(default)]
     pub revocation_mode: PortableRevocationMode,
+    /// Validate as Azure Artifact Signing (pinned Microsoft roots) instead of the anchors above.
+    #[serde(default)]
+    pub artifact_signing: Option<PortableArtifactSigningOptions>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PortableArtifactSigningOptions {
+    /// When non-empty, the signer's publisher ID must equal one of these values.
+    #[serde(default)]
+    pub publisher_ids: Vec<String>,
+    /// Subscriber roots for Private Trust / Public Trust Test signatures.
+    #[serde(default)]
+    pub private_trust_root_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub allow_missing_timestamp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableArtifactSigningIdentityRequest {
+    pub certificate_der_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortableArtifactSigningIdentityResponse {
+    pub schema_version: u32,
+    pub identity: Option<ArtifactSigningIdentity>,
 }
 
 impl PortableGetSignatureRequest {
@@ -172,6 +200,7 @@ impl PortableGetSignatureRequest {
             online_aia: false,
             online_ocsp: false,
             revocation_mode: PortableRevocationMode::Off,
+            artifact_signing: None,
         }
     }
 }
@@ -228,6 +257,7 @@ impl PortableTestFileCatalogRequest {
             online_aia: self.online_aia,
             online_ocsp: self.online_ocsp,
             revocation_mode: self.revocation_mode,
+            artifact_signing: None,
         }
     }
 }
@@ -272,6 +302,7 @@ impl PortableValidatePowerShellRequest {
             online_aia: self.online_aia,
             online_ocsp: self.online_ocsp,
             revocation_mode: self.revocation_mode,
+            artifact_signing: None,
         }
     }
 }
@@ -427,6 +458,12 @@ pub struct PortableSignatureResponse {
     pub pkcs7_der_base64: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+    /// Azure Artifact Signing identity of the signer certificate (decoded, not trust-verified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_signing: Option<ArtifactSigningIdentity>,
+    /// Set when `artifact_signing` validation was requested and succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_signing_verification: Option<ArtifactSigningVerifiedSignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -641,9 +678,32 @@ pub fn portable_get_signature(
         )),
     }?;
 
+    response.artifact_signing = response
+        .signer_certificate_der_base64
+        .as_deref()
+        .and_then(|der| base64::engine::general_purpose::STANDARD.decode(der).ok())
+        .and_then(|der| {
+            artifact_signing_identity_from_cert_bytes(&der)
+                .ok()
+                .flatten()
+        });
+
     apply_trust_if_requested(&request, format, &data, &mut response)?;
 
     Ok(response)
+}
+
+/// Decode the Azure Artifact Signing identity (publisher ID) of a DER certificate.
+pub fn portable_get_artifact_signing_identity(
+    request: PortableArtifactSigningIdentityRequest,
+) -> Result<PortableArtifactSigningIdentityResponse> {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(request.certificate_der_base64.trim())
+        .context("decode certificate_der_base64")?;
+    Ok(PortableArtifactSigningIdentityResponse {
+        schema_version: SCHEMA_VERSION,
+        identity: artifact_signing_identity_from_cert_bytes(&der)?,
+    })
 }
 
 pub fn portable_clear_signature(
@@ -2462,38 +2522,14 @@ fn apply_trust_if_requested(
 
     let (opts, temp_dir) = trust_options(request)?;
     let trust_result = match format {
-        PortableFileFormat::Pe => trust_verify_pe_bytes(data, &opts).map(|r| {
-            format!(
-                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
-                r.pkcs7_entries_verified, r.anchor_thumbprints
-            )
-        }),
-        PortableFileFormat::Cab => trust_verify_cab_bytes(data, &opts).map(|r| {
-            format!(
-                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
-                r.pkcs7_entries_verified, r.anchor_thumbprints
-            )
-        }),
-        PortableFileFormat::Msi => trust_verify_msi_bytes(data, &opts).map(|r| {
-            format!(
-                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
-                r.pkcs7_entries_verified, r.anchor_thumbprints
-            )
-        }),
-        PortableFileFormat::Zip => trust_verify_zip_bytes(data, &opts).map(|r| {
-            format!(
-                "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
-                r.pkcs7_entries_verified, r.anchor_thumbprints
-            )
-        }),
+        PortableFileFormat::Pe => trust_verify_pe_bytes(data, &opts),
+        PortableFileFormat::Cab => trust_verify_cab_bytes(data, &opts),
+        PortableFileFormat::Msi => trust_verify_msi_bytes(data, &opts),
+        PortableFileFormat::Zip => trust_verify_zip_bytes(data, &opts),
+        PortableFileFormat::Catalog => trust_verify_catalog_bytes(data, &opts),
         PortableFileFormat::PowerShellScript => {
             let extension = script_extension_for(&request.path);
-            trust_verify_script_bytes(data, &extension, &opts).map(|r| {
-                format!(
-                    "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
-                    r.pkcs7_entries_verified, r.anchor_thumbprints
-                )
-            })
+            trust_verify_script_bytes(data, &extension, &opts)
         }
         PortableFileFormat::NuGet
         | PortableFileFormat::AppInstaller
@@ -2515,11 +2551,29 @@ fn apply_trust_if_requested(
     }
 
     match trust_result {
-        Ok(diagnostic) => {
-            response.status_message =
-                "Portable digest binding and explicit trust verification are valid.".to_string();
+        Ok(report) => {
             response.trust_status = Some(PortableSignatureStatus::Valid);
-            response.diagnostics.push(diagnostic);
+            if let Some(sig) = report.artifact_signing.into_iter().next() {
+                response.status_message =
+                    "Portable digest binding and Azure Artifact Signing verification are valid."
+                        .to_string();
+                response.diagnostics.push(format!(
+                    "artifact_signing=valid publisher_id={} kind={} root_sha1={}",
+                    sig.identity.publisher_id,
+                    sig.identity.kind.as_str(),
+                    sig.root_sha1
+                ));
+                response.artifact_signing = Some(sig.identity.clone());
+                response.artifact_signing_verification = Some(sig);
+            } else {
+                response.status_message =
+                    "Portable digest binding and explicit trust verification are valid."
+                        .to_string();
+                response.diagnostics.push(format!(
+                    "explicit_trust=valid pkcs7_entries_verified={} anchors={}",
+                    report.pkcs7_entries_verified, report.anchor_thumbprints
+                ));
+            }
         }
         Err(error) => {
             response.status = PortableSignatureStatus::NotTrusted;
@@ -2535,7 +2589,8 @@ fn apply_trust_if_requested(
 }
 
 fn trust_requested(request: &PortableGetSignatureRequest) -> bool {
-    !request.trusted_certificate_paths.is_empty()
+    request.artifact_signing.is_some()
+        || !request.trusted_certificate_paths.is_empty()
         || !request.trusted_certificates_der_base64.is_empty()
         || request.anchor_directory.is_some()
         || request.authroot_cab.is_some()
@@ -2544,6 +2599,16 @@ fn trust_requested(request: &PortableGetSignatureRequest) -> bool {
 fn trust_options(
     request: &PortableGetSignatureRequest,
 ) -> Result<(TrustVerifyPeOptions, Option<PathBuf>)> {
+    if request.artifact_signing.is_some()
+        && (!request.trusted_certificate_paths.is_empty()
+            || !request.trusted_certificates_der_base64.is_empty()
+            || request.anchor_directory.is_some()
+            || request.authroot_cab.is_some())
+    {
+        bail!(
+            "trusted certificates, anchor directory, and AuthRoot CAB cannot be combined with Artifact Signing validation, which pins its own roots"
+        );
+    }
     let mut trusted_ca_files = request.trusted_certificate_paths.clone();
     let mut temp_dir = None;
     if !request.trusted_certificates_der_base64.is_empty() {
@@ -2599,6 +2664,14 @@ fn trust_options(
                     || request.require_valid_timestamp,
                 require_valid_timestamp: request.require_valid_timestamp,
             },
+            artifact_signing: request
+                .artifact_signing
+                .as_ref()
+                .map(|a| ArtifactSigningPolicy {
+                    expected_publisher_ids: a.publisher_ids.clone(),
+                    private_trust_root_files: a.private_trust_root_paths.clone(),
+                    require_timestamp: !a.allow_missing_timestamp,
+                }),
         },
         temp_dir,
     ))
@@ -2668,6 +2741,8 @@ fn inspect_pe(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
                     "matched_attribute_certificate_index={}",
                     result.matched_attribute_certificate_index
                 )],
+                artifact_signing: None,
+                artifact_signing_verification: None,
             })
         }
         Err(error) => Ok(map_digest_error(path, PortableFileFormat::Pe, error)),
@@ -2760,6 +2835,8 @@ fn inspect_zip(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
         timestamp_signing_time: summary.timestamp_signing_time,
         pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     })
 }
 
@@ -2797,6 +2874,8 @@ fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> 
         timestamp_signing_time: summary.timestamp_signing_time,
         pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     })
 }
 
@@ -2900,6 +2979,8 @@ fn inspect_appinstaller(path: &Path) -> Result<PortableSignatureResponse> {
         timestamp_signing_time: summary.timestamp_signing_time,
         pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     })
 }
 
@@ -2943,6 +3024,8 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
                 timestamp_signing_time: summary.timestamp_signing_time,
                 pkcs7_der_base64: summary.pkcs7_der_base64,
                 diagnostics: Vec::new(),
+                artifact_signing: None,
+                artifact_signing_verification: None,
             })
         }
         Err(error) => Ok(map_digest_error(
@@ -2999,6 +3082,8 @@ fn inspect_pkcs7_file(
                 timestamp_signing_time: summary.timestamp_signing_time,
                 pkcs7_der_base64: summary.pkcs7_der_base64,
                 diagnostics: Vec::new(),
+                artifact_signing: None,
+                artifact_signing_verification: None,
             })
         }
         Err(error) => Ok(map_digest_error(path, format, error)),
@@ -3097,6 +3182,8 @@ fn valid_response(
         timestamp_signing_time: summary.timestamp_signing_time,
         pkcs7_der_base64: summary.pkcs7_der_base64,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     }
 }
 
@@ -3123,6 +3210,8 @@ fn base_response(
         timestamp_signing_time: None,
         pkcs7_der_base64: None,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     }
 }
 
@@ -3158,6 +3247,8 @@ fn map_digest_error(
         timestamp_signing_time: None,
         pkcs7_der_base64: None,
         diagnostics: Vec::new(),
+        artifact_signing: None,
+        artifact_signing_verification: None,
     }
 }
 
@@ -3509,6 +3600,38 @@ fn format_powershell_signature_block(pkcs7_der: &[u8], extension: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_artifact_signing_identity_from_certificate() {
+        let pem = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/artifact-signing/devolutions-signer.pem"),
+        )
+        .expect("fixture");
+        let der = psign_authenticode_trust::anchor::parse_cert_bytes(&pem)
+            .expect("parse")
+            .to_der()
+            .expect("der");
+        let response =
+            portable_get_artifact_signing_identity(PortableArtifactSigningIdentityRequest {
+                certificate_der_base64: base64::engine::general_purpose::STANDARD.encode(der),
+            })
+            .expect("identity");
+        let identity = response.identity.expect("artifact signing identity");
+        assert_eq!(
+            identity.publisher_id,
+            "285218949.549339218.252840042.443064405"
+        );
+    }
+
+    #[test]
+    fn artifact_signing_rejects_generic_anchor_inputs() {
+        let mut request = PortableGetSignatureRequest::path_only(PathBuf::from("x.exe"));
+        request.artifact_signing = Some(PortableArtifactSigningOptions::default());
+        request.trusted_certificate_paths = vec![PathBuf::from("root.cer")];
+        let err = trust_options(&request).expect_err("conflict");
+        assert!(err.to_string().contains("cannot be combined"), "{err}");
+    }
 
     #[test]
     fn infers_expected_formats() {

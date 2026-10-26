@@ -8,7 +8,11 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use psign_authenticode_trust::{
-    AuthenticodeTrustPolicy, TrustVerifyPeOptions, TrustVerifyPeReport,
+    ArtifactSigningPolicy, AuthenticodeTrustPolicy,
+    artifact_signing::{
+        artifact_signing_identities_from_pe, artifact_signing_identity_from_cert_bytes,
+        artifact_signing_identity_from_pkcs7_der,
+    }, TrustVerifyPeOptions, TrustVerifyPeReport,
     inspect_authenticode_pkcs7_der, inspect_pe_authenticode, parse_verification_date_ymd,
     policy::{OnlineTrustOptions, RevocationMode},
     trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_detached_bytes,
@@ -131,6 +135,56 @@ struct TrustVerifySharedArgs {
     /// Maximum bytes accepted for an online issuer certificate download.
     #[arg(long, default_value_t = 1024 * 1024)]
     online_max_download_bytes: usize,
+    /// Validate as **Azure Artifact Signing**: identity EKU, signer and timestamp chains pinned to
+    /// Microsoft Identity Verification Root CA 2020 (AuthRoot is not consulted), validity at the
+    /// trusted timestamp.
+    #[arg(long)]
+    artifact_signing: bool,
+    /// Require this Artifact Signing publisher ID (certificate profile EKU suffix); repeatable,
+    /// any match passes. Implies **`--artifact-signing`**.
+    #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+    artifact_signing_publisher_id: Vec<String>,
+    /// Subscriber root for Private Trust / Public Trust Test signatures (PEM or DER); repeatable.
+    /// Implies **`--artifact-signing`**.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    artifact_signing_private_trust_root: Vec<PathBuf>,
+    /// Accept Artifact Signing signatures without a timestamp (validated at the current time).
+    /// Implies **`--artifact-signing`**.
+    #[arg(long)]
+    artifact_signing_allow_missing_timestamp: bool,
+}
+
+impl TrustVerifySharedArgs {
+    fn artifact_signing_policy(&self) -> Result<Option<ArtifactSigningPolicy>> {
+        if !(self.artifact_signing
+            || !self.artifact_signing_publisher_id.is_empty()
+            || !self.artifact_signing_private_trust_root.is_empty()
+            || self.artifact_signing_allow_missing_timestamp)
+        {
+            return Ok(None);
+        }
+        let conflicts = [
+            (self.anchor_dir.is_some(), "--anchor-dir"),
+            (!self.trusted_ca.is_empty(), "--trusted-ca"),
+            (!self.additional_trusted_ca.is_empty(), "--additional-trusted-ca"),
+            (self.authroot_cab.is_some(), "--authroot-cab"),
+            (
+                self.expect_authroot_cab_sha256.is_some(),
+                "--expect-authroot-cab-sha256",
+            ),
+            (self.allow_loose_signing_cert, "--allow-loose-signing-cert"),
+        ];
+        if let Some((_, flag)) = conflicts.iter().find(|(set, _)| *set) {
+            return Err(anyhow!(
+                "{flag} cannot be combined with --artifact-signing: Artifact Signing pins its own roots (use --artifact-signing-private-trust-root for Private Trust)"
+            ));
+        }
+        Ok(Some(ArtifactSigningPolicy {
+            expected_publisher_ids: self.artifact_signing_publisher_id.clone(),
+            private_trust_root_files: self.artifact_signing_private_trust_root.clone(),
+            require_timestamp: !self.artifact_signing_allow_missing_timestamp,
+        }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -159,7 +213,12 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
         Some(s) => Some(parse_verification_date_ymd(s)?),
         None => None,
     };
-    let authroot_cab = resolve_authroot_cab_for_shared(a)?;
+    let artifact_signing = a.artifact_signing_policy()?;
+    let authroot_cab = if artifact_signing.is_some() {
+        None
+    } else {
+        resolve_authroot_cab_for_shared(a)?
+    };
     // When using authroot_cab, automatically enable AIA fetching so the chain builder
     // can download missing root certificates from intermediate cert AIA extensions.
     let effective_aia = a.online_aia || authroot_cab.is_some();
@@ -185,6 +244,7 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
             prefer_timestamp_signing_time: a.prefer_timestamp_signing_time,
             require_valid_timestamp: a.require_valid_timestamp,
         },
+        artifact_signing,
     })
 }
 
@@ -1989,6 +2049,12 @@ fn parse_sha256_hex(s: &str) -> Result<[u8; 32]> {
 }
 
 fn print_trust_ok(prefix: &str, report: &TrustVerifyPeReport) {
+    if !report.artifact_signing.is_empty() {
+        for sig in &report.artifact_signing {
+            println!("{prefix}: ok — Artifact Signing {sig}");
+        }
+        return;
+    }
     println!(
         "{prefix}: ok — verified {} PKCS#7 entr(y/ies); {} anchor thumbprint(s)",
         report.pkcs7_entries_verified, report.anchor_thumbprints
@@ -2026,6 +2092,15 @@ enum Command {
         path: PathBuf,
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
+    },
+    /// Print the **Azure Artifact Signing** publisher ID (certificate profile identity EKU) as JSON.
+    ///
+    /// Reads the signer certificate(s) of a PE, a raw PKCS#7, or a single certificate (PEM/DER). No
+    /// trust checks; use **`trust-verify-pe --artifact-signing`** to validate the signature.
+    ArtifactSigningPublisherId {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = ArtifactSigningIdInput::Pe)]
+        input: ArtifactSigningIdInput,
     },
     /// Same trust pipeline as **`trust-verify-pe`** after CAB SIP digest consistency (**`verify-cab`**).
     TrustVerifyCab {
@@ -2974,6 +3049,13 @@ enum Command {
 enum InspectInputKind {
     Pe,
     Pkcs7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ArtifactSigningIdInput {
+    Pe,
+    Pkcs7,
+    Cert,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -4268,6 +4350,21 @@ where
             let report = trust_verify_pe_bytes(&bytes, &opts)
                 .with_context(|| format!("trust-verify-pe {}", path.display()))?;
             print_trust_ok("trust-verify-pe", &report);
+        }
+        Command::ArtifactSigningPublisherId { path, input } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let json = match input {
+                ArtifactSigningIdInput::Pe => {
+                    serde_json::to_string_pretty(&artifact_signing_identities_from_pe(&bytes)?)?
+                }
+                ArtifactSigningIdInput::Pkcs7 => serde_json::to_string_pretty(
+                    &artifact_signing_identity_from_pkcs7_der(&bytes)?,
+                )?,
+                ArtifactSigningIdInput::Cert => serde_json::to_string_pretty(
+                    &artifact_signing_identity_from_cert_bytes(&bytes)?,
+                )?,
+            };
+            println!("{json}");
         }
         Command::TrustVerifyCab { path, shared } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;

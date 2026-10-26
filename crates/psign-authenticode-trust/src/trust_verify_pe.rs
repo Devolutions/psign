@@ -1,9 +1,12 @@
 //! Portable PE Authenticode **trust** verification: picky CMS + explicit anchors.
 
 use crate::anchor::AnchorStore;
+use crate::artifact_signing::{
+    ArtifactSigningPolicy, ArtifactSigningVerifiedSignature, verify_artifact_signing_pkcs7,
+};
 use crate::chain::{issuer_chain_excluding_leaf, merge_unique_certs, terminal_root_cert};
 use crate::policy::{AuthenticodeTrustPolicy, OnlineTrustOptions};
-use crate::trust_pkcs7::verify_authenticode_pkcs7_trust;
+use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding};
 use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust;
 use anyhow::{Context, Result, anyhow};
 use picky::x509::certificate::Cert;
@@ -26,12 +29,84 @@ pub struct TrustVerifyPeOptions {
     pub verbose_chain: bool,
     pub online: OnlineTrustOptions,
     pub policy: AuthenticodeTrustPolicy,
+    /// Validate as Azure Artifact Signing: pinned Microsoft roots replace the anchors above.
+    pub artifact_signing: Option<ArtifactSigningPolicy>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TrustVerifyPeReport {
     pub pkcs7_entries_verified: usize,
     pub anchor_thumbprints: usize,
+    /// One entry per verified PKCS#7 when [`TrustVerifyPeOptions::artifact_signing`] is set.
+    pub artifact_signing: Vec<ArtifactSigningVerifiedSignature>,
+}
+
+impl TrustVerifyPeReport {
+    pub(crate) fn new(anchors: &AnchorStore) -> Self {
+        Self {
+            pkcs7_entries_verified: 0,
+            anchor_thumbprints: anchors.thumbprint_count(),
+            artifact_signing: Vec::new(),
+        }
+    }
+}
+
+/// Anchors for `opts`: [`load_trust_material`], or the pinned Microsoft roots when
+/// [`TrustVerifyPeOptions::artifact_signing`] is set (generic anchor inputs are then ignored).
+pub(crate) fn trust_material_for(opts: &TrustVerifyPeOptions) -> Result<(AnchorStore, Vec<Cert>)> {
+    if opts.artifact_signing.is_some() {
+        return crate::artifact_signing::public_trust_anchors();
+    }
+    load_trust_material(opts)
+}
+
+/// Trust-verify one PKCS#7 whose `digest` already matched the recomputed subject digest, applying
+/// either the generic anchor policy or [`TrustVerifyPeOptions::artifact_signing`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_pkcs7_entry(
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    digest: &[u8],
+    binding: Pkcs7DigestBinding,
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    opts: &TrustVerifyPeOptions,
+    report: &mut TrustVerifyPeReport,
+) -> Result<()> {
+    if let Some(policy) = &opts.artifact_signing {
+        report.artifact_signing.push(verify_artifact_signing_pkcs7(
+            pkcs7_der,
+            pkcs7_index,
+            digest,
+            binding,
+            policy,
+            opts,
+        )?);
+    } else {
+        let verification_instant = resolve_verification_instant_for_pkcs7_with_trust(
+            pkcs7_der,
+            &opts.policy,
+            opts.verification_instant_override.as_ref(),
+            anchors,
+            anchor_certs,
+            &opts.online,
+            opts.verbose_chain,
+        )?;
+        verify_pkcs7_trust_with_binding(
+            binding,
+            pkcs7_der,
+            pkcs7_index,
+            digest,
+            anchors,
+            anchor_certs,
+            &opts.policy,
+            &opts.online,
+            &verification_instant,
+            opts.verbose_chain,
+        )?;
+    }
+    report.pkcs7_entries_verified += 1;
+    Ok(())
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -90,16 +165,22 @@ pub fn trust_verify_pe_bytes(
     pe_bytes: &[u8],
     opts: &TrustVerifyPeOptions,
 ) -> Result<TrustVerifyPeReport> {
-    let (anchor_store, anchor_certs) = load_trust_material(opts)?;
+    let (anchor_store, anchor_certs) = trust_material_for(opts)?;
+    let mut report = TrustVerifyPeReport::new(&anchor_store);
 
-    let pkcs7_verified = for_each_pe_pkcs7_signed_data(pe_bytes, |idx, pkcs7_der| {
-        verify_one_pkcs7(pe_bytes, idx, pkcs7_der, &anchor_store, &anchor_certs, opts)
+    for_each_pe_pkcs7_signed_data(pe_bytes, |idx, pkcs7_der| {
+        verify_one_pkcs7(
+            pe_bytes,
+            idx,
+            pkcs7_der,
+            &anchor_store,
+            &anchor_certs,
+            opts,
+            &mut report,
+        )
     })?;
 
-    Ok(TrustVerifyPeReport {
-        pkcs7_entries_verified: pkcs7_verified,
-        anchor_thumbprints: anchor_store.thumbprint_count(),
-    })
+    Ok(report)
 }
 
 fn verify_one_pkcs7(
@@ -109,6 +190,7 @@ fn verify_one_pkcs7(
     anchors: &AnchorStore,
     anchor_certs: &[Cert],
     opts: &TrustVerifyPeOptions,
+    report: &mut TrustVerifyPeReport,
 ) -> Result<()> {
     let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
     let sig_authenticode = authenticode::AuthenticodeSignature::from_bytes(normalized.as_ref())
@@ -122,25 +204,15 @@ fn verify_one_pkcs7(
         ));
     }
 
-    let verification_instant = resolve_verification_instant_for_pkcs7_with_trust(
-        pkcs7_der,
-        &opts.policy,
-        opts.verification_instant_override.as_ref(),
-        anchors,
-        anchor_certs,
-        &opts.online,
-        opts.verbose_chain,
-    )?;
-    verify_authenticode_pkcs7_trust(
+    verify_pkcs7_entry(
         pkcs7_der,
         pkcs7_index,
         pe_digest.as_slice(),
+        Pkcs7DigestBinding::AuthenticodeIndirect,
         anchors,
         anchor_certs,
-        &opts.policy,
-        &opts.online,
-        &verification_instant,
-        opts.verbose_chain,
+        opts,
+        report,
     )
 }
 
