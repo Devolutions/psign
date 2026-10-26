@@ -1330,41 +1330,45 @@ impl SigningProvider {
     ) -> Result<Vec<u8>> {
         let econtent_der = der_encode_octet_string(content)?;
         let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
-        if let SigningProvider::Local(local) = self {
-            let signed_attrs = pkcs7::pkcs7_signed_attrs(
+        match self {
+            SigningProvider::Local(local) => {
+                let signed_attrs = pkcs7::pkcs7_signed_attrs(
+                    id_data,
+                    &econtent_der,
+                    digest_algorithm,
+                    pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+                    Some(&local.signer_cert),
+                )?;
+                let attrs_der = signed_attrs
+                    .to_der()
+                    .context("encode NuGet signed attributes")?;
+                let signature = sign_xml_signed_info_rsa(
+                    vsix_algorithm_from_authenticode_digest(digest_algorithm),
+                    &attrs_der,
+                    &local.private_key,
+                )?;
+                pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+                    pkcs7::Pkcs7SignedDataDerInput {
+                        econtent_type: id_data,
+                        econtent_der: &econtent_der,
+                        digest_algorithm,
+                        signer_cert: local.signer_cert.clone(),
+                        chain_certs: local.chain.clone(),
+                        encrypted_digest: &signature,
+                        content_mode: pkcs7::Pkcs7ContentMode::Attached,
+                        signed_attrs,
+                    },
+                )
+            }
+            // Remote providers exist only with their features.
+            #[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
+            _ => self.create_pkcs7_signed_data(
                 id_data,
                 &econtent_der,
                 digest_algorithm,
-                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
-                Some(&local.signer_cert),
-            )?;
-            let attrs_der = signed_attrs
-                .to_der()
-                .context("encode NuGet signed attributes")?;
-            let signature = sign_xml_signed_info_rsa(
-                vsix_algorithm_from_authenticode_digest(digest_algorithm),
-                &attrs_der,
-                &local.private_key,
-            )?;
-            return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
-                pkcs7::Pkcs7SignedDataDerInput {
-                    econtent_type: id_data,
-                    econtent_der: &econtent_der,
-                    digest_algorithm,
-                    signer_cert: local.signer_cert.clone(),
-                    chain_certs: local.chain.clone(),
-                    encrypted_digest: &signature,
-                    content_mode: pkcs7::Pkcs7ContentMode::Attached,
-                    signed_attrs,
-                },
-            );
+                pkcs7::Pkcs7ContentMode::Attached,
+            ),
         }
-        self.create_pkcs7_signed_data(
-            id_data,
-            &econtent_der,
-            digest_algorithm,
-            pkcs7::Pkcs7ContentMode::Attached,
-        )
     }
 
     fn create_pkcs7_signed_data(
