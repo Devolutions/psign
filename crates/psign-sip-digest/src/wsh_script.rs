@@ -11,7 +11,9 @@
 //! ANSI-only or exotic encodings.
 
 use crate::pe_digest::PeAuthenticodeHashKind;
-use crate::ps_script::{file_utf16_units, hash_payload, utf16le_bytes};
+use crate::ps_script::{
+    ScriptAuthenticodeDigestReport, file_utf16_units, hash_payload, utf16le_bytes,
+};
 use anyhow::{Result, anyhow};
 use authenticode::AuthenticodeSignature;
 use base64::Engine;
@@ -189,6 +191,11 @@ fn extract_pkcs7_der(units: &[u16], kind: WshKind) -> Result<Vec<u8>> {
 }
 
 pub fn verify_wsh_digest_consistency(raw: &[u8], ext: &str) -> Result<()> {
+    wsh_digest_report(raw, ext).map(|_| ())
+}
+
+/// Verify the WSH digest binding and return the PKCS#7 with embedded and recomputed digests.
+pub fn wsh_digest_report(raw: &[u8], ext: &str) -> Result<ScriptAuthenticodeDigestReport> {
     let kind =
         wsh_kind_from_ext(ext).ok_or_else(|| anyhow!("not a WSH script extension .{ext}"))?;
     let mut units = file_utf16_units(raw);
@@ -209,7 +216,11 @@ pub fn verify_wsh_digest_consistency(raw: &[u8], ext: &str) -> Result<()> {
             "WSH Authenticode digest mismatch (wshext strip + offset dword vs PKCS#7)"
         ));
     }
-    Ok(())
+    Ok(ScriptAuthenticodeDigestReport {
+        embedded_digest: embedded.to_vec(),
+        computed_digest: computed.to_vec(),
+        pkcs7_der: pkcs7,
+    })
 }
 
 #[cfg(test)]

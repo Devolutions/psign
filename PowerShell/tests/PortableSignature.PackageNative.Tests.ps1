@@ -185,6 +185,23 @@ Describe 'Portable PowerShell package-native coverage' {
         $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'NuGet'
         $inspected.Status | Should -Be 'Valid'
+
+        # NuGet clients require the signature content embedded in the CMS (not detached).
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($work)
+        try {
+            $stream = $zip.GetEntry('.signature.p7s').Open()
+            $buffer = [System.IO.MemoryStream]::new()
+            $stream.CopyTo($buffer)
+            $stream.Dispose()
+        }
+        finally {
+            $zip.Dispose()
+        }
+        $cms = [System.Security.Cryptography.Pkcs.SignedCms]::new()
+        $cms.Decode($buffer.ToArray())
+        $cms.Detached | Should -BeFalse
+        [System.Text.Encoding]::UTF8.GetString($cms.ContentInfo.Content) | Should -BeLike 'Version:1*-Hash:*'
     }
 
     It 'signs and inspects symbol NuGet packages' {
@@ -209,6 +226,9 @@ Describe 'Portable PowerShell package-native coverage' {
         $inspected = Get-PsignSignature -LiteralPath $work
         $inspected.Format | Should -Be 'Vsix'
         $inspected.Status | Should -Be 'Valid'
+        # Standard OPC XMLDSig, not the legacy psign layout.
+        $inspected.StatusMessage | Should -BeLike 'VSIX OPC XMLDSig signature*'
+        $inspected.SignerCertificate | Should -Not -BeNullOrEmpty
     }
 
     It 'signs and inspects ClickOnce XML manifests for .manifest, .application, and .vsto' -TestCases @(

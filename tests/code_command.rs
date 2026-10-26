@@ -1161,7 +1161,7 @@ fn code_rejects_clickonce_manifest_timestamping_explicitly() {
 }
 
 #[test]
-fn code_rejects_vsix_timestamping_explicitly() {
+fn code_timestamps_vsix_signature_through_configured_tsa() {
     let temp = tempfile::tempdir().unwrap();
     let base = temp.path();
     let input = base.join("sample.vsix");
@@ -1191,8 +1191,9 @@ fn code_rejects_vsix_timestamping_explicitly() {
         ])
         .arg(&output)
         .arg("sample.vsix");
+    // The VSIX `SignatureValue` is sent to the TSA (nothing listens on port 9).
     cmd.assert().failure().stderr(predicate::str::contains(
-        "VSIX XMLDSig timestamping is not implemented",
+        "timestamp VSIX signature for sample.vsix",
     ));
 }
 
@@ -1718,7 +1719,11 @@ fn code_signs_nested_nupkg_before_outer_vsix() {
         &input,
         &[
             ("extension.vsixmanifest", b"<PackageManifest/>".as_slice()),
-            ("[Content_Types].xml", b"<Types/>".as_slice()),
+            (
+                "[Content_Types].xml",
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="vsixmanifest" ContentType="text/xml"/><Default Extension="nupkg" ContentType="application/octet-stream"/></Types>"#
+                    .as_slice(),
+            ),
             (
                 "packages/sample.nupkg",
                 &std::fs::read(

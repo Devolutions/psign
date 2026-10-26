@@ -8,7 +8,11 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use psign_authenticode_trust::{
-    AuthenticodeTrustPolicy, TrustVerifyPeOptions, TrustVerifyPeReport,
+    ArtifactSigningPolicy, AuthenticodeTrustPolicy,
+    artifact_signing::{
+        artifact_signing_identities_from_pe, artifact_signing_identity_from_cert_bytes,
+        artifact_signing_identity_from_pkcs7_der,
+    }, TrustVerifyPeOptions, TrustVerifyPeReport,
     inspect_authenticode_pkcs7_der, inspect_pe_authenticode, parse_verification_date_ymd,
     policy::{OnlineTrustOptions, RevocationMode},
     trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_detached_bytes,
@@ -131,6 +135,56 @@ struct TrustVerifySharedArgs {
     /// Maximum bytes accepted for an online issuer certificate download.
     #[arg(long, default_value_t = 1024 * 1024)]
     online_max_download_bytes: usize,
+    /// Validate as **Azure Artifact Signing**: identity EKU, signer and timestamp chains pinned to
+    /// Microsoft Identity Verification Root CA 2020 (AuthRoot is not consulted), validity at the
+    /// trusted timestamp.
+    #[arg(long)]
+    artifact_signing: bool,
+    /// Require this Artifact Signing publisher ID (certificate profile EKU suffix); repeatable,
+    /// any match passes. Implies **`--artifact-signing`**.
+    #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+    artifact_signing_publisher_id: Vec<String>,
+    /// Subscriber root for Private Trust / Public Trust Test signatures (PEM or DER); repeatable.
+    /// Implies **`--artifact-signing`**.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    artifact_signing_private_trust_root: Vec<PathBuf>,
+    /// Accept Artifact Signing signatures without a timestamp (validated at the current time).
+    /// Implies **`--artifact-signing`**.
+    #[arg(long)]
+    artifact_signing_allow_missing_timestamp: bool,
+}
+
+impl TrustVerifySharedArgs {
+    fn artifact_signing_policy(&self) -> Result<Option<ArtifactSigningPolicy>> {
+        if !(self.artifact_signing
+            || !self.artifact_signing_publisher_id.is_empty()
+            || !self.artifact_signing_private_trust_root.is_empty()
+            || self.artifact_signing_allow_missing_timestamp)
+        {
+            return Ok(None);
+        }
+        let conflicts = [
+            (self.anchor_dir.is_some(), "--anchor-dir"),
+            (!self.trusted_ca.is_empty(), "--trusted-ca"),
+            (!self.additional_trusted_ca.is_empty(), "--additional-trusted-ca"),
+            (self.authroot_cab.is_some(), "--authroot-cab"),
+            (
+                self.expect_authroot_cab_sha256.is_some(),
+                "--expect-authroot-cab-sha256",
+            ),
+            (self.allow_loose_signing_cert, "--allow-loose-signing-cert"),
+        ];
+        if let Some((_, flag)) = conflicts.iter().find(|(set, _)| *set) {
+            return Err(anyhow!(
+                "{flag} cannot be combined with --artifact-signing: Artifact Signing pins its own roots (use --artifact-signing-private-trust-root for Private Trust)"
+            ));
+        }
+        Ok(Some(ArtifactSigningPolicy {
+            expected_publisher_ids: self.artifact_signing_publisher_id.clone(),
+            private_trust_root_files: self.artifact_signing_private_trust_root.clone(),
+            require_timestamp: !self.artifact_signing_allow_missing_timestamp,
+        }))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -159,7 +213,12 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
         Some(s) => Some(parse_verification_date_ymd(s)?),
         None => None,
     };
-    let authroot_cab = resolve_authroot_cab_for_shared(a)?;
+    let artifact_signing = a.artifact_signing_policy()?;
+    let authroot_cab = if artifact_signing.is_some() {
+        None
+    } else {
+        resolve_authroot_cab_for_shared(a)?
+    };
     // When using authroot_cab, automatically enable AIA fetching so the chain builder
     // can download missing root certificates from intermediate cert AIA extensions.
     let effective_aia = a.online_aia || authroot_cab.is_some();
@@ -185,6 +244,7 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
             prefer_timestamp_signing_time: a.prefer_timestamp_signing_time,
             require_valid_timestamp: a.require_valid_timestamp,
         },
+        artifact_signing,
     })
 }
 
@@ -1989,6 +2049,12 @@ fn parse_sha256_hex(s: &str) -> Result<[u8; 32]> {
 }
 
 fn print_trust_ok(prefix: &str, report: &TrustVerifyPeReport) {
+    if !report.artifact_signing.is_empty() {
+        for sig in &report.artifact_signing {
+            println!("{prefix}: ok — Artifact Signing {sig}");
+        }
+        return;
+    }
     println!(
         "{prefix}: ok — verified {} PKCS#7 entr(y/ies); {} anchor thumbprint(s)",
         report.pkcs7_entries_verified, report.anchor_thumbprints
@@ -2027,6 +2093,19 @@ enum Command {
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
     },
+    /// Print the **Azure Artifact Signing** publisher ID (certificate profile identity EKU).
+    ///
+    /// Reads the signer certificate(s) of a PE, a raw PKCS#7, or a single certificate (PEM/DER). No
+    /// trust checks; use **`trust-verify-pe --artifact-signing`** to validate the signature.
+    /// **`--format publisher-id`** prints only the publisher ID (one line per signature) and fails when the
+    /// signer has none.
+    ArtifactSigningPublisherId {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value_t = ArtifactSigningIdInput::Pe)]
+        input: ArtifactSigningIdInput,
+        #[arg(long, value_enum, default_value_t = ArtifactSigningIdFormat::Json)]
+        format: ArtifactSigningIdFormat,
+    },
     /// Same trust pipeline as **`trust-verify-pe`** after CAB SIP digest consistency (**`verify-cab`**).
     TrustVerifyCab {
         path: PathBuf,
@@ -2060,6 +2139,30 @@ enum Command {
     },
     /// Custom ZIP Authenticode comment signature: verify ZIP digest binding plus PKCS#7 chain to anchors.
     TrustVerifyZip {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// PowerShell-class (`.ps1`, `.psm1`, …) or WSH (`.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`) script SIP digest plus PKCS#7 chain to anchors.
+    TrustVerifyScript {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Cleartext MSIX / AppX (and bundle) APPX SIP digest (**`verify-msix`**) plus PKCS#7 chain to anchors.
+    TrustVerifyMsix {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// NuGet `.nupkg` / `.snupkg` author signature: package hash over the exact unsigned bytes plus `.signature.p7s` chain to anchors.
+    TrustVerifyNupkg {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// VSIX OPC XML signature: C14N `SignedInfo`, part digests and coverage, `SignatureValue`, `<EncodedTime>` RFC 3161 timestamp, plus signer chain to anchors.
+    TrustVerifyVsix {
         path: PathBuf,
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
@@ -2788,7 +2891,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         overwrite: bool,
     },
-    /// Write deterministic VSIX XMLDSig Reference/DigestValue XML for package parts.
+    /// Write the unsigned OPC signature skeleton (package manifest + SignedInfo) for review or `vsix-verify-signature-reference-xml`.
     VsixSignatureReferenceXml {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
@@ -2796,7 +2899,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
-    /// Create deterministic VSIX XMLDSig XML with local RSA/SHA-2 SignatureValue.
+    /// Create OPC XMLDSig XML (System.IO.Packaging layout, package-derived SignatureTime) with a local RSA/SHA-2 SignatureValue.
     VsixSignatureXml {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
@@ -2837,7 +2940,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
-    /// Create and embed deterministic VSIX XMLDSig XML with local RSA/SHA-2 SignatureValue.
+    /// Sign a VSIX with a local RSA/SHA-2 key: OPC XMLDSig verifiable by System.IO.Packaging / Visual Studio, optionally RFC3161-timestamped.
     VsixSign {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = VsixHashAlg::Sha256)]
@@ -2852,6 +2955,12 @@ enum Command {
         output: PathBuf,
         #[arg(long, default_value_t = false)]
         overwrite: bool,
+        /// RFC3161 timestamp URL; the token covers the `SignatureValue` and is stored as the OPC `<EncodedTime>` element.
+        #[arg(long = "timestamp-url", visible_alias = "tr")]
+        timestamp_url: Option<String>,
+        /// RFC3161 timestamp digest algorithm.
+        #[arg(long = "timestamp-digest", visible_alias = "td", value_enum)]
+        timestamp_digest: Option<HashAlg>,
     },
     /// Verify VSIX XMLDSig Reference/DigestValue XML against package parts.
     VsixVerifySignatureReferenceXml {
@@ -2974,6 +3083,21 @@ enum Command {
 enum InspectInputKind {
     Pe,
     Pkcs7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ArtifactSigningIdInput {
+    Pe,
+    Pkcs7,
+    Cert,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ArtifactSigningIdFormat {
+    /// Identity details as JSON.
+    Json,
+    /// Only the publisher ID (for pinning), one line per signature.
+    PublisherId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -3138,6 +3262,77 @@ fn xml_signed_info_remote_prehash(
         vsix::VsixHashAlgorithm::Sha256 => Sha256::digest(signed_info).to_vec(),
         vsix::VsixHashAlgorithm::Sha384 => Sha384::digest(signed_info).to_vec(),
         vsix::VsixHashAlgorithm::Sha512 => Sha512::digest(signed_info).to_vec(),
+    }
+}
+
+/// Standard OPC XMLDSig verification of a signed VSIX (part digests, coverage, `SignatureValue`),
+/// optionally requiring a specific signer certificate and applying the shared trust options.
+/// Returns the referenced part count and, when trust ran, the anchor count.
+fn verify_vsix_package_signature(
+    package: &[u8],
+    expected_cert: Option<&[u8]>,
+    shared: &TrustVerifySharedArgs,
+) -> Result<(usize, Option<usize>)> {
+    let signature = psign_authenticode_trust::verify_vsix_signature_bytes(package)?;
+    if let Some(expected) = expected_cert {
+        let expected = psign_authenticode_trust::anchor::parse_cert_bytes(expected)
+            .context("parse expected VSIX signer certificate")?
+            .to_der()
+            .map_err(|e| anyhow!("encode expected VSIX signer certificate: {e}"))?;
+        if expected != signature.signer_certificate_der {
+            return Err(anyhow!(
+                "VSIX SignatureValue was not produced by the expected signer certificate"
+            ));
+        }
+    }
+    let trust = if trust_verify_args_present(shared) {
+        let opts = trust_verify_options_from_shared(shared)?;
+        let report = psign_authenticode_trust::trust_verify_vsix_bytes(package, &opts)?;
+        Some(report.anchor_thumbprints)
+    } else {
+        None
+    };
+    Ok((signature.reference_count, trust))
+}
+
+/// Add an RFC3161 `<EncodedTime>` timestamp over the signature's `SignatureValue` when requested.
+fn vsix_timestamp_if_requested(
+    signature_xml: Vec<u8>,
+    timestamp_url: Option<String>,
+    timestamp_digest: Option<HashAlg>,
+) -> Result<Vec<u8>> {
+    match (timestamp_url, timestamp_digest) {
+        (Some(url), Some(timestamp_digest)) => {
+            #[cfg(feature = "timestamp-http")]
+            {
+                let signature_value = vsix::signature_value_from_signature_xml(&signature_xml)?;
+                let imprint = digest_bytes_for_hash_alg(timestamp_digest, &signature_value);
+                let response = post_rfc3161_timestamp_request(&url, timestamp_digest, &imprint)
+                    .context("vsix-sign: RFC3161 timestamp request")?;
+                let parsed = parse_time_stamp_resp_der(&response)
+                    .ok_or_else(|| anyhow!("could not parse TimeStampResp DER from TSA response"))?;
+                if !parsed.pki_status.granted() {
+                    return Err(anyhow!(
+                        "TimeStampResp status is not granted (status={})",
+                        parsed.pki_status.as_raw_integer()
+                    ));
+                }
+                let token = parsed
+                    .time_stamp_token
+                    .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?;
+                vsix::add_signature_timestamp(&signature_xml, token)
+            }
+            #[cfg(not(feature = "timestamp-http"))]
+            {
+                let _ = (url, timestamp_digest);
+                Err(anyhow!(
+                    "vsix-sign RFC3161 timestamping requires the timestamp-http feature"
+                ))
+            }
+        }
+        (Some(_), None) => Err(anyhow!("vsix-sign requires --timestamp-digest with --timestamp-url")),
+        (None, Some(_)) => Err(anyhow!("vsix-sign requires --timestamp-url with --timestamp-digest")),
+        (None, None) => Ok(signature_xml),
     }
 }
 
@@ -4268,6 +4463,86 @@ where
             let report = trust_verify_pe_bytes(&bytes, &opts)
                 .with_context(|| format!("trust-verify-pe {}", path.display()))?;
             print_trust_ok("trust-verify-pe", &report);
+        }
+        Command::ArtifactSigningPublisherId {
+            path,
+            input,
+            format: ArtifactSigningIdFormat::PublisherId,
+        } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let ids: Vec<String> = match input {
+                ArtifactSigningIdInput::Pe => artifact_signing_identities_from_pe(&bytes)?
+                    .into_iter()
+                    .filter_map(|signer| signer.identity)
+                    .map(|identity| identity.publisher_id)
+                    .collect(),
+                ArtifactSigningIdInput::Pkcs7 => artifact_signing_identity_from_pkcs7_der(&bytes)?
+                    .map(|identity| identity.publisher_id)
+                    .into_iter()
+                    .collect(),
+                ArtifactSigningIdInput::Cert => artifact_signing_identity_from_cert_bytes(&bytes)?
+                    .map(|identity| identity.publisher_id)
+                    .into_iter()
+                    .collect(),
+            };
+            if ids.is_empty() {
+                return Err(anyhow!(
+                    "{}: no Azure Artifact Signing identity EKU (1.3.6.1.4.1.311.97.*) on the signer",
+                    path.display()
+                ));
+            }
+            for id in ids {
+                println!("{id}");
+            }
+        }
+        Command::ArtifactSigningPublisherId { path, input, .. } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let json = match input {
+                ArtifactSigningIdInput::Pe => {
+                    serde_json::to_string_pretty(&artifact_signing_identities_from_pe(&bytes)?)?
+                }
+                ArtifactSigningIdInput::Pkcs7 => serde_json::to_string_pretty(
+                    &artifact_signing_identity_from_pkcs7_der(&bytes)?,
+                )?,
+                ArtifactSigningIdInput::Cert => serde_json::to_string_pretty(
+                    &artifact_signing_identity_from_cert_bytes(&bytes)?,
+                )?,
+            };
+            println!("{json}");
+        }
+        Command::TrustVerifyScript { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let ext = script_ext_from_path(&path)?;
+            let report = psign_authenticode_trust::trust_verify_script_bytes(&bytes, ext, &opts)
+                .with_context(|| format!("trust-verify-script {}", path.display()))?;
+            print_trust_ok("trust-verify-script", &report);
+        }
+        Command::TrustVerifyMsix { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let report = psign_authenticode_trust::trust_verify_msix_bytes(&bytes, &ext, &opts)
+                .with_context(|| format!("trust-verify-msix {}", path.display()))?;
+            print_trust_ok("trust-verify-msix", &report);
+        }
+        Command::TrustVerifyNupkg { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = psign_authenticode_trust::trust_verify_nuget_bytes(&bytes, &opts)
+                .with_context(|| format!("trust-verify-nupkg {}", path.display()))?;
+            print_trust_ok("trust-verify-nupkg", &report);
+        }
+        Command::TrustVerifyVsix { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = psign_authenticode_trust::trust_verify_vsix_bytes(&bytes, &opts)
+                .with_context(|| format!("trust-verify-vsix {}", path.display()))?;
+            print_trust_ok("trust-verify-vsix", &report);
         }
         Command::TrustVerifyCab { path, shared } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -5847,10 +6122,15 @@ where
                 std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
                 .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let signed_info = vsix::signed_info_xml_path(&path, algorithm)
+            let template = vsix::signature_template_path(
+                &path,
+                algorithm,
+                vsix::VsixSigningTime::FromPackage,
+            )
                 .with_context(|| format!("vsix-signature-xml {}", path.display()))?;
-            let signature = sign_xml_signed_info(algorithm, private_key, &signed_info)?;
-            let xml = vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
+            let signature = sign_xml_signed_info(algorithm, private_key, &template.signed_info)?;
+            let xml = template
+                .signature_xml(&signature, Some(&cert_bytes))
                 .into_bytes();
             match output {
                 Some(path) => {
@@ -5888,12 +6168,10 @@ where
                 .with_context(|| format!("parse signer certificate {}", cert.display()))?;
             let signature_bytes = std::fs::read(&signature)
                 .with_context(|| format!("read {}", signature.display()))?;
-            let signed_info = vsix::signed_info_xml_path(&path, algorithm).with_context(|| {
-                format!("vsix-signature-xml-from-signature {}", path.display())
-            })?;
-            let xml =
-                vsix::signature_xml_from_signed_info(&signed_info, &signature_bytes, Some(&cert_bytes))
-                    .into_bytes();
+            let xml = vsix::signature_xml_path(&path, algorithm, &signature_bytes, Some(&cert_bytes))
+                .with_context(|| {
+                    format!("vsix-signature-xml-from-signature {}", path.display())
+                })?;
             match output {
                 Some(path) => {
                     std::fs::write(&path, &xml).with_context(|| format!("write {}", path.display()))?
@@ -5910,6 +6188,8 @@ where
             key,
             output,
             overwrite,
+            timestamp_url,
+            timestamp_digest,
         } => {
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
             let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
@@ -5919,17 +6199,20 @@ where
                 std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
                 .with_context(|| format!("parse RSA private key {}", key.display()))?;
-            let signed_info = vsix::signed_info_xml_path(&path, algorithm)
-                .with_context(|| format!("vsix-sign {}", path.display()))?;
-            let signature = sign_xml_signed_info(algorithm, private_key, &signed_info)?;
-            let xml =
-                vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
-                    .into_bytes();
+            let template =
+                vsix::signature_template_path(&path, algorithm, vsix::VsixSigningTime::Now)
+            .with_context(|| format!("vsix-sign {}", path.display()))?;
+            let signature = sign_xml_signed_info(algorithm, private_key, &template.signed_info)?;
+            let xml = template
+                .signature_xml(&signature, Some(&cert_bytes))
+                .into_bytes();
+            let xml = vsix_timestamp_if_requested(xml, timestamp_url, timestamp_digest)?;
             vsix::embed_signature_xml_path(&path, &output, &xml, overwrite)
                 .with_context(|| format!("vsix-sign embed signature XML into {}", output.display()))?;
             println!("output={}", output.display());
             println!("signature_xml_part={}", vsix::DEFAULT_VSIX_SIGNATURE_PART);
             println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
+            println!("reference_count={}", template.reference_count());
             println!("signature_xml_len={}", xml.len());
         }
         Command::VsixVerifySignatureReferenceXml {
@@ -5961,19 +6244,15 @@ where
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
             let xml = std::fs::read(&signature_xml)
                 .with_context(|| format!("read {}", signature_xml.display()))?;
-            let references = vsix::verify_signature_reference_xml_path(&path, &xml, algorithm)
+            let package =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let mut embedded = std::io::Cursor::new(Vec::new());
+            vsix::embed_signature_xml(std::io::Cursor::new(package), &mut embedded, &xml, true)
                 .with_context(|| format!("vsix-verify-signature-xml {}", path.display()))?;
             let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            let signer_cert = rdp::parse_certificate(&cert_bytes)
-                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
-            let signed_info = vsix::signed_info_xml_from_signature_xml(&xml)?;
-            let signature = vsix::signature_value_from_signature_xml(&xml)?;
-            verify_xml_signed_info(algorithm, &signer_cert, &signed_info, &signature)?;
-            let trust_anchor_count = if trust_verify_args_present(&shared) {
-                Some(verify_xml_signer_certificate_trust(&cert_bytes, &shared)?)
-            } else {
-                None
-            };
+            let (references, trust_anchor_count) =
+                verify_vsix_package_signature(&embedded.into_inner(), Some(&cert_bytes), &shared)
+                    .with_context(|| format!("vsix-verify-signature-xml {}", path.display()))?;
             println!("reference_digest_algorithm={}", vsix_hash_alg_label(algorithm));
             println!("reference_count={references}");
             println!("reference_digest_match=yes");
@@ -5990,26 +6269,19 @@ where
             shared,
         } => {
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
-            let xml = vsix::extract_signature_xml_path(&path)
+            let package =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            vsix::extract_signature_xml(std::io::Cursor::new(&package))
                 .with_context(|| format!("vsix-verify-signature {}", path.display()))?;
-            let references = vsix::verify_signature_reference_xml_path(&path, &xml, algorithm)
-                .with_context(|| format!("vsix-verify-signature {}", path.display()))?;
-            let cert_bytes = match cert {
-                Some(cert) => std::fs::read(&cert)
-                    .with_context(|| format!("read {}", cert.display()))?,
-                None => vsix::signer_certificate_from_signature_xml(&xml)
-                    .context("read embedded VSIX signer certificate")?,
+            let expected_cert = match cert {
+                Some(cert) => Some(
+                    std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?,
+                ),
+                None => None,
             };
-            let signer_cert =
-                rdp::parse_certificate(&cert_bytes).context("parse VSIX signer certificate")?;
-            let signed_info = vsix::signed_info_xml_from_signature_xml(&xml)?;
-            let signature = vsix::signature_value_from_signature_xml(&xml)?;
-            verify_xml_signed_info(algorithm, &signer_cert, &signed_info, &signature)?;
-            let trust_anchor_count = if trust_verify_args_present(&shared) {
-                Some(verify_xml_signer_certificate_trust(&cert_bytes, &shared)?)
-            } else {
-                None
-            };
+            let (references, trust_anchor_count) =
+                verify_vsix_package_signature(&package, expected_cert.as_deref(), &shared)
+                    .with_context(|| format!("vsix-verify-signature {}", path.display()))?;
             println!("vsix-verify-signature: ok");
             println!("signature_xml_present=yes");
             println!("signature_xml_part={}", vsix::DEFAULT_VSIX_SIGNATURE_PART);

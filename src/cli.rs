@@ -531,7 +531,7 @@ pub struct ArtifactSigningSubmitArgs {
     pub endpoint_base_url: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct VerifyArgs {
     /// Verification policy mode.
     #[arg(long, value_enum, default_value_t = VerifyPolicy::Default)]
@@ -695,6 +695,24 @@ pub struct VerifyArgs {
     /// Portable trust: maximum bytes accepted for online issuer downloads.
     #[arg(long, default_value_t = 1024 * 1024)]
     pub online_max_download_bytes: usize,
+    /// Require an Azure Artifact Signing signature: identity EKU, signer and timestamp chains pinned
+    /// to Microsoft Identity Verification Root CA 2020, validity at the trusted timestamp. Same
+    /// check in Windows and portable modes (Windows mode runs it after WinVerifyTrust, using the
+    /// Authenticode `/pa` policy unless `--policy` says otherwise).
+    #[arg(long)]
+    pub artifact_signing: bool,
+    /// Require this Artifact Signing publisher ID (certificate profile EKU suffix); repeatable, any
+    /// match passes. Implies `--artifact-signing`.
+    #[arg(long, value_name = "ID", action = clap::ArgAction::Append)]
+    pub artifact_signing_publisher_id: Vec<String>,
+    /// Subscriber root for Private Trust / Public Trust Test signatures (PEM or DER); repeatable.
+    /// Implies `--artifact-signing`.
+    #[arg(long, value_name = "PATH", action = clap::ArgAction::Append)]
+    pub artifact_signing_private_trust_root: Vec<PathBuf>,
+    /// Accept Artifact Signing signatures without a timestamp (validated at the current time).
+    /// Implies `--artifact-signing`.
+    #[arg(long)]
+    pub artifact_signing_allow_missing_timestamp: bool,
     /// Files to verify (native `<filename(s)>`; one or more trailing paths).
     #[arg(required = true)]
     pub files: Vec<PathBuf>,

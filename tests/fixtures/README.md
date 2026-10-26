@@ -52,6 +52,24 @@ committed signed vector, native-signing the unsigned source rows and verifying
 the fresh outputs with `psign`, and psign-signing the offline-supported subset
 from the current user's certificate store.
 
+`artifact-signing/private-trust/` holds a synthetic Artifact Signing *Private
+Trust* root (`root.cer`) and `sample.js`, `sample.msix`, `sample.nupkg`, and
+`sample.vsix` signed by a certificate with the identity EKU
+`1.3.6.1.4.1.311.97.1.3.1.11.22.33.44.55.66.77.88` (no timestamps). Regenerate
+with `pwsh -File scripts/ci/build-artifact-signing-private-trust-fixtures.ps1`
+after `cargo build`; keys are created in memory and discarded.
+
+`artifact-signing/` holds public material from a Devolutions build signed by
+Azure Artifact Signing (Public Trust): `psign-tool.pkcs7.der` is the PKCS#7
+extracted with `psign-tool portable extract-pe-pkcs7` (signer, intermediates,
+pinned root, and RFC 3161 countersignature), and `devolutions-signer.pem` is the
+72-hour signer certificate. The publisher ID is
+`285218949.549339218.252840042.443064405`.
+`microsoft-public-rsa-timestamping-ca-2020.{crl,pem}` are a real
+`sha384WithRSAEncryption` CRL (downloaded from the CA's CRL distribution point
+on 2026-10-26) and its issuer, used to test CRL signature verification. The
+signature never expires, so the test does not depend on CRL freshness.
+
 Vendored public test signing materials live in
 `tests/fixtures/devolutions-authenticode/`. They are sourced from
 `Devolutions/devolutions-authenticode` and are used by

@@ -21,6 +21,20 @@ LONG DESCRIPTION
             Sign files with a local certificate, PFX, portable cert store
             thumbprint, Azure Key Vault, or Azure Trusted Signing.
 
+    AZURE ARTIFACT SIGNING CMDLETS
+
+        Get-PsignArtifactSigningPublisherId
+            Read the Azure Artifact Signing publisher ID (certificate profile
+            EKU 1.3.6.1.4.1.311.97.*) from a signed file or a certificate.
+            Decoding only; no trust decision.
+
+        Test-PsignArtifactSigning
+            Validate an Azure Artifact Signing signature: identity EKU, signer
+            and timestamp chains pinned to Microsoft Identity Verification Root
+            Certificate Authority 2020, validity at the trusted timestamp, and
+            optionally one of the expected -PublisherId values. Get-PsignSignature
+            accepts the same policy through -ArtifactSigning* parameters.
+
     MODULE MANAGEMENT CMDLETS
 
         Test-PsignModule
@@ -113,6 +127,8 @@ EXAMPLES
 
 SEE ALSO
     Get-PsignSignature
+    Get-PsignArtifactSigningPublisherId
+    Test-PsignArtifactSigning
     Set-PsignSignature
     Test-PsignModule
     Protect-PsignModule

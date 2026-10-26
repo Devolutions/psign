@@ -48,6 +48,7 @@ On Linux/macOS, match **`ci-unix`** by running **`bash scripts/linux-portable-va
 | **`docs/linux-signing-pipelines.md`** | Linux / portable verify, REST hash-sign, and hybrid embed workflows. |
 | **`docs/migration-azuresigntool.md`** | Migration notes for AzureSignTool-style Key Vault signing. |
 | **`docs/migration-artifact-signing.md`** | Migration notes for Azure Artifact Signing / Trusted Signing. |
+| **`docs/artifact-signing-validation.md`** | Artifact Signing verification: publisher ID (certificate profile EKU) encoding, pinned Microsoft root CAs, validation algorithm. |
 | **`docs/roadmap-authenticode-linux.md`** | Unix/portable subset and **`psign-tool portable`**. |
 | **`docs/authenticode-trust-stack.md`** | Portable trust crate split (picky vs digest vs CMS). |
 | **`docs/authroot-linux-verify.md`** | Anchor dir + AuthRoot CAB usage on Linux. |

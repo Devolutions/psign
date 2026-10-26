@@ -56,7 +56,7 @@ Register-ArgumentCompleter -CommandName Set-PsignSignature, Protect-PsignModule 
     }
 }
 
-Register-ArgumentCompleter -CommandName Get-PsignSignature -ParameterName RevocationMode -ScriptBlock {
+Register-ArgumentCompleter -CommandName Get-PsignSignature, Test-PsignArtifactSigning -ParameterName RevocationMode -ScriptBlock {
     param($commandName, $parameterName, $wordToComplete, $commandAst, $fakeBoundParameters)
     @('Off', 'BestEffort', 'Require') | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)

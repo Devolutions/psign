@@ -1,8 +1,9 @@
 //! WIM/ESD Authenticode trust (ESD SIP digest + PKCS#7 chain).
 
-use crate::trust_pkcs7::verify_authenticode_pkcs7_trust;
-use crate::trust_verify_pe::{TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material};
-use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust;
+use crate::trust_pkcs7::Pkcs7DigestBinding;
+use crate::trust_verify_pe::{
+    TrustVerifyPeOptions, TrustVerifyPeReport, trust_material_for, verify_pkcs7_entry,
+};
 use anyhow::{Context, Result, anyhow};
 use authenticode::AuthenticodeSignature;
 use psign_sip_digest::esd_digest::{
@@ -16,7 +17,7 @@ pub fn trust_verify_wim_esd_path(
     path: &Path,
     opts: &TrustVerifyPeOptions,
 ) -> Result<TrustVerifyPeReport> {
-    let (anchors, anchor_certs) = load_trust_material(opts)?;
+    let (anchors, anchor_certs) = trust_material_for(opts)?;
 
     let mut header = [0u8; WIM_HEADER_PACKED_SIZE];
     let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -35,29 +36,16 @@ pub fn trust_verify_wim_esd_path(
         ));
     }
 
-    let verification_instant = resolve_verification_instant_for_pkcs7_with_trust(
-        &pkcs7,
-        &opts.policy,
-        opts.verification_instant_override.as_ref(),
-        &anchors,
-        &anchor_certs,
-        &opts.online,
-        opts.verbose_chain,
-    )?;
-    verify_authenticode_pkcs7_trust(
+    let mut report = TrustVerifyPeReport::new(&anchors);
+    verify_pkcs7_entry(
         &pkcs7,
         0,
         computed.as_slice(),
+        Pkcs7DigestBinding::AuthenticodeIndirect,
         &anchors,
         &anchor_certs,
-        &opts.policy,
-        &opts.online,
-        &verification_instant,
-        opts.verbose_chain,
+        opts,
+        &mut report,
     )?;
-
-    Ok(TrustVerifyPeReport {
-        pkcs7_entries_verified: 1,
-        anchor_thumbprints: anchors.thumbprint_count(),
-    })
+    Ok(report)
 }

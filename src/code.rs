@@ -665,11 +665,6 @@ fn sign_vsix_bytes(
     timestamp_url: Option<&str>,
     timestamp_digest: Option<DigestAlgorithm>,
 ) -> Result<Vec<u8>> {
-    if timestamp_url.is_some() || timestamp_digest.is_some() {
-        return Err(anyhow!(
-            "VSIX XMLDSig timestamping is not implemented in `psign-tool code` yet"
-        ));
-    }
     if skip_signed && package_has_signature(input_bytes, &CodeFormat::Vsix)? {
         return Ok(input_bytes.to_vec());
     }
@@ -688,11 +683,19 @@ fn sign_vsix_bytes(
         timestamp_url,
         timestamp_digest,
     )?;
-    let signed_info = vsix::signed_info_xml(Cursor::new(updated.clone()), vsix_digest)
-        .with_context(|| format!("create VSIX SignedInfo for {label}"))?;
-    let (signature, cert_bytes) = signer.sign_xml_signed_info(vsix_digest, &signed_info)?;
-    let xml = vsix::signature_xml_from_signed_info(&signed_info, &signature, Some(&cert_bytes))
+    let template = vsix::signature_template(
+        Cursor::new(updated.clone()),
+        vsix_digest,
+        vsix::VsixSigningTime::Now,
+    )
+    .with_context(|| format!("create VSIX signature for {label}"))?;
+    let (signature, cert_bytes) =
+        signer.sign_xml_signed_info(vsix_digest, &template.signed_info)?;
+    let xml = template
+        .signature_xml(&signature, Some(&cert_bytes))
         .into_bytes();
+    let xml = timestamp_vsix_signature_if_requested(xml, timestamp_url, timestamp_digest)
+        .with_context(|| format!("timestamp VSIX signature for {label}"))?;
     let mut out = Cursor::new(Vec::new());
     vsix::embed_signature_xml(Cursor::new(updated), &mut out, &xml, overwrite)
         .with_context(|| format!("embed VSIX signature XML into {label}"))?;
@@ -1799,6 +1802,58 @@ fn timestamp_pkcs7_der_rfc3161(
     }
     .context("attach RFC3161 timestamp token")?;
     pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
+/// Add the dotnet/sign `<EncodedTime>` RFC3161 timestamp over the VSIX `SignatureValue`.
+fn timestamp_vsix_signature_if_requested(
+    signature_xml: Vec<u8>,
+    timestamp_url: Option<&str>,
+    timestamp_digest: Option<DigestAlgorithm>,
+) -> Result<Vec<u8>> {
+    match (timestamp_url, timestamp_digest) {
+        (Some(url), Some(digest)) => timestamp_vsix_signature_rfc3161(&signature_xml, url, digest),
+        (Some(_), None) => Err(anyhow!(
+            "`psign-tool code` requires --timestamp-digest with --timestamp-url"
+        )),
+        (None, Some(_)) => Err(anyhow!(
+            "`psign-tool code` requires --timestamp-url with --timestamp-digest"
+        )),
+        (None, None) => Ok(signature_xml),
+    }
+}
+
+#[cfg(feature = "timestamp-http")]
+fn timestamp_vsix_signature_rfc3161(
+    signature_xml: &[u8],
+    timestamp_url: &str,
+    timestamp_digest: DigestAlgorithm,
+) -> Result<Vec<u8>> {
+    let signature_value = vsix::signature_value_from_signature_xml(signature_xml)?;
+    let imprint = timestamp_digest_bytes(timestamp_digest, &signature_value)?;
+    let response = post_rfc3161_timestamp_request(timestamp_url, timestamp_digest, &imprint)?;
+    let parsed = parse_time_stamp_resp_der(&response)
+        .ok_or_else(|| anyhow!("could not parse TimeStampResp DER from TSA response"))?;
+    if !parsed.pki_status.granted() {
+        return Err(anyhow!(
+            "TimeStampResp status is not granted (status={})",
+            parsed.pki_status.as_raw_integer()
+        ));
+    }
+    let token = parsed
+        .time_stamp_token
+        .ok_or_else(|| anyhow!("TimeStampResp has no timeStampToken"))?;
+    vsix::add_signature_timestamp(signature_xml, token)
+}
+
+#[cfg(not(feature = "timestamp-http"))]
+fn timestamp_vsix_signature_rfc3161(
+    _signature_xml: &[u8],
+    _timestamp_url: &str,
+    _timestamp_digest: DigestAlgorithm,
+) -> Result<Vec<u8>> {
+    Err(anyhow!(
+        "`psign-tool code` RFC3161 timestamping requires the timestamp-http feature"
+    ))
 }
 
 #[cfg(not(feature = "timestamp-http"))]

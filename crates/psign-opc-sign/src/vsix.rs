@@ -79,81 +79,370 @@ pub fn signature_reference_xml_path(path: &Path, algorithm: VsixHashAlgorithm) -
         .with_context(|| format!("create VSIX signature reference XML for {}", path.display()))
 }
 
+/// Unsigned signature skeleton (SignedInfo + package `Object`, empty `SignatureValue`) for review
+/// or for [`verify_signature_reference_xml`].
 pub fn signature_reference_xml<R>(reader: R, algorithm: VsixHashAlgorithm) -> Result<Vec<u8>>
 where
     R: Read + Seek,
 {
-    let signed_info = signed_info_xml(reader, algorithm)?;
-    Ok(signature_xml_from_signed_info(&signed_info, &[], None).into_bytes())
+    Ok(
+        signature_template(reader, algorithm, VsixSigningTime::FromPackage)?
+            .signature_xml(&[], None)
+            .into_bytes(),
+    )
 }
 
+/// Canonical `SignedInfo` octets to sign (see [`signature_template`]; package-derived signing time).
 pub fn signed_info_xml_path(path: &Path, algorithm: VsixHashAlgorithm) -> Result<Vec<u8>> {
     let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
     signed_info_xml(reader, algorithm)
         .with_context(|| format!("create VSIX SignedInfo XML for {}", path.display()))
 }
 
+/// Canonical `SignedInfo` octets to sign (see [`signature_template`]; package-derived signing time).
 pub fn signed_info_xml<R>(reader: R, algorithm: VsixHashAlgorithm) -> Result<Vec<u8>>
 where
     R: Read + Seek,
 {
-    let references = reference_digests(reader, algorithm)?;
-    if references.is_empty() {
-        return Err(anyhow!(
-            "VSIX package has no non-signature parts to reference"
-        ));
-    }
-
-    let mut xml = String::new();
-    xml.push_str("<SignedInfo>");
-    xml.push_str(
-        r#"<CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>"#,
-    );
-    xml.push_str(&format!(
-        r#"<SignatureMethod Algorithm="{}"/>"#,
-        algorithm.signature_uri()
-    ));
-    for (name, digest) in references {
-        xml.push_str(&format!(
-            r#"<Reference URI="/{}"><DigestMethod Algorithm="{}"/><DigestValue>{}</DigestValue></Reference>"#,
-            xml_escape_attr(&name),
-            algorithm.digest_uri(),
-            BASE64_STANDARD.encode(digest)
-        ));
-    }
-    xml.push_str("</SignedInfo>");
-    Ok(xml.into_bytes())
+    Ok(signature_template(reader, algorithm, VsixSigningTime::FromPackage)?.signed_info)
 }
 
+/// Complete signature XML for `path` with a package-derived signing time, so split
+/// prehash / from-signature steps produce the same `SignedInfo`.
 pub fn signature_xml_path(
     path: &Path,
     algorithm: VsixHashAlgorithm,
     signature_value: &[u8],
     signer_cert_der: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    let signed_info = signed_info_xml_path(path, algorithm)?;
-    Ok(signature_xml_from_signed_info(&signed_info, signature_value, signer_cert_der).into_bytes())
+    Ok(
+        signature_template_path(path, algorithm, VsixSigningTime::FromPackage)?
+            .signature_xml(signature_value, signer_cert_der)
+            .into_bytes(),
+    )
 }
 
-pub fn signature_xml_from_signed_info(
-    signed_info_xml: &[u8],
-    signature_value: &[u8],
-    signer_cert_der: Option<&[u8]>,
-) -> String {
-    let signed_info = String::from_utf8_lossy(signed_info_xml);
-    let mut xml = String::new();
-    xml.push_str(r#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">"#);
-    xml.push_str(&signed_info);
-    xml.push_str("<SignatureValue>");
-    xml.push_str(&BASE64_STANDARD.encode(signature_value));
-    xml.push_str("</SignatureValue>");
-    if let Some(cert) = signer_cert_der {
-        xml.push_str("<KeyInfo><X509Data><X509Certificate>");
-        xml.push_str(&BASE64_STANDARD.encode(cert));
-        xml.push_str("</X509Certificate></X509Data></KeyInfo>");
+const XMLDSIG_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+const OPC_DIGITAL_SIGNATURE_NS: &str =
+    "http://schemas.openxmlformats.org/package/2006/digital-signature";
+const C14N_URI: &str = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
+const XMLDSIG_OBJECT_TYPE: &str = "http://www.w3.org/2000/09/xmldsig#Object";
+const RELATIONSHIPS_CONTENT_TYPE: &str = "application/vnd.openxmlformats-package.relationships+xml";
+/// OPC `SignatureTime/Format` value (ECMA-376 Part 2); `Value` uses `yyyy-MM-ddTHH:mm:ss.f+00:00`.
+pub const VSIX_SIGNATURE_TIME_FORMAT: &str = "YYYY-MM-DDThh:mm:ss.sTZD";
+
+/// OPC package signature ready to be signed, in the layout `System.IO.Packaging` /
+/// `PackageDigitalSignatureManager` and dotnet/sign produce:
+///
+/// - `<Object Id="idPackageObject">` holds a `Manifest` with one `Reference` per package part
+///   (everything except `[Content_Types].xml` and the signature part itself, including
+///   `_rels/.rels` and the signature origin parts as they will exist after embedding), each
+///   `/part?ContentType=<type>` with a raw-octet digest, plus `SignatureProperties/SignatureTime`.
+/// - `SignedInfo` (inclusive C14N 1.0, RSA PKCS#1 v1.5) references `#idPackageObject`.
+///
+/// Both elements are written directly in canonical form, so [`Self::signed_info`] is exactly the
+/// octet string the RSA signature covers.
+#[derive(Clone, Debug)]
+pub struct VsixSignatureTemplate {
+    /// Canonical `SignedInfo` octets to sign.
+    pub signed_info: Vec<u8>,
+    signed_info_in_document: String,
+    object_in_document: String,
+    references: usize,
+}
+
+impl VsixSignatureTemplate {
+    /// Number of package parts referenced by the manifest.
+    pub fn reference_count(&self) -> usize {
+        self.references
     }
-    xml.push_str("</Signature>");
-    xml
+
+    /// Signature part XML carrying `signature_value` (RSA over [`Self::signed_info`]).
+    pub fn signature_xml(&self, signature_value: &[u8], signer_cert_der: Option<&[u8]>) -> String {
+        let mut xml = String::new();
+        xml.push_str(r#"<?xml version="1.0" encoding="utf-8"?>"#);
+        xml.push_str(&format!(
+            r#"<Signature Id="SignatureIdValue" xmlns="{XMLDSIG_NS}">"#
+        ));
+        xml.push_str(&self.signed_info_in_document);
+        xml.push_str("<SignatureValue>");
+        xml.push_str(&BASE64_STANDARD.encode(signature_value));
+        xml.push_str("</SignatureValue>");
+        if let Some(cert) = signer_cert_der {
+            xml.push_str("<KeyInfo><X509Data><X509Certificate>");
+            xml.push_str(&BASE64_STANDARD.encode(cert));
+            xml.push_str("</X509Certificate></X509Data></KeyInfo>");
+        }
+        xml.push_str(&self.object_in_document);
+        xml.push_str("</Signature>");
+        xml
+    }
+}
+
+fn c14n_attr(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Document form of canonical XML: empty `Algorithm` elements written self-closing, as
+/// `XmlWriter` does (`System.IO.Packaging` rejects explicit end tags there). Canonicalization maps
+/// both spellings to the same octets.
+fn document_form(canonical: &str) -> String {
+    let mut out = canonical.to_string();
+    for name in ["CanonicalizationMethod", "SignatureMethod", "DigestMethod"] {
+        out = out.replace(&format!("></{name}>"), " />");
+    }
+    out
+}
+
+fn c14n_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#xD;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `SignatureTime/Value` text for `time` (UTC).
+fn signature_time_value(time: time::OffsetDateTime) -> String {
+    let t = time.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{}+00:00",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond() / 100
+    )
+}
+
+/// [`VsixSigningTime::FromPackage`]: newest ZIP entry modification time (DOS times carry no
+/// zone; read as UTC).
+fn package_signature_time_value(archive: &mut zip::ZipArchive<impl Read + Seek>) -> String {
+    let mut newest: Option<(u16, u8, u8, u8, u8, u8)> = None;
+    for i in 0..archive.len() {
+        if let Ok(file) = archive.by_index_raw(i) {
+            let d = file.last_modified();
+            let key = (
+                d.year(),
+                d.month(),
+                d.day(),
+                d.hour(),
+                d.minute(),
+                d.second(),
+            );
+            if newest.is_none_or(|n| key > n) {
+                newest = Some(key);
+            }
+        }
+    }
+    let (y, mo, d, h, mi, s) = newest.unwrap_or((1980, 1, 1, 0, 0, 0));
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.0+00:00")
+}
+
+struct ContentTypes {
+    defaults: BTreeMap<String, String>,
+    overrides: BTreeMap<String, String>,
+}
+
+impl ContentTypes {
+    fn parse(xml: &[u8]) -> Result<Self> {
+        let text = std::str::from_utf8(xml).context("OPC [Content_Types].xml is not UTF-8")?;
+        let mut defaults = BTreeMap::new();
+        let mut overrides = BTreeMap::new();
+        for (tag, map, key_attr) in [
+            ("<Default ", &mut defaults, "Extension"),
+            ("<Override ", &mut overrides, "PartName"),
+        ] {
+            let mut cursor = 0;
+            while let Some(start) = text[cursor..].find(tag) {
+                let start = cursor + start;
+                let end = text[start..]
+                    .find('>')
+                    .map(|e| start + e)
+                    .ok_or_else(|| anyhow!("unterminated {tag} in [Content_Types].xml"))?;
+                let element = &text[start..=end];
+                if let (Some(key), Some(ct)) = (
+                    xml_attr(element, key_attr),
+                    xml_attr(element, "ContentType"),
+                ) {
+                    let key = key.trim_start_matches('/').to_ascii_lowercase();
+                    map.insert(key, ct);
+                }
+                cursor = end + 1;
+            }
+        }
+        Ok(Self {
+            defaults,
+            overrides,
+        })
+    }
+
+    fn for_part(&self, part: &str) -> Option<&str> {
+        let key = part.to_ascii_lowercase();
+        self.overrides
+            .get(&key)
+            .or_else(|| {
+                let ext = key.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                self.defaults.get(ext)
+            })
+            .map(String::as_str)
+    }
+}
+
+/// `SignatureTime` recorded in the signed package object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VsixSigningTime {
+    /// Current UTC time, for one-shot signing.
+    Now,
+    /// Newest ZIP entry modification time, so independent split-signing steps (prehash, then
+    /// from-signature) produce identical `SignedInfo` without passing extra inputs.
+    FromPackage,
+}
+
+/// Build the OPC signature for `reader` (an unsigned or re-signed VSIX); see
+/// [`VsixSignatureTemplate`].
+pub fn signature_template<R>(
+    reader: R,
+    algorithm: VsixHashAlgorithm,
+    signing_time: VsixSigningTime,
+) -> Result<VsixSignatureTemplate>
+where
+    R: Read + Seek,
+{
+    let mut prepared = std::io::Cursor::new(Vec::new());
+    write_signed_package(reader, &mut prepared, None, true)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(prepared.into_inner()))
+        .context("open prepared VSIX ZIP")?;
+    let time_value = match signing_time {
+        VsixSigningTime::Now => signature_time_value(time::OffsetDateTime::now_utc()),
+        VsixSigningTime::FromPackage => package_signature_time_value(&mut archive),
+    };
+    template_from_prepared(&mut archive, algorithm, &time_value)
+}
+
+pub fn signature_template_path(
+    path: &Path,
+    algorithm: VsixHashAlgorithm,
+    signing_time: VsixSigningTime,
+) -> Result<VsixSignatureTemplate> {
+    let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    signature_template(reader, algorithm, signing_time)
+        .with_context(|| format!("create VSIX signature for {}", path.display()))
+}
+
+fn template_from_prepared(
+    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    algorithm: VsixHashAlgorithm,
+    time_value: &str,
+) -> Result<VsixSignatureTemplate> {
+    let mut content_types_xml = Vec::new();
+    archive
+        .by_name(CONTENT_TYPES_PART)
+        .context("prepared VSIX has no [Content_Types].xml")?
+        .read_to_end(&mut content_types_xml)?;
+    let content_types = ContentTypes::parse(&content_types_xml)?;
+
+    let mut manifest = String::from("<Manifest>");
+    let mut references = 0usize;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).context("read VSIX ZIP entry")?;
+        let name = normalize_zip_part_name(file.name())?;
+        if file.is_dir() || name == CONTENT_TYPES_PART || name == DEFAULT_VSIX_SIGNATURE_PART {
+            continue;
+        }
+        let content_type = content_types
+            .for_part(&name)
+            .ok_or_else(|| anyhow!("VSIX part /{name} has no content type in [Content_Types].xml"))?
+            .to_string();
+        let mut bytes = Vec::with_capacity(file.size() as usize);
+        file.read_to_end(&mut bytes)?;
+        manifest.push_str(&format!(
+            r#"<Reference URI="{}"><DigestMethod Algorithm="{}"></DigestMethod><DigestValue>{}</DigestValue></Reference>"#,
+            c14n_attr(&format!("/{name}?ContentType={content_type}")),
+            algorithm.digest_uri(),
+            BASE64_STANDARD.encode(algorithm.hash(&bytes))
+        ));
+        references += 1;
+    }
+    if references == 0 {
+        return Err(anyhow!("VSIX package has no parts to sign"));
+    }
+    manifest.push_str("</Manifest>");
+
+    let object_body = format!(
+        concat!(
+            "{manifest}<SignatureProperties>",
+            r##"<SignatureProperty Id="idSignatureTime" Target="#SignatureIdValue">"##,
+            r#"<SignatureTime xmlns="{opc}"><Format>{format}</Format><Value>{value}</Value></SignatureTime>"#,
+            "</SignatureProperty></SignatureProperties></Object>"
+        ),
+        manifest = manifest,
+        opc = OPC_DIGITAL_SIGNATURE_NS,
+        format = VSIX_SIGNATURE_TIME_FORMAT,
+        value = c14n_text(time_value),
+    );
+    let object_canonical =
+        format!(r#"<Object xmlns="{XMLDSIG_NS}" Id="idPackageObject">{object_body}"#);
+    let object_in_document =
+        document_form(&format!(r#"<Object Id="idPackageObject">{object_body}"#));
+
+    let signed_info_body = format!(
+        concat!(
+            r#"<CanonicalizationMethod Algorithm="{c14n}"></CanonicalizationMethod>"#,
+            r#"<SignatureMethod Algorithm="{sig}"></SignatureMethod>"#,
+            r##"<Reference Type="{object_type}" URI="#idPackageObject">"##,
+            r#"<DigestMethod Algorithm="{digest}"></DigestMethod><DigestValue>{value}</DigestValue>"#,
+            "</Reference></SignedInfo>"
+        ),
+        c14n = C14N_URI,
+        sig = algorithm.signature_uri(),
+        object_type = XMLDSIG_OBJECT_TYPE,
+        digest = algorithm.digest_uri(),
+        value = BASE64_STANDARD.encode(algorithm.hash(object_canonical.as_bytes())),
+    );
+    Ok(VsixSignatureTemplate {
+        signed_info: format!(r#"<SignedInfo xmlns="{XMLDSIG_NS}">{signed_info_body}"#).into_bytes(),
+        signed_info_in_document: document_form(&format!("<SignedInfo>{signed_info_body}")),
+        object_in_document,
+        references,
+    })
+}
+
+/// Insert an RFC 3161 timestamp token (DER `ContentInfo` over the `SignatureValue` octets) as the
+/// dotnet/sign `<Object><TimeStamp><EncodedTime>` element.
+pub fn add_signature_timestamp(signature_xml: &[u8], token_der: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(signature_xml).context("VSIX signature XML is not UTF-8")?;
+    if text.contains("<EncodedTime>") {
+        return Err(anyhow!("VSIX signature XML is already timestamped"));
+    }
+    let end = text
+        .rfind("</Signature>")
+        .ok_or_else(|| anyhow!("VSIX signature XML is missing </Signature>"))?;
+    let stamp = format!(
+        r#"<Object><TimeStamp Id="idSignatureTimestamp" xmlns="{OPC_DIGITAL_SIGNATURE_NS}"><Comment>Timestamp got from the time stamp server</Comment><EncodedTime>{}</EncodedTime></TimeStamp></Object>"#,
+        BASE64_STANDARD.encode(token_der)
+    );
+    Ok(format!("{}{stamp}{}", &text[..end], &text[end..]).into_bytes())
 }
 
 pub fn verify_signature_reference_xml_path(
@@ -166,6 +455,9 @@ pub fn verify_signature_reference_xml_path(
         .with_context(|| format!("verify VSIX signature references for {}", path.display()))
 }
 
+/// Check that `signature_xml` (from [`VsixSignatureTemplate::signature_xml`]) carries the
+/// `SignedInfo` and package `Object` this package produces with the same signing time, which
+/// covers every part digest. Returns the number of referenced parts.
 pub fn verify_signature_reference_xml<R>(
     reader: R,
     signature_xml: &[u8],
@@ -174,8 +466,41 @@ pub fn verify_signature_reference_xml<R>(
 where
     R: Read + Seek,
 {
-    let expected = reference_digests(reader, algorithm)?;
-    let actual = parse_reference_digests(signature_xml, algorithm)?;
+    let text = std::str::from_utf8(signature_xml).context("VSIX signature XML is not UTF-8")?;
+    let time_start = text
+        .find("<SignatureTime")
+        .ok_or_else(|| anyhow!("VSIX signature XML has no SignatureTime"))?;
+    let time_value = element_text(&text[time_start..], "Value")
+        .ok_or_else(|| anyhow!("VSIX signature XML SignatureTime has no Value"))?;
+    let mut prepared = std::io::Cursor::new(Vec::new());
+    write_signed_package(reader, &mut prepared, None, true)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(prepared.into_inner()))
+        .context("open prepared VSIX ZIP")?;
+    let template = template_from_prepared(&mut archive, algorithm, time_value)?;
+    if !text.contains(&template.object_in_document) {
+        return Err(anyhow!(
+            "VSIX signature manifest digest mismatch: package parts differ from the signed manifest"
+        ));
+    }
+    if !text.contains(&template.signed_info_in_document) {
+        return Err(anyhow!("VSIX SignedInfo digest mismatch"));
+    }
+    Ok(template.references)
+}
+
+/// Part digests of a signature written by psign releases before the OPC layout (direct part
+/// references in `SignedInfo`). Kept only to inspect such packages; they are not valid OPC
+/// signatures and cannot be trust-verified.
+pub fn verify_legacy_signature_reference_xml<R>(
+    reader: R,
+    signature_xml: &[u8],
+    algorithm: VsixHashAlgorithm,
+) -> Result<usize>
+where
+    R: Read + Seek,
+{
+    let expected = legacy_reference_digests(reader, algorithm)?;
+    let actual = parse_legacy_reference_digests(signature_xml, algorithm)?;
     if actual.len() != expected.len() {
         return Err(anyhow!(
             "VSIX signature reference count mismatch: expected {}, found {}",
@@ -235,7 +560,7 @@ where
     Ok(xml)
 }
 
-fn reference_digests<R>(
+fn legacy_reference_digests<R>(
     reader: R,
     algorithm: VsixHashAlgorithm,
 ) -> Result<BTreeMap<String, Vec<u8>>>
@@ -261,7 +586,7 @@ where
     Ok(references)
 }
 
-fn parse_reference_digests(
+fn parse_legacy_reference_digests(
     signature_xml: &[u8],
     algorithm: VsixHashAlgorithm,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -355,18 +680,14 @@ fn element_text<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn xml_attr(tag: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=\"");
-    let start = tag.find(&needle)? + needle.len();
-    let end = tag[start..].find('"')? + start;
-    Some(tag[start..end].to_owned())
-}
-
-fn xml_escape_attr(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    for quote in ['"', '\''] {
+        let needle = format!(" {name}={quote}");
+        if let Some(start) = tag.find(&needle).map(|s| s + needle.len()) {
+            let end = tag[start..].find(quote)? + start;
+            return Some(tag[start..end].to_owned());
+        }
+    }
+    None
 }
 
 fn is_opc_signature_entry(name: &str) -> bool {
@@ -385,6 +706,16 @@ fn ensure_signature_content_types(bytes: &[u8]) -> Result<Vec<u8>> {
     };
     let mut text = ensure_content_type_default(&text, "psdsor", OPC_SIGNATURE_ORIGIN_CONTENT_TYPE)?;
     text = ensure_content_type_default(&text, "psdsxs", OPC_SIGNATURE_XML_CONTENT_TYPE)?;
+    // The signature origin relationships part needs a content type to be signable.
+    if !text.to_ascii_lowercase().contains(r#"extension="rels""#) {
+        let insert_at = text
+            .rfind("</Types>")
+            .ok_or_else(|| anyhow!("OPC [Content_Types].xml is missing </Types>"))?;
+        text.insert_str(
+            insert_at,
+            &format!(r#"<Default Extension="rels" ContentType="{RELATIONSHIPS_CONTENT_TYPE}"/>"#),
+        );
+    }
     Ok(text.into_bytes())
 }
 
@@ -451,14 +782,20 @@ fn ensure_relationship(
     Ok(out.into_bytes())
 }
 
+/// Turn a self-closing document element (`<Types/>`) into an open/close pair so children can be
+/// appended; a document element that already has a separate end tag is left untouched.
 fn expand_self_closing_xml_root(text: &str, root: &str) -> String {
     let Some(start) = text.find(&format!("<{root}")) else {
         return text.to_string();
     };
-    let Some(end) = text[start..].find("/>") else {
+    // End of the document element's start tag (attribute values cannot contain a raw `>`).
+    let Some(tag_end) = text[start..].find('>').map(|e| start + e) else {
         return text.to_string();
     };
-    let end = start + end;
+    if !text[..tag_end].ends_with('/') {
+        return text.to_string();
+    }
+    let end = tag_end - 1;
     let mut out = String::with_capacity(text.len() + root.len() + 3);
     out.push_str(&text[..end]);
     out.push('>');
@@ -502,6 +839,8 @@ pub fn embed_signature_xml_path(
         .with_context(|| format!("embed VSIX signature XML into {}", output.display()))
 }
 
+/// Embed `signature_xml` into the package as the OPC signature part, adding the signature origin
+/// and relationships exactly as [`signature_template`] assumed when digesting the parts.
 pub fn embed_signature_xml<R, W>(
     reader: R,
     writer: W,
@@ -515,6 +854,21 @@ where
     if signature_xml.is_empty() {
         return Err(anyhow!("VSIX signature XML payload is empty"));
     }
+    write_signed_package(reader, writer, Some(signature_xml), overwrite)
+}
+
+/// Copy the package with the OPC signature infrastructure (content types, root origin
+/// relationship, origin part and its relationships) and, when given, the signature part.
+fn write_signed_package<R, W>(
+    reader: R,
+    writer: W,
+    signature_xml: Option<&[u8]>,
+    overwrite: bool,
+) -> Result<()>
+where
+    R: Read + std::io::Seek,
+    W: Write + std::io::Seek,
+{
     let mut input = zip::ZipArchive::new(reader).context("open VSIX ZIP")?;
     let mut output = zip::ZipWriter::new(writer);
     let mut had_signature = false;
@@ -566,8 +920,10 @@ where
         output.write_all(&[])?;
         output.start_file(OPC_SIGNATURE_ORIGIN_RELS_PART, stored)?;
         output.write_all(&signature_origin_relationships_xml())?;
-        output.start_file(DEFAULT_VSIX_SIGNATURE_PART, stored)?;
-        output.write_all(signature_xml)?;
+        if let Some(signature_xml) = signature_xml {
+            output.start_file(DEFAULT_VSIX_SIGNATURE_PART, stored)?;
+            output.write_all(signature_xml)?;
+        }
     }
     output.finish()?;
     Ok(())
@@ -629,6 +985,25 @@ mod tests {
     }
 
     #[test]
+    fn signature_infrastructure_keeps_existing_content_types_well_formed() {
+        let types = br#"<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="text/xml" /></Types>"#;
+        let out = String::from_utf8(ensure_signature_content_types(types).unwrap()).unwrap();
+        assert!(
+            out.contains(r#"<Default Extension="xml" ContentType="text/xml" />"#),
+            "{out}"
+        );
+        assert_eq!(out.matches("</Types>").count(), 1, "{out}");
+        assert!(out.contains(r#"Extension="psdsor""#) && out.contains(r#"Extension="rels""#));
+
+        let empty =
+            String::from_utf8(ensure_signature_content_types(b"<Types/>").unwrap()).unwrap();
+        assert!(
+            empty.starts_with("<Types>") && empty.ends_with("</Types>"),
+            "{empty}"
+        );
+    }
+
+    #[test]
     fn embed_signature_xml_rejects_existing_signature_without_overwrite() {
         let zip = zip_with(&[(DEFAULT_VSIX_SIGNATURE_PART, b"<Signature/>")]);
         let err = embed_signature_xml(Cursor::new(zip), Cursor::new(Vec::new()), b"<New/>", false)
@@ -637,10 +1012,12 @@ mod tests {
         assert!(err.to_string().contains("already contains OPC signature"));
     }
 
+    const TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="vsixmanifest" ContentType="text/xml"/></Types>"#;
+
     #[test]
-    fn signature_reference_xml_covers_non_signature_parts() {
+    fn signature_reference_xml_covers_every_part_but_the_signature() {
         let zip = zip_with(&[
-            ("[Content_Types].xml", b"<Types/>"),
+            ("[Content_Types].xml", TYPES),
             ("extension.vsixmanifest", b"manifest"),
             (DEFAULT_VSIX_SIGNATURE_PART, b"<OldSignature/>"),
         ]);
@@ -648,37 +1025,72 @@ mod tests {
         let xml = signature_reference_xml(Cursor::new(zip), VsixHashAlgorithm::Sha256).unwrap();
         let text = String::from_utf8(xml.clone()).unwrap();
 
-        assert!(text.contains(r#"<Reference URI="/extension.vsixmanifest">"#));
-        assert!(!text.contains(r#"<Reference URI="/[Content_Types].xml">"#));
-        assert!(!text.contains(r#"<Reference URI="/_rels/.rels">"#));
+        assert!(text.contains(r#"<Reference URI="/extension.vsixmanifest?ContentType=text/xml">"#));
+        assert!(text.contains(r#"<Reference URI="/_rels/.rels?ContentType=application/vnd.openxmlformats-package.relationships+xml">"#));
+        assert!(text.contains(&format!(r#"<Reference URI="/{OPC_SIGNATURE_ORIGIN_PART}?"#)));
+        assert!(!text.contains("[Content_Types].xml?"));
         assert!(!text.contains(DEFAULT_VSIX_SIGNATURE_PART));
+        assert!(text.contains(r##"<Reference Type="http://www.w3.org/2000/09/xmldsig#Object" URI="#idPackageObject">"##));
         assert_eq!(
             verify_signature_reference_xml(
                 Cursor::new(zip_with(&[
-                    ("[Content_Types].xml", b"<Types/>"),
+                    ("[Content_Types].xml", TYPES),
                     ("extension.vsixmanifest", b"manifest"),
                 ])),
                 &xml,
                 VsixHashAlgorithm::Sha256
             )
             .unwrap(),
-            1
+            4
         );
     }
 
     #[test]
     fn signature_reference_xml_detects_tampered_part() {
-        let zip = zip_with(&[("extension.vsixmanifest", b"manifest")]);
+        let zip = zip_with(&[
+            ("[Content_Types].xml", TYPES),
+            ("extension.vsixmanifest", b"manifest"),
+        ]);
         let xml = signature_reference_xml(Cursor::new(zip), VsixHashAlgorithm::Sha256).unwrap();
 
         let err = verify_signature_reference_xml(
-            Cursor::new(zip_with(&[("extension.vsixmanifest", b"changed")])),
+            Cursor::new(zip_with(&[
+                ("[Content_Types].xml", TYPES),
+                ("extension.vsixmanifest", b"changed"),
+            ])),
             &xml,
             VsixHashAlgorithm::Sha256,
         )
         .unwrap_err();
 
         assert!(err.to_string().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn split_signing_steps_produce_identical_signed_info() {
+        let zip = zip_with(&[
+            ("[Content_Types].xml", TYPES),
+            ("extension.vsixmanifest", b"m"),
+        ]);
+        let first = signed_info_xml(Cursor::new(zip.clone()), VsixHashAlgorithm::Sha256).unwrap();
+        let second = signed_info_xml(Cursor::new(zip), VsixHashAlgorithm::Sha256).unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with(br#"<SignedInfo xmlns="http://www.w3.org/2000/09/xmldsig#">"#));
+    }
+
+    #[test]
+    fn timestamp_is_appended_as_encoded_time_object() {
+        let xml = add_signature_timestamp(
+            b"<Signature><SignatureValue>AA==</SignatureValue></Signature>",
+            b"\x30\x00",
+        )
+        .unwrap();
+        let text = String::from_utf8(xml.clone()).unwrap();
+        assert!(
+            text.ends_with(r#"<EncodedTime>MAA=</EncodedTime></TimeStamp></Object></Signature>"#),
+            "{text}"
+        );
+        assert!(add_signature_timestamp(&xml, b"\x30\x00").is_err());
     }
 
     #[test]

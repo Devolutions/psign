@@ -7,6 +7,7 @@
 //! - **`picky` / `picky-asn1-x509`**: X.509 parsing, TBSCertificate signature verification, extension interpretation.
 
 pub mod anchor;
+pub mod artifact_signing;
 pub mod authroot_cab;
 pub mod authroot_cache;
 pub mod authroot_ctl;
@@ -20,12 +21,23 @@ pub mod trust_verify_cab;
 pub mod trust_verify_catalog;
 pub mod trust_verify_detached;
 pub mod trust_verify_esd;
+pub mod trust_verify_file;
 pub mod trust_verify_msi;
+pub mod trust_verify_msix;
+pub mod trust_verify_nuget;
 pub mod trust_verify_pe;
 pub mod trust_verify_script;
+pub mod trust_verify_vsix;
 pub mod trust_verify_zip;
 pub mod verification_instant;
+mod xml_c14n;
 
+pub use artifact_signing::{
+    ArtifactSigningCertificateKind, ArtifactSigningIdentity, ArtifactSigningPolicy,
+    ArtifactSigningVerifiedSignature, artifact_signing_identities_from_pe,
+    artifact_signing_identity_from_cert_bytes, artifact_signing_identity_from_pkcs7_der,
+    verify_artifact_signing_pkcs7,
+};
 pub use inspect::{
     InspectAuthenticodeDigest, InspectPeEntry, InspectPeFileReport, InspectPkcs7Report,
     InspectSigner, TimestampHint, inspect_authenticode_pkcs7_der, inspect_pe_authenticode,
@@ -35,11 +47,15 @@ pub use trust_verify_cab::trust_verify_cab_bytes;
 pub use trust_verify_catalog::trust_verify_catalog_bytes;
 pub use trust_verify_detached::trust_verify_detached_bytes;
 pub use trust_verify_esd::trust_verify_wim_esd_path;
+pub use trust_verify_file::trust_verify_path;
 pub use trust_verify_msi::trust_verify_msi_bytes;
+pub use trust_verify_msix::trust_verify_msix_bytes;
+pub use trust_verify_nuget::{nuget_verified_signature_content, trust_verify_nuget_bytes};
 pub use trust_verify_pe::{
     TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material, pe_first_pkcs7_terminal_root,
     pkcs7_signed_data_der_terminal_root, trust_verify_pe_bytes,
 };
 pub use trust_verify_script::trust_verify_script_bytes;
+pub use trust_verify_vsix::{VsixSignature, trust_verify_vsix_bytes, verify_vsix_signature_bytes};
 pub use trust_verify_zip::trust_verify_zip_bytes;
 pub use verification_instant::parse_verification_date_ymd;

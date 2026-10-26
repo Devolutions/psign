@@ -9,12 +9,15 @@ tests/fixtures/*.wsf -text
 tests/fixtures/generated-unsigned/** -text
 tests/fixtures/generated-signed/** -text
 tests/fixtures/rdp/** -text -diff
+# Signed Artifact Signing fixtures (scripts included): byte-exact.
+tests/fixtures/artifact-signing/** -text
 
 # Binary Authenticode fixtures.
 tests/fixtures/**/*.appx binary
 tests/fixtures/**/*.appxbundle binary
 tests/fixtures/**/*.cab binary
 tests/fixtures/**/*.cat binary
+tests/fixtures/**/*.crl binary
 tests/fixtures/**/*.crt binary
 tests/fixtures/**/*.der binary
 tests/fixtures/**/*.dll binary

@@ -4,8 +4,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use psign_portable_core::{
     PortableErrorCode, PortableErrorResponse, portable_clear_signature, portable_error_response,
-    portable_get_signature, portable_new_file_catalog, portable_sign, portable_test_file_catalog,
-    portable_validate_powershell_script, version,
+    portable_get_artifact_signing_identity, portable_get_signature, portable_new_file_catalog,
+    portable_sign, portable_test_file_catalog, portable_validate_powershell_script, version,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -99,6 +99,24 @@ pub unsafe extern "C" fn psign_core_test_file_catalog(
         request_json_ptr,
         request_json_len,
         portable_test_file_catalog,
+    )
+}
+
+/// Decode the Azure Artifact Signing identity (publisher ID) of a DER certificate.
+///
+/// # Safety
+///
+/// `request_json_ptr` must point to `request_json_len` readable UTF-8 bytes for the duration
+/// of the call. The returned buffer must be released with `psign_core_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn psign_core_get_artifact_signing_identity(
+    request_json_ptr: *const u8,
+    request_json_len: usize,
+) -> PsignFfiResult {
+    invoke_json(
+        request_json_ptr,
+        request_json_len,
+        portable_get_artifact_signing_identity,
     )
 }
 

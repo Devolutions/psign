@@ -36,6 +36,9 @@ internal sealed class PortableGetSignatureRequest
 
     [JsonPropertyName("revocation_mode")]
     public string RevocationMode { get; init; } = "Off";
+
+    [JsonPropertyName("artifact_signing")]
+    public PortableArtifactSigningOptions? ArtifactSigning { get; init; }
 }
 
 internal sealed class PortableSignRequest

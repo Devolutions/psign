@@ -173,11 +173,114 @@ where
 }
 
 pub fn signed_package_unsigned_bytes_path(path: &Path) -> Result<Vec<u8>> {
-    let reader = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut out = std::io::Cursor::new(Vec::new());
-    write_package_without_signature_impl(reader, &mut out, true)
-        .with_context(|| format!("remove NuGet signature from {}", path.display()))?;
-    Ok(out.into_inner())
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    signed_package_unsigned_bytes(&bytes)
+        .with_context(|| format!("remove NuGet signature from {}", path.display()))
+}
+
+fn le16(bytes: &[u8], at: usize) -> Result<usize> {
+    bytes
+        .get(at..at + 2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+        .ok_or_else(|| anyhow!("truncated ZIP structure"))
+}
+
+fn le32(bytes: &[u8], at: usize) -> Result<usize> {
+    bytes
+        .get(at..at + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(|| anyhow!("truncated ZIP structure"))
+}
+
+/// Reconstruct the exact unsigned package bytes a NuGet author signature covers.
+///
+/// NuGet appends `.signature.p7s` as the **last** ZIP entry (local header, data, and central
+/// directory record), so the signed package hash is computed over the archive with that entry's
+/// bytes removed and the end-of-central-directory record adjusted. This is a byte-level cut, not
+/// a ZIP rewrite, so it reproduces packages signed by `dotnet nuget sign` / `NuGet.exe sign`.
+pub fn signed_package_unsigned_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    const EOCD_SIG: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
+    const CDFH_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+    let search_from = bytes.len().saturating_sub(22 + u16::MAX as usize);
+    let eocd = bytes[search_from..]
+        .windows(4)
+        .rposition(|w| w == EOCD_SIG)
+        .map(|p| search_from + p)
+        .ok_or_else(|| anyhow!("ZIP end of central directory not found"))?;
+    let comment_len = le16(bytes, eocd + 20)?;
+    if eocd + 22 + comment_len != bytes.len() {
+        return Err(anyhow!("ZIP end of central directory has trailing data"));
+    }
+    let disk_entries = le16(bytes, eocd + 8)?;
+    let total_entries = le16(bytes, eocd + 10)?;
+    let cd_size = le32(bytes, eocd + 12)?;
+    let cd_offset = le32(bytes, eocd + 16)?;
+    if disk_entries != total_entries || total_entries == 0xffff || cd_offset == 0xffff_ffff {
+        return Err(anyhow!(
+            "multi-disk or ZIP64 NuGet packages are not supported for signature verification"
+        ));
+    }
+    if cd_offset.checked_add(cd_size) != Some(eocd) {
+        return Err(anyhow!(
+            "ZIP central directory does not end at the EOCD record"
+        ));
+    }
+
+    // Walk central directory records, remembering where the signature record sits.
+    let mut records = Vec::with_capacity(total_entries);
+    let mut pos = cd_offset;
+    for _ in 0..total_entries {
+        if bytes.get(pos..pos + 4) != Some(&CDFH_SIG[..]) {
+            return Err(anyhow!("invalid ZIP central directory record"));
+        }
+        let name_len = le16(bytes, pos + 28)?;
+        let len = 46 + name_len + le16(bytes, pos + 30)? + le16(bytes, pos + 32)?;
+        let name = bytes
+            .get(pos + 46..pos + 46 + name_len)
+            .ok_or_else(|| anyhow!("truncated ZIP central directory record"))?;
+        records.push((
+            pos,
+            len,
+            name == PACKAGE_SIGNATURE_FILE_NAME.as_bytes(),
+            le32(bytes, pos + 42)?,
+        ));
+        pos += len;
+    }
+    if pos != eocd {
+        return Err(anyhow!("ZIP central directory size mismatch"));
+    }
+
+    let signature_index = records
+        .iter()
+        .position(|r| r.2)
+        .ok_or_else(|| anyhow!("package does not contain {PACKAGE_SIGNATURE_FILE_NAME}"))?;
+    if records.iter().filter(|r| r.2).count() != 1 || signature_index + 1 != records.len() {
+        return Err(anyhow!(
+            "{PACKAGE_SIGNATURE_FILE_NAME} must be the single, last central directory record"
+        ));
+    }
+    let signature_local_offset = records[signature_index].3;
+    if records[..signature_index]
+        .iter()
+        .any(|r| r.3 >= signature_local_offset)
+    {
+        return Err(anyhow!(
+            "{PACKAGE_SIGNATURE_FILE_NAME} must be the last local file entry"
+        ));
+    }
+
+    let kept_cd_size = records[signature_index].0 - cd_offset;
+    let mut out = Vec::with_capacity(signature_local_offset + kept_cd_size + 22 + comment_len);
+    out.extend_from_slice(&bytes[..signature_local_offset]);
+    out.extend_from_slice(&bytes[cd_offset..cd_offset + kept_cd_size]);
+    let mut end = bytes[eocd..].to_vec();
+    let entries = (total_entries - 1) as u16;
+    end[8..10].copy_from_slice(&entries.to_le_bytes());
+    end[10..12].copy_from_slice(&entries.to_le_bytes());
+    end[12..16].copy_from_slice(&(kept_cd_size as u32).to_le_bytes());
+    end[16..20].copy_from_slice(&(signature_local_offset as u32).to_le_bytes());
+    out.extend_from_slice(&end);
+    Ok(out)
 }
 
 pub fn signed_package_signature_content_path(
@@ -455,6 +558,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_package_unsigned_bytes_reproduces_dotnet_signed_fixture() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/package-signing");
+        let signed = std::fs::read(root.join("signed/sample.signed.nupkg")).unwrap();
+        let unsigned = std::fs::read(root.join("unsigned/sample.nupkg")).unwrap();
+        assert_eq!(signed_package_unsigned_bytes(&signed).unwrap(), unsigned);
+    }
     use std::io::{Cursor, Write};
     use zip::write::FileOptions;
 

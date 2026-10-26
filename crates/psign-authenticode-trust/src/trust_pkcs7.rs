@@ -88,7 +88,7 @@ fn extended_key_usage_contains(der: &[u8], expected: ObjectIdentifier) -> Result
     Ok(found)
 }
 
-fn x509_cert_has_code_signing_eku(cert: &Certificate) -> Result<bool> {
+pub(crate) fn x509_cert_has_code_signing_eku(cert: &Certificate) -> Result<bool> {
     let Some(exts) = &cert.tbs_certificate.extensions else {
         return Ok(false);
     };
@@ -376,6 +376,46 @@ pub fn verify_pkcs9_message_digest_pkcs7_trust(
         slice,
         pkcs7_index,
         CmsDigestCheck::Pkcs9MessageDigest(content_digest),
+        anchors,
+        anchor_certs,
+        policy,
+        online,
+        verification_instant,
+        verbose_chain,
+    )
+}
+
+/// How a PKCS#7 binds to the signed subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pkcs7DigestBinding {
+    /// Authenticode `SpcIndirectDataContent` digest (PE, CAB, MSI, WIM/ESD, scripts, ZIP).
+    AuthenticodeIndirect,
+    /// PKCS#9 `messageDigest` over external content (catalogs, detached CMS).
+    Pkcs9MessageDigest,
+}
+
+/// [`verify_authenticode_pkcs7_trust`] or [`verify_pkcs9_message_digest_pkcs7_trust`] by binding.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pkcs7_trust_with_binding(
+    binding: Pkcs7DigestBinding,
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    digest: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    policy: &AuthenticodeTrustPolicy,
+    online: &OnlineTrustOptions,
+    verification_instant: &UtcDate,
+    verbose_chain: bool,
+) -> Result<()> {
+    let verify = match binding {
+        Pkcs7DigestBinding::AuthenticodeIndirect => verify_authenticode_pkcs7_trust,
+        Pkcs7DigestBinding::Pkcs9MessageDigest => verify_pkcs9_message_digest_pkcs7_trust,
+    };
+    verify(
+        pkcs7_der,
+        pkcs7_index,
+        digest,
         anchors,
         anchor_certs,
         policy,

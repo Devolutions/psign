@@ -619,6 +619,8 @@ fn nupkg_verify_signature_rejects_tampered_signed_package() {
     sign.assert().success();
     append_zip_entry(&signed, &tampered, "tampered.txt", b"changed");
 
+    // NuGet requires `.signature.p7s` to stay the last ZIP entry, so an appended entry is
+    // rejected before the package hash is even recomputed.
     let mut verify = portable_cmd();
     verify
         .arg("nupkg-verify-signature")
@@ -627,7 +629,7 @@ fn nupkg_verify_signature_rejects_tampered_signed_package() {
         .arg(&cert)
         .arg("--allow-loose-signing-cert");
     verify.assert().failure().stderr(predicate::str::contains(
-        "detached content digest does not match",
+        ".signature.p7s must be the single, last central directory record",
     ));
 }
 
@@ -845,7 +847,8 @@ fn vsix_signature_xml_signs_verifies_and_embeds() {
         .arg("--cert")
         .arg(&cert)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     verify
         .assert()
         .success()
@@ -924,7 +927,8 @@ fn vsix_signature_xml_from_external_signature_signs_verifies_and_embeds() {
         .arg("--cert")
         .arg(&cert)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     verify
         .assert()
         .success()
@@ -947,7 +951,8 @@ fn vsix_signature_xml_from_external_signature_signs_verifies_and_embeds() {
         .arg("vsix-verify-signature")
         .arg(&output)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     embedded_verify
         .assert()
         .success()
@@ -1011,7 +1016,8 @@ fn vsix_sign_creates_verifiable_signed_package() {
         .arg("vsix-verify-signature")
         .arg(&output)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     embedded_verify
         .assert()
         .success()
@@ -1047,7 +1053,7 @@ fn vsix_verify_signature_rejects_tampered_signed_package() {
     let mut verify = portable_cmd();
     verify.arg("vsix-verify-signature").arg(&tampered);
     verify.assert().failure().stderr(predicate::str::contains(
-        "signature reference count mismatch",
+        "VSIX part /tampered.txt is not covered by the signature",
     ));
 }
 
@@ -1084,7 +1090,7 @@ fn vsix_signature_reference_xml_rejects_different_package() {
         .arg("--signature-xml")
         .arg(&xml);
     verify.assert().failure().stderr(predicate::str::contains(
-        "signature reference count mismatch",
+        "VSIX signature manifest digest mismatch",
     ));
 }
 

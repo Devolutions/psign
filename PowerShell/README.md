@@ -17,6 +17,8 @@ Import-Module ./PowerShell/Devolutions.Psign/Devolutions.Psign.psd1
 | Cmdlet | Description |
 |--------|-------------|
 | `Get-PsignSignature` | Inspect Authenticode signatures (PE, scripts, packages) |
+| `Get-PsignArtifactSigningPublisherId` | Read the Azure Artifact Signing publisher ID from a signed file or certificate |
+| `Test-PsignArtifactSigning` | Validate Azure Artifact Signing signatures with pinned Microsoft roots and publisher ID pinning |
 | `Set-PsignSignature` | Sign files using local keys, PFX, cert store, Azure KV, or Trusted Signing |
 | `Test-PsignModule` | Validate a module against AllSigned/RemoteSigned execution policy |
 | `Protect-PsignModule` | Batch-sign all policy-checked files in a module |
@@ -105,6 +107,18 @@ $env:PSIGN_NO_AUTO_TRUST = '1'
 Get-PsignSignature ./app.exe -TrustedCertificatePath ./ca.cer
 Get-PsignSignature ./app.exe -AnchorDirectory ./trusted-roots/
 Get-PsignSignature ./app.exe -AuthRootCab ./authroot.cab
+```
+
+Azure Artifact Signing validation pins its own Microsoft root instead of using AuthRoot or explicit anchors:
+
+```powershell
+# Publisher ID (certificate profile EKU suffix) of the signer; no trust decision:
+Get-PsignArtifactSigningPublisherId ./tool.exe
+Get-PsignArtifactSigningPublisherId -Certificate $signerCertificate
+
+# Azure Artifact Signing validation pinned to Microsoft's root and to one certificate profile:
+Test-PsignArtifactSigning ./tool.exe -PublisherId 285218949.549339218.252840042.443064405
+Get-PsignSignature ./tool.exe -ArtifactSigningPublisherId 285218949.549339218.252840042.443064405
 ```
 
 ## Signing Sources

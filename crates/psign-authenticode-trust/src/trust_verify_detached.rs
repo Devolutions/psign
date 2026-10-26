@@ -1,10 +1,9 @@
 //! Detached PKCS#7 Authenticode trust (content bytes vs indirect digest).
 
-use crate::trust_pkcs7::{
-    verify_authenticode_pkcs7_trust, verify_pkcs9_message_digest_pkcs7_trust,
+use crate::trust_pkcs7::Pkcs7DigestBinding;
+use crate::trust_verify_pe::{
+    TrustVerifyPeOptions, TrustVerifyPeReport, trust_material_for, verify_pkcs7_entry,
 };
-use crate::trust_verify_pe::{TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material};
-use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust;
 use anyhow::{Result, anyhow};
 use authenticode::AuthenticodeSignature;
 use digest::Digest;
@@ -29,19 +28,10 @@ pub fn trust_verify_detached_bytes(
     pkcs7_der: &[u8],
     opts: &TrustVerifyPeOptions,
 ) -> Result<TrustVerifyPeReport> {
-    let (anchors, anchor_certs) = load_trust_material(opts)?;
+    let (anchors, anchor_certs) = trust_material_for(opts)?;
     let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
     let slice = normalized.as_ref();
-
-    let verification_instant = resolve_verification_instant_for_pkcs7_with_trust(
-        slice,
-        &opts.policy,
-        opts.verification_instant_override.as_ref(),
-        &anchors,
-        &anchor_certs,
-        &opts.online,
-        opts.verbose_chain,
-    )?;
+    let mut report = TrustVerifyPeReport::new(&anchors);
 
     match AuthenticodeSignature::from_bytes(slice) {
         Ok(sig) => {
@@ -52,16 +42,15 @@ pub fn trust_verify_detached_bytes(
                     "detached content digest does not match PKCS#7 indirect digest (algorithm inferred from embedded digest length)"
                 ));
             }
-            verify_authenticode_pkcs7_trust(
+            verify_pkcs7_entry(
                 slice,
                 0,
                 computed.as_slice(),
+                Pkcs7DigestBinding::AuthenticodeIndirect,
                 &anchors,
                 &anchor_certs,
-                &opts.policy,
-                &opts.online,
-                &verification_instant,
-                opts.verbose_chain,
+                opts,
+                &mut report,
             )?;
         }
         Err(authenticode_err) => {
@@ -82,24 +71,20 @@ pub fn trust_verify_detached_bytes(
                     "detached content digest does not match PKCS#9 messageDigest (algorithm inferred from embedded digest length)"
                 ));
             }
-            verify_pkcs9_message_digest_pkcs7_trust(
+            verify_pkcs7_entry(
                 slice,
                 0,
                 computed.as_slice(),
+                Pkcs7DigestBinding::Pkcs9MessageDigest,
                 &anchors,
                 &anchor_certs,
-                &opts.policy,
-                &opts.online,
-                &verification_instant,
-                opts.verbose_chain,
+                opts,
+                &mut report,
             )?;
         }
     }
 
-    Ok(TrustVerifyPeReport {
-        pkcs7_entries_verified: 1,
-        anchor_thumbprints: anchors.thumbprint_count(),
-    })
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -65,6 +65,19 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
     [Parameter]
     public SwitchParameter SkipTrust { get; set; }
 
+    [Parameter(HelpMessage = "Validate as an Azure Artifact Signing signature: identity EKU, signer and timestamp chains pinned to Microsoft Identity Verification Root CA 2020, validity at the trusted timestamp.")]
+    public SwitchParameter ArtifactSigning { get; set; }
+
+    [Parameter(HelpMessage = "Require one of these Azure Artifact Signing publisher IDs (certificate profile EKU suffix). Implies -ArtifactSigning.")]
+    [ValidateNotNullOrEmpty]
+    public string[] ArtifactSigningPublisherId { get; set; } = [];
+
+    [Parameter(HelpMessage = "Subscriber root certificate for Private Trust / Public Trust Test signatures. Implies -ArtifactSigning.")]
+    public string[] ArtifactSigningPrivateTrustRoot { get; set; } = [];
+
+    [Parameter(HelpMessage = "Accept Azure Artifact Signing signatures without a timestamp. Implies -ArtifactSigning.")]
+    public SwitchParameter ArtifactSigningAllowMissingTimestamp { get; set; }
+
     protected override void ProcessRecord()
     {
         bool literal = ParameterSetName == LiteralPathParameterSet;
@@ -136,8 +149,17 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
             ? null
             : SessionState.Path.GetUnresolvedProviderPathFromPSPath(AuthRootCab);
 
-        // Auto-trust: if no explicit trust params and not opted out, use cached AuthRoot CAB
+        PortableArtifactSigningOptions? artifactSigning = ArtifactSigningOptions.Create(
+            this,
+            ArtifactSigning.IsPresent,
+            ArtifactSigningPublisherId,
+            ArtifactSigningPrivateTrustRoot,
+            ArtifactSigningAllowMissingTimestamp.IsPresent);
+
+        // Auto-trust: if no explicit trust params and not opted out, use cached AuthRoot CAB.
+        // Artifact Signing pins its own roots, so it never needs AuthRoot.
         if (!SkipTrust.IsPresent
+            && artifactSigning is null
             && resolvedAuthRootCab is null
             && AnchorDirectory is null
             && TrustedCertificatePath.Length == 0
@@ -168,6 +190,7 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
             OnlineAia = OnlineAia.IsPresent,
             OnlineOcsp = OnlineOcsp.IsPresent,
             RevocationMode = RevocationMode,
+            ArtifactSigning = artifactSigning,
         };
     }
 

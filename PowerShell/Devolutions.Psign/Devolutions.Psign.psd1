@@ -11,9 +11,11 @@
     NestedModules = @('lib/net8.0/Devolutions.Psign.PowerShell.dll')
     FormatsToProcess = @('Devolutions.Psign.Format.ps1xml')
     CmdletsToExport = @(
+        'Get-PsignArtifactSigningPublisherId',
         'Get-PsignSignature',
         'New-PsignFileCatalog',
         'Set-PsignSignature',
+        'Test-PsignArtifactSigning',
         'Test-PsignFileCatalog',
         'Test-PsignModule',
         'Protect-PsignModule',

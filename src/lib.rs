@@ -6,6 +6,7 @@
 //! `response_argv`) and depend on **`psign-sip-digest`** for portable digest code.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod artifact_signing_verify;
 pub mod cert_store;
 pub mod cli;
 pub mod code;
@@ -154,9 +155,11 @@ fn portable_command_for_path(path: &std::path::Path) -> anyhow::Result<&'static 
         )),
         "zip" => Ok("verify-zip"),
         "cat" => Ok("verify-catalog"),
-        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "vbs" | "wsf" => {
-            Ok("verify-script")
-        }
+        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "jse" | "vbs"
+        | "vbe" | "wsf" => Ok("verify-script"),
+        // Package signatures have no digest-only check; they always need trust inputs.
+        "nupkg" | "snupkg" => Ok("trust-verify-nupkg"),
+        "vsix" => Ok("trust-verify-vsix"),
         _ => Err(anyhow::anyhow!(
             "portable verify cannot infer a supported SIP format for {}",
             path.display()
@@ -165,7 +168,11 @@ fn portable_command_for_path(path: &std::path::Path) -> anyhow::Result<&'static 
 }
 
 fn portable_verify_unsupported(args: &crate::cli::VerifyArgs) -> bool {
-    args.policy != crate::cli::VerifyPolicy::Default
+    // Portable trust is Authenticode (`/pa`) policy; accept it explicitly with --artifact-signing so
+    // the same command line works in both modes.
+    let pa_with_artifact_signing = args.policy == crate::cli::VerifyPolicy::Pa
+        && crate::artifact_signing_verify::requested(args);
+    (args.policy != crate::cli::VerifyPolicy::Default && !pa_with_artifact_signing)
         || args.policy_guid.is_some()
         || args.revocation_check
         || args.catalog_search.is_some()
@@ -298,6 +305,18 @@ fn portable_auto_trust_enabled() -> bool {
     !psign_authenticode_trust::authroot_cache::is_auto_trust_disabled()
 }
 
+/// Trust command used when explicit trust inputs are given; also covers formats whose automatic
+/// (AuthRoot) routing stays digest-only.
+fn portable_explicit_trust_command(command: &str) -> Option<&'static str> {
+    portable_trust_command_for_verify_command(command).or(match command {
+        "verify-script" => Some("trust-verify-script"),
+        "verify-msix" => Some("trust-verify-msix"),
+        "trust-verify-nupkg" => Some("trust-verify-nupkg"),
+        "trust-verify-vsix" => Some("trust-verify-vsix"),
+        _ => None,
+    })
+}
+
 fn portable_trust_command_for_verify_command(command: &str) -> Option<&'static str> {
     match command {
         "verify-pe" => Some("trust-verify-pe"),
@@ -315,6 +334,23 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
         return Err(anyhow::anyhow!(
             "--mode portable verify supports file verification and portable trust inputs; use `psign-tool portable ...` for lower-level diagnostic commands"
         ));
+    }
+
+    if crate::artifact_signing_verify::requested(args) {
+        // Same policy as Windows mode; it re-hashes each subject, so no separate digest pass.
+        let out = crate::artifact_signing_verify::verify_targets(args)?;
+        if let Some(catalog) = &args.catalog {
+            for subject in &args.files {
+                let argv = [
+                    std::ffi::OsString::from("verify-catalog-member"),
+                    std::ffi::OsString::from("--catalog"),
+                    catalog.as_os_str().to_os_string(),
+                    subject.as_os_str().to_os_string(),
+                ];
+                run_portable_args(&argv)?;
+            }
+        }
+        return Ok(CommandOutput::ok(out));
     }
 
     if let Some(signature) = &args.detached_pkcs7 {
@@ -363,7 +399,7 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
         let inferred_command = portable_command_for_path(path)?;
         let explicit_trust = portable_verify_explicit_trust_requested(args);
         let command = if explicit_trust {
-            portable_trust_command_for_verify_command(inferred_command).ok_or_else(|| {
+            portable_explicit_trust_command(inferred_command).ok_or_else(|| {
                 anyhow::anyhow!(
                     "--mode portable verify trust options are not supported for inferred command {inferred_command}"
                 )
@@ -472,6 +508,26 @@ fn execute_windows(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
         Command::Code(args) => crate::code::code_command(args),
         Command::CertStore(args) => crate::cert_store::cert_store_command(args),
         Command::Portable(args) => run_portable_args(&args.args),
+        Command::Verify(args) if crate::artifact_signing_verify::requested(args) => {
+            crate::artifact_signing_verify::validate(args)?;
+            // Artifact Signing certificates never satisfy the driver policy; use `/pa`.
+            let mut native = args.clone();
+            if native.policy == crate::cli::VerifyPolicy::Default {
+                native.policy = crate::cli::VerifyPolicy::Pa;
+            }
+            // NuGet and VSIX have no Windows SIP; only the shared Rust check applies to them.
+            native
+                .files
+                .retain(|p| !crate::artifact_signing_verify::is_package_without_windows_sip(p));
+            let mut out = if native.files.is_empty() {
+                CommandOutput::ok(String::new())
+            } else {
+                crate::win::verify::verify_file(&native, &cli.global)?
+            };
+            out.stdout
+                .push_str(&crate::artifact_signing_verify::verify_targets(args)?);
+            Ok(out)
+        }
         Command::Verify(args) => crate::win::verify::verify_file(args, &cli.global),
         Command::Sign(args) => crate::win::sign::sign_file(args, &cli.global),
         Command::Timestamp(args) => crate::win::timestamp::timestamp_file(args, &cli.global),
