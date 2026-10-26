@@ -1319,6 +1319,54 @@ impl SigningProvider {
         }
     }
 
+    /// NuGet author signature: id-data CMS that embeds the signature content (as NuGet clients
+    /// require). Local keys add the NuGet author attributes (signing time, commitment type, and
+    /// signing-certificate-v2); remote signers only learn their certificate when signing, so they
+    /// keep the basic attribute set.
+    fn create_nuget_author_signature(
+        &self,
+        content: &[u8],
+        digest_algorithm: AuthenticodeSigningDigest,
+    ) -> Result<Vec<u8>> {
+        let econtent_der = der_encode_octet_string(content)?;
+        let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
+        if let SigningProvider::Local(local) = self {
+            let signed_attrs = pkcs7::pkcs7_signed_attrs(
+                id_data,
+                &econtent_der,
+                digest_algorithm,
+                pkcs7::Pkcs7SignedAttributeProfile::NuGetAuthor,
+                Some(&local.signer_cert),
+            )?;
+            let attrs_der = signed_attrs
+                .to_der()
+                .context("encode NuGet signed attributes")?;
+            let signature = sign_xml_signed_info_rsa(
+                vsix_algorithm_from_authenticode_digest(digest_algorithm),
+                &attrs_der,
+                &local.private_key,
+            )?;
+            return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
+                pkcs7::Pkcs7SignedDataDerInput {
+                    econtent_type: id_data,
+                    econtent_der: &econtent_der,
+                    digest_algorithm,
+                    signer_cert: local.signer_cert.clone(),
+                    chain_certs: local.chain.clone(),
+                    encrypted_digest: &signature,
+                    content_mode: pkcs7::Pkcs7ContentMode::Attached,
+                    signed_attrs,
+                },
+            );
+        }
+        self.create_pkcs7_signed_data(
+            id_data,
+            &econtent_der,
+            digest_algorithm,
+            pkcs7::Pkcs7ContentMode::Attached,
+        )
+    }
+
     fn create_pkcs7_signed_data(
         &self,
         econtent_type: der::asn1::ObjectIdentifier,
@@ -2007,18 +2055,10 @@ fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         })?;
     let content =
         psign_opc_sign::nuget::signature_content_bytes(nuget_alg, &nuget_alg.hash(&unsigned));
-    // Create a CMS SignedData with id-data content type, then detach eContent
-    let econtent_der = der_encode_octet_string(&content)?;
-    let id_data = der::asn1::ObjectIdentifier::new_unwrap(pkcs7::PKCS7_ID_DATA_OID);
-    let pkcs7_detached = provider
-        .create_pkcs7_signed_data(
-            id_data,
-            &econtent_der,
-            request.hash_algorithm.into(),
-            pkcs7::Pkcs7ContentMode::Detached,
-        )
+    let pkcs7 = provider
+        .create_nuget_author_signature(&content, request.hash_algorithm.into())
         .with_context(|| format!("create NuGet CMS signature for {}", request.path.display()))?;
-    let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7_detached)
+    let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut out = Cursor::new(Vec::new());
     psign_opc_sign::nuget::embed_signature(Cursor::new(unsigned), &mut out, &pkcs7_final, false)
@@ -2036,15 +2076,29 @@ fn sign_vsix(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
         PortableDigestAlgorithm::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
         PortableDigestAlgorithm::Sha512 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha512,
     };
-    let signed_info = psign_opc_sign::vsix::signed_info_xml(Cursor::new(data.clone()), vsix_alg)
-        .with_context(|| format!("create VSIX SignedInfo XML for {}", request.path.display()))?;
-    let (signature, cert_der) = provider.sign_xml_signed_info(vsix_alg, &signed_info)?;
-    let xml = psign_opc_sign::vsix::signature_xml_from_signed_info(
-        &signed_info,
-        &signature,
-        Some(&cert_der),
+    let template = psign_opc_sign::vsix::signature_template(
+        Cursor::new(data.clone()),
+        vsix_alg,
+        psign_opc_sign::vsix::VsixSigningTime::Now,
     )
-    .into_bytes();
+    .with_context(|| format!("create VSIX signature for {}", request.path.display()))?;
+    let (signature, cert_der) = provider.sign_xml_signed_info(vsix_alg, &template.signed_info)?;
+    let xml = template
+        .signature_xml(&signature, Some(&cert_der))
+        .into_bytes();
+    let xml = match request.timestamp_server.as_deref() {
+        Some(server) => {
+            let alg = request.timestamp_hash_algorithm.unwrap_or_default();
+            let signature_value = psign_opc_sign::vsix::signature_value_from_signature_xml(&xml)?;
+            let token = request_rfc3161_token(server, alg, &signature_value)
+                .with_context(|| format!("timestamp {}", request.path.display()))?;
+            psign_opc_sign::vsix::add_signature_timestamp(&xml, &token)?
+        }
+        None if request.timestamp_hash_algorithm.is_some() => {
+            bail!("timestamp_hash_algorithm requires timestamp_server")
+        }
+        None => xml,
+    };
     let mut out = Cursor::new(Vec::new());
     psign_opc_sign::vsix::embed_signature_xml(Cursor::new(data), &mut out, &xml, false)
         .with_context(|| format!("embed VSIX signature XML into {}", request.path.display()))?;
@@ -2117,6 +2171,16 @@ fn sign_appinstaller(request: &PortableSignRequest, output_path: &Path) -> Resul
     }
     std::fs::write(&companion_path, pkcs7_final)
         .with_context(|| format!("write companion {}", companion_path.display()))
+}
+
+fn vsix_algorithm_from_authenticode_digest(
+    digest: AuthenticodeSigningDigest,
+) -> psign_opc_sign::vsix::VsixHashAlgorithm {
+    match digest {
+        AuthenticodeSigningDigest::Sha384 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha384,
+        AuthenticodeSigningDigest::Sha512 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha512,
+        AuthenticodeSigningDigest::Sha256 => psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
+    }
 }
 
 fn sign_xml_signed_info_rsa(
@@ -2457,7 +2521,23 @@ fn timestamp_pkcs7_der_rfc3161(
         .as_slice()
         .first()
         .ok_or_else(|| anyhow::anyhow!("PKCS#7 SignedData has no SignerInfo to timestamp"))?;
-    let imprint = digest_bytes_for_timestamp_alg(timestamp_digest, signer.signature.as_bytes());
+    let token = request_rfc3161_token(
+        timestamp_server,
+        timestamp_digest,
+        signer.signature.as_bytes(),
+    )?;
+    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, &token)
+        .context("attach RFC3161 timestamp token")?;
+    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+}
+
+/// Request an RFC3161 timestamp token (DER `ContentInfo`) whose imprint covers `stamped`.
+fn request_rfc3161_token(
+    timestamp_server: &str,
+    timestamp_digest: PortableTimestampDigestAlgorithm,
+    stamped: &[u8],
+) -> Result<Vec<u8>> {
+    let imprint = digest_bytes_for_timestamp_alg(timestamp_digest, stamped);
     let request = timestamp::build_timestamp_request_bytes(
         &timestamp::Rfc3161TimestampRequestPlan {
             digest_alg_oid: timestamp_digest_oid(timestamp_digest),
@@ -2486,12 +2566,10 @@ fn timestamp_pkcs7_der_rfc3161(
             parsed.pki_status.as_raw_integer()
         );
     }
-    let token = parsed
+    parsed
         .time_stamp_token
-        .ok_or_else(|| anyhow::anyhow!("TimeStampResp has no timeStampToken"))?;
-    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, token)
-        .context("attach RFC3161 timestamp token")?;
-    pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| anyhow::anyhow!("TimeStampResp has no timeStampToken"))
 }
 
 fn timestamp_digest_oid(alg: PortableTimestampDigestAlgorithm) -> &'static str {
@@ -2916,12 +2994,13 @@ fn inspect_vsix_opc(path: &Path, data: &[u8]) -> Result<PortableSignatureRespons
             Ok(response)
         }
         Err(standard_error) => {
-            // Signatures written by earlier psign releases reference parts directly and are not
-            // verifiable by Visual Studio; keep reporting their part digests for compatibility.
+            // Legacy only: signatures written by psign releases before the OPC layout referenced
+            // parts directly and are not verifiable by Visual Studio; keep reporting their part
+            // digests so existing packages still inspect.
             let sig_xml =
                 psign_opc_sign::vsix::extract_signature_xml_path(path).unwrap_or_default();
             let legacy_ok = !sig_xml.is_empty()
-                && psign_opc_sign::vsix::verify_signature_reference_xml(
+                && psign_opc_sign::vsix::verify_legacy_signature_reference_xml(
                     Cursor::new(data),
                     &sig_xml,
                     psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,

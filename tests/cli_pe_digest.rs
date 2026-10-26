@@ -847,7 +847,8 @@ fn vsix_signature_xml_signs_verifies_and_embeds() {
         .arg("--cert")
         .arg(&cert)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     verify
         .assert()
         .success()
@@ -926,7 +927,8 @@ fn vsix_signature_xml_from_external_signature_signs_verifies_and_embeds() {
         .arg("--cert")
         .arg(&cert)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     verify
         .assert()
         .success()
@@ -949,7 +951,8 @@ fn vsix_signature_xml_from_external_signature_signs_verifies_and_embeds() {
         .arg("vsix-verify-signature")
         .arg(&output)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     embedded_verify
         .assert()
         .success()
@@ -1013,7 +1016,8 @@ fn vsix_sign_creates_verifiable_signed_package() {
         .arg("vsix-verify-signature")
         .arg(&output)
         .arg("--trusted-ca")
-        .arg(&cert);
+        .arg(&cert)
+        .arg("--allow-loose-signing-cert");
     embedded_verify
         .assert()
         .success()
@@ -1049,7 +1053,7 @@ fn vsix_verify_signature_rejects_tampered_signed_package() {
     let mut verify = portable_cmd();
     verify.arg("vsix-verify-signature").arg(&tampered);
     verify.assert().failure().stderr(predicate::str::contains(
-        "signature reference count mismatch",
+        "VSIX part /tampered.txt is not covered by the signature",
     ));
 }
 
@@ -1086,7 +1090,7 @@ fn vsix_signature_reference_xml_rejects_different_package() {
         .arg("--signature-xml")
         .arg(&xml);
     verify.assert().failure().stderr(predicate::str::contains(
-        "signature reference count mismatch",
+        "VSIX signature manifest digest mismatch",
     ));
 }
 

@@ -333,6 +333,7 @@ struct VerifiedXmlSignature {
     certificates: Vec<Cert>,
     signature_value: Vec<u8>,
     timestamp_token: Option<Vec<u8>>,
+    reference_count: usize,
 }
 
 fn verify_xml_signature(package: &Package) -> Result<VerifiedXmlSignature> {
@@ -454,6 +455,7 @@ fn verify_xml_signature(package: &Package) -> Result<VerifiedXmlSignature> {
         certificates,
         signature_value,
         timestamp_token,
+        reference_count: referenced.len(),
     })
 }
 
@@ -464,6 +466,8 @@ pub struct VsixSignature {
     pub signer_certificate_der: Vec<u8>,
     /// RFC 3161 token from `<TimeStamp><EncodedTime>` (not yet trust-verified).
     pub timestamp_token: Option<Vec<u8>>,
+    /// Number of package parts covered by the signed manifest.
+    pub reference_count: usize,
 }
 
 /// Verify the VSIX signature binding (steps 1-4 of the module docs) without any trust decision.
@@ -475,6 +479,7 @@ pub fn verify_vsix_signature_bytes(data: &[u8]) -> Result<VsixSignature> {
             .to_der()
             .map_err(|e| anyhow!("encode signer certificate: {e}"))?,
         timestamp_token: sig.timestamp_token,
+        reference_count: sig.reference_count,
     })
 }
 
