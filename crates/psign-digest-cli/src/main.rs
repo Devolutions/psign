@@ -2093,14 +2093,18 @@ enum Command {
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
     },
-    /// Print the **Azure Artifact Signing** publisher ID (certificate profile identity EKU) as JSON.
+    /// Print the **Azure Artifact Signing** publisher ID (certificate profile identity EKU).
     ///
     /// Reads the signer certificate(s) of a PE, a raw PKCS#7, or a single certificate (PEM/DER). No
     /// trust checks; use **`trust-verify-pe --artifact-signing`** to validate the signature.
+    /// **`--format id`** prints only the publisher ID (one line per signature) and fails when the
+    /// signer has none.
     ArtifactSigningPublisherId {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = ArtifactSigningIdInput::Pe)]
         input: ArtifactSigningIdInput,
+        #[arg(long, value_enum, default_value_t = ArtifactSigningIdFormat::Json)]
+        format: ArtifactSigningIdFormat,
     },
     /// Same trust pipeline as **`trust-verify-pe`** after CAB SIP digest consistency (**`verify-cab`**).
     TrustVerifyCab {
@@ -3086,6 +3090,14 @@ enum ArtifactSigningIdInput {
     Pe,
     Pkcs7,
     Cert,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ArtifactSigningIdFormat {
+    /// Identity details as JSON.
+    Json,
+    /// Only the publisher ID (for pinning), one line per signature.
+    Id,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -4452,7 +4464,38 @@ where
                 .with_context(|| format!("trust-verify-pe {}", path.display()))?;
             print_trust_ok("trust-verify-pe", &report);
         }
-        Command::ArtifactSigningPublisherId { path, input } => {
+        Command::ArtifactSigningPublisherId {
+            path,
+            input,
+            format: ArtifactSigningIdFormat::Id,
+        } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let ids: Vec<String> = match input {
+                ArtifactSigningIdInput::Pe => artifact_signing_identities_from_pe(&bytes)?
+                    .into_iter()
+                    .filter_map(|signer| signer.identity)
+                    .map(|identity| identity.publisher_id)
+                    .collect(),
+                ArtifactSigningIdInput::Pkcs7 => artifact_signing_identity_from_pkcs7_der(&bytes)?
+                    .map(|identity| identity.publisher_id)
+                    .into_iter()
+                    .collect(),
+                ArtifactSigningIdInput::Cert => artifact_signing_identity_from_cert_bytes(&bytes)?
+                    .map(|identity| identity.publisher_id)
+                    .into_iter()
+                    .collect(),
+            };
+            if ids.is_empty() {
+                return Err(anyhow!(
+                    "{}: no Azure Artifact Signing identity EKU (1.3.6.1.4.1.311.97.*) on the signer",
+                    path.display()
+                ));
+            }
+            for id in ids {
+                println!("{id}");
+            }
+        }
+        Command::ArtifactSigningPublisherId { path, input, .. } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             let json = match input {
                 ArtifactSigningIdInput::Pe => {

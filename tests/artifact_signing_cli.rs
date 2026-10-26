@@ -52,6 +52,41 @@ fn publisher_id_from_certificate_and_pkcs7() {
 }
 
 #[test]
+fn publisher_id_format_id_prints_only_the_id() {
+    for (input, path) in [
+        ("cert", "artifact-signing/devolutions-signer.pem"),
+        ("pkcs7", "artifact-signing/psign-tool.pkcs7.der"),
+    ] {
+        psign()
+            .args([
+                "portable",
+                "artifact-signing-publisher-id",
+                "--format",
+                "id",
+                "--input",
+                input,
+            ])
+            .arg(fixture(path))
+            .assert()
+            .success()
+            .stdout(format!("{PUBLISHER_ID}\n"));
+    }
+    psign()
+        .args([
+            "portable",
+            "artifact-signing-publisher-id",
+            "--format",
+            "id",
+        ])
+        .arg(fixture("pe-authenticode-upstream/tiny64.signed.efi"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no Azure Artifact Signing identity EKU",
+        ));
+}
+
+#[test]
 fn publisher_id_is_null_for_non_artifact_signing_signer() {
     psign()
         .args(["portable", "artifact-signing-publisher-id"])

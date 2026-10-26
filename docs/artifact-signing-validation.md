@@ -111,6 +111,19 @@ psign-tool portable artifact-signing-publisher-id ./signer.cer --input cert
 
 `identity` is `null` when the signer has no Artifact Signing identity EKU. This command does **not** validate the signature: any certificate can carry these OIDs. Use it to *discover* the ID you want to pin, then pin it with `--artifact-signing-publisher-id` (or `-PublisherId` in PowerShell).
 
+To get only the publisher ID for pinning, without JSON parsing:
+
+```bash
+psign-tool portable artifact-signing-publisher-id --format id ./MyApp.exe
+# 285218949.549339218.252840042.443064405
+```
+
+```powershell
+(Get-PsignArtifactSigningPublisherId .\MyApp.exe).PublisherId
+```
+
+`--format id` prints one line per signature that carries an identity, and exits non-zero when none does.
+
 On Windows the same value appears in the certificate's *Enhanced Key Usage* field as `Unknown Key Usage (1.3.6.1.4.1.311.97.…)`.
 
 ## Root CAs and chain layout

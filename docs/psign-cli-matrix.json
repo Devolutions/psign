@@ -256,7 +256,7 @@
       {"name": "pe-digest", "maps_to_native_concept": "PE SIP image hash (algorithm-selectable)"},
       {"name": "verify-pe", "maps_to_native_concept": "Consistency check after conceptual WinTrust success — similar to `psign-tool verify --rust-sip-pe-digest-check`"},
       {"name": "trust-verify-pe", "maps_to_native_concept": "Explicit-anchor PKCS#7 trust + picky chain + PE digest (not WinTrust); optional `--as-of YYYY-MM-DD` for expired fixtures; `--artifact-signing`, `--artifact-signing-publisher-id`, `--artifact-signing-private-trust-root`, `--artifact-signing-allow-missing-timestamp` (shared by every `trust-verify-*`) swap the anchors for the pinned Azure Artifact Signing policy"},
-      {"name": "artifact-signing-publisher-id", "maps_to_native_concept": "Extract Azure Artifact Signing publisher ID (certificate profile identity EKU `1.3.6.1.4.1.311.97.*`) from PE / PKCS#7 / certificate as JSON (no trust decision)"},
+      {"name": "artifact-signing-publisher-id", "maps_to_native_concept": "Extract Azure Artifact Signing publisher ID (certificate profile identity EKU `1.3.6.1.4.1.311.97.*`) from PE / PKCS#7 / certificate as JSON, or only the ID with `--format id` (no trust decision)"},
       {"name": "trust-verify-cab", "maps_to_native_concept": "`verify-cab` digest consistency then same trust stack as PE"},
       {"name": "trust-verify-msi", "maps_to_native_concept": "`verify-msi` digest consistency then same trust stack as PE"},
       {"name": "trust-verify-esd", "maps_to_native_concept": "`verify-esd` digest consistency then same trust stack as PE"},
