@@ -114,7 +114,7 @@ psign-tool portable artifact-signing-publisher-id ./signer.cer --input cert
 To get only the publisher ID for pinning, without JSON parsing:
 
 ```bash
-psign-tool portable artifact-signing-publisher-id --format id ./MyApp.exe
+psign-tool portable artifact-signing-publisher-id --format publisher-id ./MyApp.exe
 # 285218949.549339218.252840042.443064405
 ```
 
@@ -122,7 +122,7 @@ psign-tool portable artifact-signing-publisher-id --format id ./MyApp.exe
 (Get-PsignArtifactSigningPublisherId .\MyApp.exe).PublisherId
 ```
 
-`--format id` prints one line per signature that carries an identity, and exits non-zero when none does.
+`--format publisher-id` prints one line per signature that carries an identity, and exits non-zero when none does.
 
 On Windows the same value appears in the certificate's *Enhanced Key Usage* field as `Unknown Key Usage (1.3.6.1.4.1.311.97.…)`.
 

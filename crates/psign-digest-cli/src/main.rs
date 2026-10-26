@@ -2097,7 +2097,7 @@ enum Command {
     ///
     /// Reads the signer certificate(s) of a PE, a raw PKCS#7, or a single certificate (PEM/DER). No
     /// trust checks; use **`trust-verify-pe --artifact-signing`** to validate the signature.
-    /// **`--format id`** prints only the publisher ID (one line per signature) and fails when the
+    /// **`--format publisher-id`** prints only the publisher ID (one line per signature) and fails when the
     /// signer has none.
     ArtifactSigningPublisherId {
         path: PathBuf,
@@ -3097,7 +3097,7 @@ enum ArtifactSigningIdFormat {
     /// Identity details as JSON.
     Json,
     /// Only the publisher ID (for pinning), one line per signature.
-    Id,
+    PublisherId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -4467,7 +4467,7 @@ where
         Command::ArtifactSigningPublisherId {
             path,
             input,
-            format: ArtifactSigningIdFormat::Id,
+            format: ArtifactSigningIdFormat::PublisherId,
         } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
             let ids: Vec<String> = match input {

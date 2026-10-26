@@ -52,7 +52,7 @@ fn publisher_id_from_certificate_and_pkcs7() {
 }
 
 #[test]
-fn publisher_id_format_id_prints_only_the_id() {
+fn publisher_id_format_prints_only_the_id() {
     for (input, path) in [
         ("cert", "artifact-signing/devolutions-signer.pem"),
         ("pkcs7", "artifact-signing/psign-tool.pkcs7.der"),
@@ -62,7 +62,7 @@ fn publisher_id_format_id_prints_only_the_id() {
                 "portable",
                 "artifact-signing-publisher-id",
                 "--format",
-                "id",
+                "publisher-id",
                 "--input",
                 input,
             ])
@@ -76,7 +76,7 @@ fn publisher_id_format_id_prints_only_the_id() {
             "portable",
             "artifact-signing-publisher-id",
             "--format",
-            "id",
+            "publisher-id",
         ])
         .arg(fixture("pe-authenticode-upstream/tiny64.signed.efi"))
         .assert()
