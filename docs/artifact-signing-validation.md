@@ -155,20 +155,20 @@ If Microsoft adds another Artifact Signing root, add a `PinnedRoot` entry to `PU
 
 ## Where the policy runs
 
-The policy lives in one place: `TrustVerifyPeOptions::artifact_signing` ([`trust_verify_pe.rs`](../crates/psign-authenticode-trust/src/trust_verify_pe.rs)). When it is set, every `trust_verify_*` entry point swaps its generic anchor handling for the Artifact Signing check. That covers PE/WinMD, CAB, MSI/MSP, WIM/ESD, catalog, ZIP Authenticode, PowerShell-class scripts, and detached PKCS#7. All callers reach it through the same functions:
+The policy lives in one place: `TrustVerifyPeOptions::artifact_signing` ([`trust_verify_pe.rs`](../crates/psign-authenticode-trust/src/trust_verify_pe.rs)). When it is set, every `trust_verify_*` entry point swaps its generic anchor handling for the Artifact Signing check. That covers PE/WinMD, CAB, MSI/MSP, WIM/ESD, catalogs, ZIP Authenticode, PowerShell and WSH scripts, cleartext MSIX/AppX packages and bundles, NuGet packages, VSIX packages, and detached PKCS#7 (see [Format notes](#format-notes)). All callers reach it through the same functions:
 
 | Surface | How it reaches the policy |
 |---|---|
-| `psign-tool verify --artifact-signing…`, **Windows mode** | `WinVerifyTrust` first (forced to the Authenticode `/pa` policy unless `--policy` is given, because Artifact Signing certificates never satisfy the default driver policy), then [`artifact_signing_verify::verify_targets`](../src/artifact_signing_verify.rs) → `trust_verify_path`. |
+| `psign-tool verify --artifact-signing…`, **Windows mode** | `WinVerifyTrust` first (forced to the Authenticode `/pa` policy unless `--policy` is given, because Artifact Signing certificates never satisfy the default driver policy), then [`artifact_signing_verify::verify_targets`](../src/artifact_signing_verify.rs) → `trust_verify_path`. NuGet and VSIX have no Windows SIP, so they skip `WinVerifyTrust`. |
 | `psign-tool verify --artifact-signing…`, **portable mode** | The same `verify_targets` call, in place of the generic AuthRoot trust. `--policy pa` is accepted, so one command line works in both modes. |
-| `psign-tool portable trust-verify-{pe,cab,msi,esd,catalog,zip,detached} --artifact-signing…` | The shared portable trust flags build the same `TrustVerifyPeOptions`. |
+| `psign-tool portable trust-verify-{pe,cab,msi,esd,catalog,zip,detached,script,msix,nupkg,vsix} --artifact-signing…` | The shared portable trust flags build the same `TrustVerifyPeOptions`. |
 | PowerShell `Test-PsignArtifactSigning`, `Get-PsignSignature -ArtifactSigning…` | The `artifact_signing` object in the `psign_core_get_signature` request ([portable-core-ffi.md](portable-core-ffi.md)). |
 
 Windows mode can only be *stricter* than portable mode: a file must pass both WinVerifyTrust and the Artifact Signing check. For a genuine Artifact Signing signature both pass. The CLI tests in [`tests/artifact_signing_cli.rs`](../tests/artifact_signing_cli.rs) assert the same accept/reject outcome in both modes, using a real sample when `PSIGN_ARTIFACT_SIGNING_SAMPLE` is set.
 
 ## Validation algorithm
 
-For **every** signature the format exposes (each PE certificate-table entry, or the single PKCS#7 of the other formats), all of these must pass:
+For **every** signature the format exposes (each PE certificate-table entry, or the single signature of the other formats), all of these must pass. Step 1 and the chain/timestamp sources differ per format; see [Format notes](#format-notes).
 
 1. **Digest binding.** Recompute the subject digest with the format's SIP logic and require it to equal the PKCS#7 binding. That is the indirect `SpcIndirectDataContent` digest for Authenticode formats, and the PKCS#9 `messageDigest` for catalogs and CMS-detached signatures.
 2. **Identity.** Take the certificate of the first `SignerInfo` and decode its Artifact Signing identity (see above). Fail if:
@@ -240,7 +240,7 @@ Sample output in Windows mode (portable mode prints only the Artifact Signing bl
 ```text
 Successfully verified: ./MyApp.exe
 Artifact Signing verified: ./MyApp.exe
-  PKCS#7[0] C=CA,ST=Québec,L=Lavaltrie,O=Devolutions Inc,CN=Devolutions Inc publisher_id=285218949.549339218.252840042.443064405 kind=public_trust root=f40042e2e5f7e8ef8189fed15519aece42c3bfa2 time=2026-10-23T18:43:55Z (timestamp)
+  signature[0] C=CA,ST=Québec,L=Lavaltrie,O=Devolutions Inc,CN=Devolutions Inc publisher_id=285218949.549339218.252840042.443064405 kind=public_trust root=f40042e2e5f7e8ef8189fed15519aece42c3bfa2 time=2026-10-23T18:43:55Z (timestamp)
 ```
 
 ### PowerShell (`Devolutions.Psign`)
@@ -283,6 +283,21 @@ Other entry points:
 - `verify_artifact_signing_pkcs7(pkcs7_der, index, subject_digest, binding, &policy, &opts)` for a PKCS#7 whose subject digest you computed yourself.
 - `artifact_signing_identity_from_certificate` / `_from_cert_bytes` / `_from_pkcs7_der` / `artifact_signing_identities_from_pe` for identity extraction only.
 
+## Format notes
+
+| Format | Signature binding checked before the policy | Signer chain / timestamp source |
+|---|---|---|
+| PE/WinMD, CAB, MSI/MSP, WIM/ESD, ZIP | Format SIP digest vs `SpcIndirectDataContent` | PKCS#7 bag; RFC 3161 unsigned attribute |
+| PowerShell scripts, WSH scripts (`.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`) | `pwrshsip` / `wshext` digest of the stripped script | PKCS#7 bag; RFC 3161 unsigned attribute |
+| MSIX/AppX and bundles | APPX blob: AXPC/AXCD/AXCT/AXBM (+ AXCI when `CodeIntegrity.cat` exists, on both sides), block map file hashes, bundle children | `AppxSignature.p7x` bag; RFC 3161 unsigned attribute |
+| Catalogs, detached PKCS#7 | PKCS#9 `messageDigest` over the content | PKCS#7 bag; RFC 3161 unsigned attribute |
+| NuGet (`.nupkg`, `.snupkg`) | Package hash over the **exact** unsigned bytes: the `.signature.p7s` entry must be the last ZIP entry, and is cut out byte for byte, as NuGet does. The signature content (`Version:1`, `<oid>-Hash:`) must be embedded in the CMS and match, with PKCS#9 `messageDigest` over it | `.signature.p7s` bag; RFC 3161 unsigned attribute |
+| VSIX | OPC XMLDSig: C14N 1.0 / exclusive C14N `SignedInfo` and `SignatureValue` (RSA SHA-256/384/512); `#idPackageObject` digest; every `Manifest` part digest (raw, C14N, or OPC RelationshipTransform). Every package part except `[Content_Types].xml` and the signature part must be signed, and each reference's `ContentType` must match `[Content_Types].xml` | `KeyInfo` certificates; RFC 3161 token in `<Object><TimeStamp><EncodedTime>` (dotnet/sign), imprint over the raw `SignatureValue` octets |
+
+VSIX signatures from dotnet/sign carry only the leaf certificate in `KeyInfo`, so building the Public Trust chain needs the issuing CAs from their AIA URLs. Pass `--online-aia` (fetched certificates are still validated against the pinned root). NuGet, MSIX and the PKCS#7 formats embed the chain.
+
+Windows mode runs `WinVerifyTrust` for every format that has a Windows SIP, including MSIX/AppX and WSH. NuGet and VSIX have no SIP, so Windows mode applies only the shared check to them.
+
 ## Other places the identity is used
 
 - **WDAC / App Control policies** can pin the identity EKU directly. That is the Windows-native equivalent of `--artifact-signing-publisher-id`.
@@ -292,7 +307,8 @@ Other entry points:
 ## Limitations
 
 - **Revocation is opt-in.** It is off by default because it needs network access. Use `--revocation-mode require` to fail closed. Microsoft revokes individual daily certificates on confirmed misuse, so require mode is recommended where network access is available. The Artifact Signing signer certificates publish a CRL distribution point but no OCSP URL, so CRLs do the work. Microsoft PKI CRLs are signed with `sha384WithRSAEncryption`, which the portable verifier supports along with SHA-256 and SHA-512. RSA-PSS and ECDSA-signed CRLs and OCSP responses are not supported. Revocation status is checked against the **current** CRL, not as of the timestamp time.
-- **Formats.** PE/WinMD, CAB, MSI/MSP, WIM/ESD, catalogs, ZIP Authenticode, PowerShell-class scripts, and detached PKCS#7 are covered. MSIX/AppX, NuGet, VSIX, ClickOnce, and WSH scripts (`.js`, `.vbs`, `.wsf`) are rejected with the Artifact Signing options, because they have no portable trust verifier yet. In the PowerShell module, WIM/ESD and detached PKCS#7 also have no portable trust path yet.
+- **Formats.** Everything in [Format notes](#format-notes) is covered. ClickOnce manifests, App Installer descriptors, encrypted MSIX, and MSIX/AppX upload containers are rejected with the Artifact Signing options. In the PowerShell module, WIM/ESD and detached PKCS#7 have no portable trust path.
+- **psign-written legacy signatures.** VSIX signatures written by psign's own VSIX signer reference parts directly, without the OPC `Object`/`Manifest`, and are not valid OPC XMLDSig. Inspection reports them, but trust and Artifact Signing verification reject them. NuGet signatures written by `Set-PsignSignature` use a detached CMS; they are accepted when the rebuilt signature content matches the signed digest, but NuGet clients expect the content embedded.
 - **Catalog database lookup.** `verify --catalog-search` / `--catalog-database-guid` cannot be combined with the policy. Pass the catalog explicitly with `--catalog`; its signature is then checked, and member hashes are verified as usual.
 - **Nested signatures.** Only certificate-table entries are checked. Nested signatures (`1.3.6.1.4.1.311.2.4.1`) inside an entry are not evaluated as separate Artifact Signing signatures.
 - **Root subtree.** The pinned root also issues non-Artifact-Signing CAs (for example the timestamping CA). Requiring the identity EKU, the Public Trust marker, and the code signing EKU on the signer is what limits acceptance to Artifact Signing. Intermediates are deliberately not pinned (see above).

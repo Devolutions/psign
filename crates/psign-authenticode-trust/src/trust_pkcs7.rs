@@ -88,7 +88,7 @@ fn extended_key_usage_contains(der: &[u8], expected: ObjectIdentifier) -> Result
     Ok(found)
 }
 
-fn x509_cert_has_code_signing_eku(cert: &Certificate) -> Result<bool> {
+pub(crate) fn x509_cert_has_code_signing_eku(cert: &Certificate) -> Result<bool> {
     let Some(exts) = &cert.tbs_certificate.extensions else {
         return Ok(false);
     };

@@ -1884,7 +1884,21 @@ pub fn verify_msix_digest_consistency(path: &Path) -> Result<()> {
     }
 
     let buf = std::fs::read(path)?;
-    verify_msix_digest_consistency_bytes(&buf, &ext)
+    verify_msix_digest_consistency_bytes(&buf, &ext).map(|_| ())
+}
+
+/// Verify the APPX digest binding of a cleartext package and return its PKCS#7 (without the
+/// `PKCX` prefix) and the verified APPX `messageDigest` blob, for trust verification.
+///
+/// `ext` is the lowercase extension without the dot (`msix`, `appx`, `msixbundle`, `appxbundle`).
+pub fn msix_verified_signature(buf: &[u8], ext: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let ext = ext.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "msix" | "appx" | "msixbundle" | "appxbundle") {
+        return Err(anyhow!(
+            "Rust MSIX SIP digest check applies only to cleartext `.msix` / `.appx` / `.msixbundle` / `.appxbundle` files"
+        ));
+    }
+    verify_msix_digest_consistency_bytes(buf, &ext)
 }
 
 /// Fast `--skip-signed` preflight: does this OPC/ZIP package already carry an `AppxSignature.p7x` part?
@@ -1970,7 +1984,7 @@ pub fn msix_authenticode_digest_blob(
     Ok((kind, blob))
 }
 
-fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<()> {
+fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<(Vec<u8>, Vec<u8>)> {
     let tail = parse_zip_tail(buf)?;
     let mut layout_archive = ZipArchive::new(Cursor::new(buf))?;
     validate_zip_file_layout(buf, &mut layout_archive, &tail)?;
@@ -2040,15 +2054,21 @@ fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<()> {
     check("AXCD (central directory)", &cd_hash, &parts.axcd)?;
     check("AXCT ([Content_Types].xml)", &ct_hash, &parts.axct)?;
     check("AXBM (AppxBlockMap.xml)", &bm_hash, &parts.axbm)?;
-    if let (Some(ch), Some(sig_ci)) = (&ci_hash, &parts.axci) {
-        check("AXCI (CodeIntegrity.cat)", ch, sig_ci)?;
+    match (&ci_hash, &parts.axci) {
+        (Some(ch), Some(sig_ci)) => check("AXCI (CodeIntegrity.cat)", ch, sig_ci)?,
+        (None, None) => {}
+        _ => {
+            return Err(anyhow!(
+                "MSIX Authenticode AXCI presence mismatch (CodeIntegrity.cat vs PKCS#7 APPX blob)"
+            ));
+        }
     }
     validate_block_map_file_hashes(buf, kind, &block_map_files)?;
     if matches!(ext, "msixbundle" | "appxbundle") {
         verify_bundle_child_packages(buf)?;
     }
 
-    Ok(())
+    Ok((pkcs7.to_vec(), embedded.to_vec()))
 }
 
 #[cfg(test)]

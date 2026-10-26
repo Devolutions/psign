@@ -155,9 +155,11 @@ fn portable_command_for_path(path: &std::path::Path) -> anyhow::Result<&'static 
         )),
         "zip" => Ok("verify-zip"),
         "cat" => Ok("verify-catalog"),
-        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "vbs" | "wsf" => {
-            Ok("verify-script")
-        }
+        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "jse" | "vbs"
+        | "vbe" | "wsf" => Ok("verify-script"),
+        // Package signatures have no digest-only check; they always need trust inputs.
+        "nupkg" | "snupkg" => Ok("trust-verify-nupkg"),
+        "vsix" => Ok("trust-verify-vsix"),
         _ => Err(anyhow::anyhow!(
             "portable verify cannot infer a supported SIP format for {}",
             path.display()
@@ -303,6 +305,18 @@ fn portable_auto_trust_enabled() -> bool {
     !psign_authenticode_trust::authroot_cache::is_auto_trust_disabled()
 }
 
+/// Trust command used when explicit trust inputs are given; also covers formats whose automatic
+/// (AuthRoot) routing stays digest-only.
+fn portable_explicit_trust_command(command: &str) -> Option<&'static str> {
+    portable_trust_command_for_verify_command(command).or(match command {
+        "verify-script" => Some("trust-verify-script"),
+        "verify-msix" => Some("trust-verify-msix"),
+        "trust-verify-nupkg" => Some("trust-verify-nupkg"),
+        "trust-verify-vsix" => Some("trust-verify-vsix"),
+        _ => None,
+    })
+}
+
 fn portable_trust_command_for_verify_command(command: &str) -> Option<&'static str> {
     match command {
         "verify-pe" => Some("trust-verify-pe"),
@@ -385,7 +399,7 @@ fn execute_portable_verify(args: &crate::cli::VerifyArgs) -> anyhow::Result<Comm
         let inferred_command = portable_command_for_path(path)?;
         let explicit_trust = portable_verify_explicit_trust_requested(args);
         let command = if explicit_trust {
-            portable_trust_command_for_verify_command(inferred_command).ok_or_else(|| {
+            portable_explicit_trust_command(inferred_command).ok_or_else(|| {
                 anyhow::anyhow!(
                     "--mode portable verify trust options are not supported for inferred command {inferred_command}"
                 )
@@ -501,7 +515,15 @@ fn execute_windows(cli: &crate::cli::Cli) -> anyhow::Result<CommandOutput> {
             if native.policy == crate::cli::VerifyPolicy::Default {
                 native.policy = crate::cli::VerifyPolicy::Pa;
             }
-            let mut out = crate::win::verify::verify_file(&native, &cli.global)?;
+            // NuGet and VSIX have no Windows SIP; only the shared Rust check applies to them.
+            native
+                .files
+                .retain(|p| !crate::artifact_signing_verify::is_package_without_windows_sip(p));
+            let mut out = if native.files.is_empty() {
+                CommandOutput::ok(String::new())
+            } else {
+                crate::win::verify::verify_file(&native, &cli.global)?
+            };
             out.stdout
                 .push_str(&crate::artifact_signing_verify::verify_targets(args)?);
             Ok(out)

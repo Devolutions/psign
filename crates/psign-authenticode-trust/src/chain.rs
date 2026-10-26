@@ -140,6 +140,50 @@ pub fn issuer_chain_excluding_leaf_online(
     Ok(out)
 }
 
+/// Build `leaf`'s chain from `pool` plus the anchor certificates (fetching issuers through AIA when
+/// enabled), require it to end in `anchors`, apply the revocation policy, and verify every
+/// certificate signature and validity period at `instant`. Returns the terminal root.
+///
+/// For signatures that are not CMS (VSIX XMLDSig), where picky's Authenticode verifier does not
+/// apply.
+pub fn verify_certificate_chain_to_anchors(
+    leaf: &Cert,
+    pool: Vec<Cert>,
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    online: &crate::policy::OnlineTrustOptions,
+    instant: &picky::x509::date::UtcDate,
+    verbose_chain: bool,
+) -> Result<Cert> {
+    let mut merged = merge_unique_certs(anchor_certs.to_vec(), pool)?;
+    let chain = issuer_chain_excluding_leaf_online(leaf, &mut merged, online, Some(anchors))?;
+    let root = terminal_root_cert_owned(leaf, &chain).clone();
+    let root_thumb = cert_sha1_thumbprint(&root)?;
+    if verbose_chain {
+        eprintln!("trust-verify: leaf subject: {}", leaf.subject_name());
+        for (i, c) in chain.iter().enumerate() {
+            eprintln!("trust-verify:   chain[{i}] subject: {}", c.subject_name());
+        }
+    }
+    if !anchors.contains_thumbprint(&root_thumb) {
+        return Err(anyhow!(
+            "terminal root certificate is not in the anchor store (SHA-1 thumbprint {:02x}{:02x}…)",
+            root_thumb[0],
+            root_thumb[1]
+        ));
+    }
+    crate::online::check_revocation_chain(leaf, &chain, online)?;
+    if leaf.subject_name() == leaf.issuer_name() && chain.is_empty() {
+        return Ok(root);
+    }
+    leaf.verifier()
+        .chain(chain.iter())
+        .exact_date(instant)
+        .verify()
+        .map_err(|e| anyhow!("certificate chain verification: {e}"))?;
+    Ok(root)
+}
+
 pub fn terminal_root_cert<'a>(leaf: &'a Cert, chain: &'a [&'a Cert]) -> &'a Cert {
     if leaf.subject_name() == leaf.issuer_name() {
         leaf

@@ -24,6 +24,19 @@ pub mod zip_authenticode;
 use anyhow::Result;
 
 /// PowerShell-class (`pwrshsip.dll`) or WSH (`wshext.dll`) script digest vs PKCS#7 indirect data.
+/// Verified script digest binding (PKCS#7 plus digests) for PowerShell-class or WSH scripts.
+pub fn script_digest_report(
+    raw: &[u8],
+    ext: &str,
+) -> Result<ps_script::ScriptAuthenticodeDigestReport> {
+    let ext_l = ext.to_ascii_lowercase();
+    if ps_script::is_wsh_extension(&ext_l) {
+        wsh_script::wsh_digest_report(raw, &ext_l)
+    } else {
+        ps_script::powershell_class_digest_report(raw, &ext_l)
+    }
+}
+
 pub fn verify_script_digest_consistency(raw: &[u8], ext: &str) -> Result<()> {
     let ext_l = ext.to_ascii_lowercase();
     if ps_script::is_wsh_extension(&ext_l) {

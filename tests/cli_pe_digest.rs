@@ -619,6 +619,8 @@ fn nupkg_verify_signature_rejects_tampered_signed_package() {
     sign.assert().success();
     append_zip_entry(&signed, &tampered, "tampered.txt", b"changed");
 
+    // NuGet requires `.signature.p7s` to stay the last ZIP entry, so an appended entry is
+    // rejected before the package hash is even recomputed.
     let mut verify = portable_cmd();
     verify
         .arg("nupkg-verify-signature")
@@ -627,7 +629,7 @@ fn nupkg_verify_signature_rejects_tampered_signed_package() {
         .arg(&cert)
         .arg("--allow-loose-signing-cert");
     verify.assert().failure().stderr(predicate::str::contains(
-        "detached content digest does not match",
+        ".signature.p7s must be the single, last central directory record",
     ));
 }
 

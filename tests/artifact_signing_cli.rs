@@ -151,3 +151,124 @@ fn verify_real_sample_identically_in_every_mode() {
             .stderr(predicate::str::contains("is not one of the expected IDs"));
     }
 }
+
+const PRIVATE_TRUST_ID: &str = "11.22.33.44.55.66.77.88";
+const PRIVATE_TRUST_FILES: [&str; 4] = ["sample.js", "sample.msix", "sample.nupkg", "sample.vsix"];
+
+fn private_trust_args(cmd: &mut Command, publisher_id: &str) {
+    cmd.args(["--artifact-signing-publisher-id", publisher_id])
+        .arg("--artifact-signing-private-trust-root")
+        .arg(fixture("artifact-signing/private-trust/root.cer"))
+        .arg("--artifact-signing-allow-missing-timestamp");
+}
+
+/// Synthetic Private Trust signer (see scripts/ci/build-artifact-signing-private-trust-fixtures.ps1).
+#[test]
+fn private_trust_script_msix_nuget_vsix_verify_in_portable_mode() {
+    for file in PRIVATE_TRUST_FILES {
+        let mut cmd = psign();
+        cmd.args(["--mode", "portable", "verify"]);
+        private_trust_args(&mut cmd, PRIVATE_TRUST_ID);
+        cmd.arg(fixture(&format!("artifact-signing/private-trust/{file}")))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!(
+                "publisher_id={PRIVATE_TRUST_ID} kind=private_trust"
+            )));
+
+        let mut cmd = psign();
+        cmd.args(["--mode", "portable", "verify"]);
+        private_trust_args(&mut cmd, "1.2.3.4");
+        cmd.arg(fixture(&format!("artifact-signing/private-trust/{file}")))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("is not one of the expected IDs"));
+    }
+}
+
+#[test]
+fn private_trust_requires_the_subscriber_root() {
+    psign()
+        .args([
+            "--mode",
+            "portable",
+            "verify",
+            "--artifact-signing-allow-missing-timestamp",
+        ])
+        .arg(fixture("artifact-signing/private-trust/sample.vsix"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires the subscriber root"));
+}
+
+/// NuGet / VSIX have no Windows SIP, so Windows mode applies the shared check alone.
+#[cfg(windows)]
+#[test]
+fn package_formats_verify_in_windows_mode() {
+    for file in ["sample.nupkg", "sample.vsix"] {
+        let mut cmd = psign();
+        cmd.args(["--mode", "windows", "verify"]);
+        private_trust_args(&mut cmd, PRIVATE_TRUST_ID);
+        cmd.arg(fixture(&format!("artifact-signing/private-trust/{file}")))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("kind=private_trust"));
+    }
+}
+
+const TEST_CA: &str = "devolutions-authenticode/authenticode-test-ca.crt";
+
+#[test]
+fn portable_trust_verify_commands_cover_scripts_msix_nuget_vsix() {
+    for (command, file) in [
+        (
+            "trust-verify-script",
+            "generated-signed/scripts/wsh/js/utf8-crlf.js",
+        ),
+        (
+            "trust-verify-script",
+            "generated-signed/scripts/wsh/vbs/utf8-crlf.vbs",
+        ),
+        ("trust-verify-msix", "generated-signed/msix/sample.msix"),
+        (
+            "trust-verify-nupkg",
+            "package-signing/signed/sample.signed.nupkg",
+        ),
+        (
+            "trust-verify-vsix",
+            "package-signing/signed/sample.signed.vsix",
+        ),
+    ] {
+        psign()
+            .args(["portable", command, "--as-of", "2026-06-01", "--trusted-ca"])
+            .arg(fixture(TEST_CA))
+            .arg(fixture(file))
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("{command}: ok")));
+    }
+}
+
+#[test]
+fn portable_verify_routes_explicit_trust_for_new_formats() {
+    for file in [
+        "generated-signed/scripts/wsh/wsf/utf8-crlf.wsf",
+        "generated-signed/msix/sample.appx",
+        "package-signing/signed/sample.signed.snupkg",
+        "package-signing/signed/nested.signed.vsix",
+    ] {
+        psign()
+            .args([
+                "--mode",
+                "portable",
+                "verify",
+                "--as-of",
+                "2026-06-01",
+                "--trusted-ca",
+            ])
+            .arg(fixture(TEST_CA))
+            .arg(fixture(file))
+            .assert()
+            .success();
+    }
+}

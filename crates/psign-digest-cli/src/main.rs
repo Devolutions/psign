@@ -2139,6 +2139,30 @@ enum Command {
         #[command(flatten)]
         shared: TrustVerifySharedArgs,
     },
+    /// PowerShell-class (`.ps1`, `.psm1`, …) or WSH (`.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`) script SIP digest plus PKCS#7 chain to anchors.
+    TrustVerifyScript {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// Cleartext MSIX / AppX (and bundle) APPX SIP digest (**`verify-msix`**) plus PKCS#7 chain to anchors.
+    TrustVerifyMsix {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// NuGet `.nupkg` / `.snupkg` author signature: package hash over the exact unsigned bytes plus `.signature.p7s` chain to anchors.
+    TrustVerifyNupkg {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
+    /// VSIX OPC XML signature: C14N `SignedInfo`, part digests and coverage, `SignatureValue`, `<EncodedTime>` RFC 3161 timestamp, plus signer chain to anchors.
+    TrustVerifyVsix {
+        path: PathBuf,
+        #[command(flatten)]
+        shared: TrustVerifySharedArgs,
+    },
     /// Print whether embedded PKCS#7 bytes contain **SPC_PE_IMAGE_PAGE_HASHES** attribute OIDs (V1/V2 DER scan).
     ///
     /// Outputs `yes` or `no` (does **not** validate page segments vs file bytes — use **`verify-pe-page-hashes`** for the experimental Rust check).
@@ -4365,6 +4389,40 @@ where
                 )?,
             };
             println!("{json}");
+        }
+        Command::TrustVerifyScript { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let ext = script_ext_from_path(&path)?;
+            let report = psign_authenticode_trust::trust_verify_script_bytes(&bytes, ext, &opts)
+                .with_context(|| format!("trust-verify-script {}", path.display()))?;
+            print_trust_ok("trust-verify-script", &report);
+        }
+        Command::TrustVerifyMsix { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let report = psign_authenticode_trust::trust_verify_msix_bytes(&bytes, &ext, &opts)
+                .with_context(|| format!("trust-verify-msix {}", path.display()))?;
+            print_trust_ok("trust-verify-msix", &report);
+        }
+        Command::TrustVerifyNupkg { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = psign_authenticode_trust::trust_verify_nuget_bytes(&bytes, &opts)
+                .with_context(|| format!("trust-verify-nupkg {}", path.display()))?;
+            print_trust_ok("trust-verify-nupkg", &report);
+        }
+        Command::TrustVerifyVsix { path, shared } => {
+            let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let opts = trust_verify_options_from_shared(&shared)?;
+            let report = psign_authenticode_trust::trust_verify_vsix_bytes(&bytes, &opts)
+                .with_context(|| format!("trust-verify-vsix {}", path.display()))?;
+            print_trust_ok("trust-verify-vsix", &report);
         }
         Command::TrustVerifyCab { path, shared } => {
             let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;

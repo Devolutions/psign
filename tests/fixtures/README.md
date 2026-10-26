@@ -52,6 +52,13 @@ committed signed vector, native-signing the unsigned source rows and verifying
 the fresh outputs with `psign`, and psign-signing the offline-supported subset
 from the current user's certificate store.
 
+`artifact-signing/private-trust/` holds a synthetic Artifact Signing *Private
+Trust* root (`root.cer`) and `sample.js`, `sample.msix`, `sample.nupkg`, and
+`sample.vsix` signed by a certificate with the identity EKU
+`1.3.6.1.4.1.311.97.1.3.1.11.22.33.44.55.66.77.88` (no timestamps). Regenerate
+with `pwsh -File scripts/ci/build-artifact-signing-private-trust-fixtures.ps1`
+after `cargo build`; keys are created in memory and discarded.
+
 `artifact-signing/` holds public material from a Devolutions build signed by
 Azure Artifact Signing (Public Trust): `psign-tool.pkcs7.der` is the PKCS#7
 extracted with `psign-tool portable extract-pe-pkcs7` (signer, intermediates,

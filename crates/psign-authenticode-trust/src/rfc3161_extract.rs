@@ -84,13 +84,77 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
     else {
         return Ok(None);
     };
+    verify_timestamp_token(
+        &token,
+        &tstinfo_der,
+        gen_date,
+        primary_signature,
+        anchors,
+        anchor_certs,
+        online,
+        verbose_chain,
+    )
+    .map(Some)
+}
 
-    let ts_sd = signed_data_from_content_info(&token).ok_or_else(|| {
+/// Verify a standalone RFC 3161 timestamp token (DER `ContentInfo`) whose `MessageImprint` covers
+/// `timestamped_bytes`, with the TSA chain terminating in `anchors`; returns `TSTInfo.genTime`.
+///
+/// Used for timestamps carried outside CMS unsigned attributes, such as the OPC
+/// `<TimeStamp><EncodedTime>` element of VSIX signatures (imprint over the `SignatureValue` octets).
+pub fn trusted_utc_date_from_timestamp_token(
+    token_der: &[u8],
+    timestamped_bytes: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    online: &OnlineTrustOptions,
+    verbose_chain: bool,
+) -> Result<UtcDate> {
+    let token = decode_content_info_loose(token_der)
+        .ok_or_else(|| anyhow!("timestamp token is not a CMS ContentInfo"))?;
+    let sd = signed_data_from_content_info(&token)
+        .ok_or_else(|| anyhow!("timestamp token SignedData decode failed"))?;
+    if sd.encap_content_info.econtent_type != ID_CT_TSTINFO {
+        return Err(anyhow!("timestamp token does not encapsulate TSTInfo"));
+    }
+    let tstinfo_der = sd
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .and_then(tstinfo_bytes_from_encapsulated_econtent)
+        .ok_or_else(|| anyhow!("timestamp token TSTInfo is missing"))?
+        .to_vec();
+    let gen_date =
+        tstinfo_gen_time(&tstinfo_der).ok_or_else(|| anyhow!("timestamp token genTime missing"))?;
+    verify_timestamp_token(
+        &token,
+        &tstinfo_der,
+        gen_date,
+        timestamped_bytes,
+        anchors,
+        anchor_certs,
+        online,
+        verbose_chain,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_timestamp_token(
+    token: &ContentInfo,
+    tstinfo_der: &[u8],
+    gen_date: UtcDate,
+    primary_signature: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    online: &OnlineTrustOptions,
+    verbose_chain: bool,
+) -> Result<UtcDate> {
+    let ts_sd = signed_data_from_content_info(token).ok_or_else(|| {
         anyhow!(
             "timestamp token SignedData decode failed (after stripping unsupported cert choices)"
         )
     })?;
-    let parsed = psign_sip_digest::timestamp::parse_tst_info_der(&tstinfo_der)
+    let parsed = psign_sip_digest::timestamp::parse_tst_info_der(tstinfo_der)
         .ok_or_else(|| anyhow!("timestamp token TSTInfo parse failed"))?;
     let expected_imprint =
         digest_for_oid(&parsed.message_imprint_digest_alg_oid, primary_signature)?;
@@ -99,7 +163,7 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
             "timestamp token MessageImprint does not match primary signer signature"
         ));
     }
-    let tst_digest = sha2::Sha256::digest(&tstinfo_der);
+    let tst_digest = sha2::Sha256::digest(tstinfo_der);
     verify_signed_data_pkcs9_message_digest_and_rsa_sha256_pkcs1v15_signature(
         &ts_sd,
         0,
@@ -149,7 +213,7 @@ pub fn trusted_utc_date_from_authenticode_timestamp_token(
         .exact_date(&gen_date)
         .verify()
         .map_err(|e| anyhow!("timestamp token TSA chain verification: {e}"))?;
-    Ok(Some(gen_date))
+    Ok(gen_date)
 }
 
 fn signed_data_from_pkcs7(pkcs7_der: &[u8]) -> Option<SignedData> {

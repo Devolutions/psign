@@ -18,9 +18,11 @@ use psign_authenticode_trust::policy::{OnlineTrustOptions, RevocationMode};
 use psign_authenticode_trust::{
     ArtifactSigningIdentity, ArtifactSigningPolicy, ArtifactSigningVerifiedSignature,
     AuthenticodeTrustPolicy, TrustVerifyPeOptions, artifact_signing_identity_from_cert_bytes,
-    inspect_authenticode_pkcs7_der, inspect_pe_authenticode, trust_verify_cab_bytes,
-    trust_verify_catalog_bytes, trust_verify_msi_bytes, trust_verify_pe_bytes,
-    trust_verify_script_bytes, trust_verify_zip_bytes,
+    inspect_authenticode_pkcs7_der, inspect_pe_authenticode, nuget_verified_signature_content,
+    trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_msi_bytes,
+    trust_verify_msix_bytes, trust_verify_nuget_bytes, trust_verify_pe_bytes,
+    trust_verify_script_bytes, trust_verify_vsix_bytes, trust_verify_zip_bytes,
+    verify_vsix_signature_bytes,
 };
 use psign_sip_digest::pkcs7::AuthenticodeSigningDigest;
 use psign_sip_digest::verify_pe::{
@@ -926,7 +928,7 @@ pub fn infer_format(path: &Path) -> PortableFileFormat {
         "ps1" | "psm1" | "psd1" | "ps1xml" | "psc1" | "cdxml" | "mof" => {
             PortableFileFormat::PowerShellScript
         }
-        "vbs" | "js" | "wsf" => PortableFileFormat::WshScript,
+        "vbs" | "vbe" | "js" | "jse" | "wsf" => PortableFileFormat::WshScript,
         _ => PortableFileFormat::Unknown,
     }
 }
@@ -2527,14 +2529,16 @@ fn apply_trust_if_requested(
         PortableFileFormat::Msi => trust_verify_msi_bytes(data, &opts),
         PortableFileFormat::Zip => trust_verify_zip_bytes(data, &opts),
         PortableFileFormat::Catalog => trust_verify_catalog_bytes(data, &opts),
-        PortableFileFormat::PowerShellScript => {
+        PortableFileFormat::PowerShellScript | PortableFileFormat::WshScript => {
             let extension = script_extension_for(&request.path);
             trust_verify_script_bytes(data, &extension, &opts)
         }
-        PortableFileFormat::NuGet
-        | PortableFileFormat::AppInstaller
-        | PortableFileFormat::Vsix
-        | PortableFileFormat::Msix
+        PortableFileFormat::Msix => {
+            trust_verify_msix_bytes(data, &script_extension_for(&request.path), &opts)
+        }
+        PortableFileFormat::NuGet => trust_verify_nuget_bytes(data, &opts),
+        PortableFileFormat::Vsix => trust_verify_vsix_bytes(data, &opts),
+        PortableFileFormat::AppInstaller
         | PortableFileFormat::MsixUpload
         | PortableFileFormat::MsixEncrypted
         | PortableFileFormat::ClickOnceManifest => Err(anyhow::anyhow!(
@@ -2854,6 +2858,9 @@ fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> 
     }
     // Extract signature and parse CMS
     let sig_bytes = extract_nuget_signature_p7s(data)?;
+    if let Err(error) = nuget_verified_signature_content(data, &sig_bytes) {
+        return Ok(map_digest_error(path, PortableFileFormat::NuGet, error));
+    }
     let summary = summarize_pkcs7_der(&sig_bytes).unwrap_or_default();
     Ok(PortableSignatureResponse {
         schema_version: SCHEMA_VERSION,
@@ -2861,7 +2868,7 @@ fn inspect_nuget(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> 
         format: PortableFileFormat::NuGet,
         status: PortableSignatureStatus::Valid,
         status_message:
-            "NuGet package signature (.signature.p7s) is present; trust was not evaluated."
+            "NuGet package hash matches the signed .signature.p7s content; trust was not evaluated."
                 .to_string(),
         trust_status: None,
         signature_count: 1,
@@ -2891,37 +2898,56 @@ fn inspect_vsix_opc(path: &Path, data: &[u8]) -> Result<PortableSignatureRespons
             "VSIX package does not contain an OPC digital signature",
         ));
     }
-    // Extract the signature XML and report
-    let sig_xml = psign_opc_sign::vsix::extract_signature_xml_path(path).unwrap_or_default();
-    if sig_xml.is_empty() {
-        return Ok(base_response(
-            path.to_path_buf(),
-            PortableFileFormat::Vsix,
-            PortableSignatureStatus::NotSigned,
-            "VSIX package OPC signature part could not be extracted",
-        ));
+    match verify_vsix_signature_bytes(data) {
+        Ok(sig) => {
+            let mut response = base_response(
+                path.to_path_buf(),
+                PortableFileFormat::Vsix,
+                PortableSignatureStatus::Valid,
+                "VSIX OPC XMLDSig signature, part digests, and SignatureValue are valid; trust was not evaluated.",
+            );
+            response.signer_certificate_der_base64 =
+                Some(base64::engine::general_purpose::STANDARD.encode(sig.signer_certificate_der));
+            if sig.timestamp_token.is_some() {
+                response
+                    .timestamp_kinds
+                    .push("opc_encoded_time".to_string());
+            }
+            Ok(response)
+        }
+        Err(standard_error) => {
+            // Signatures written by earlier psign releases reference parts directly and are not
+            // verifiable by Visual Studio; keep reporting their part digests for compatibility.
+            let sig_xml =
+                psign_opc_sign::vsix::extract_signature_xml_path(path).unwrap_or_default();
+            let legacy_ok = !sig_xml.is_empty()
+                && psign_opc_sign::vsix::verify_signature_reference_xml(
+                    Cursor::new(data),
+                    &sig_xml,
+                    psign_opc_sign::vsix::VsixHashAlgorithm::Sha256,
+                )
+                .is_ok();
+            let mut response = if legacy_ok {
+                base_response(
+                    path.to_path_buf(),
+                    PortableFileFormat::Vsix,
+                    PortableSignatureStatus::Valid,
+                    "Legacy psign VSIX signature references are valid; the signature is not a standard OPC XMLDSig signature and cannot be trust-verified.",
+                )
+            } else {
+                base_response(
+                    path.to_path_buf(),
+                    PortableFileFormat::Vsix,
+                    PortableSignatureStatus::HashMismatch,
+                    format!("VSIX OPC XMLDSig signature is invalid: {standard_error:#}"),
+                )
+            };
+            response
+                .diagnostics
+                .push(format!("standard_xmldsig=failed: {standard_error:#}"));
+            Ok(response)
+        }
     }
-    // Verify reference digests
-    let vsix_alg = psign_opc_sign::vsix::VsixHashAlgorithm::Sha256;
-    let refs_ok =
-        psign_opc_sign::vsix::verify_signature_reference_xml(Cursor::new(data), &sig_xml, vsix_alg)
-            .is_ok();
-    let status = if refs_ok {
-        PortableSignatureStatus::Valid
-    } else {
-        PortableSignatureStatus::HashMismatch
-    };
-    let message = if refs_ok {
-        "VSIX OPC XMLDSig signature references are valid; trust was not evaluated."
-    } else {
-        "VSIX OPC XMLDSig signature reference digests do not match package content."
-    };
-    Ok(base_response(
-        path.to_path_buf(),
-        PortableFileFormat::Vsix,
-        status,
-        message,
-    ))
 }
 
 fn inspect_clickonce_manifest(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse> {
@@ -2998,13 +3024,9 @@ fn inspect_script(path: &Path, data: &[u8]) -> Result<PortableSignatureResponse>
     let ext = script_extension_for(path);
     match verify_script_digest_consistency(data, &ext) {
         Ok(()) => {
-            let report = if ps_script::is_wsh_extension(&ext.to_ascii_lowercase()) {
-                None
-            } else {
-                ps_script::powershell_class_digest_report(data, &ext)
-                    .ok()
-                    .and_then(|r| summarize_pkcs7_der(&r.pkcs7_der))
-            };
+            let report = psign_sip_digest::script_digest_report(data, &ext)
+                .ok()
+                .and_then(|r| summarize_pkcs7_der(&r.pkcs7_der));
             let summary = report.unwrap_or_default();
             Ok(PortableSignatureResponse {
                 schema_version: SCHEMA_VERSION,

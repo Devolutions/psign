@@ -23,10 +23,14 @@ pub mod trust_verify_detached;
 pub mod trust_verify_esd;
 pub mod trust_verify_file;
 pub mod trust_verify_msi;
+pub mod trust_verify_msix;
+pub mod trust_verify_nuget;
 pub mod trust_verify_pe;
 pub mod trust_verify_script;
+pub mod trust_verify_vsix;
 pub mod trust_verify_zip;
 pub mod verification_instant;
+mod xml_c14n;
 
 pub use artifact_signing::{
     ArtifactSigningCertificateKind, ArtifactSigningIdentity, ArtifactSigningPolicy,
@@ -45,10 +49,13 @@ pub use trust_verify_detached::trust_verify_detached_bytes;
 pub use trust_verify_esd::trust_verify_wim_esd_path;
 pub use trust_verify_file::trust_verify_path;
 pub use trust_verify_msi::trust_verify_msi_bytes;
+pub use trust_verify_msix::trust_verify_msix_bytes;
+pub use trust_verify_nuget::{nuget_verified_signature_content, trust_verify_nuget_bytes};
 pub use trust_verify_pe::{
     TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material, pe_first_pkcs7_terminal_root,
     pkcs7_signed_data_der_terminal_root, trust_verify_pe_bytes,
 };
 pub use trust_verify_script::trust_verify_script_bytes;
+pub use trust_verify_vsix::{VsixSignature, trust_verify_vsix_bytes, verify_vsix_signature_bytes};
 pub use trust_verify_zip::trust_verify_zip_bytes;
 pub use verification_instant::parse_verification_date_ymd;

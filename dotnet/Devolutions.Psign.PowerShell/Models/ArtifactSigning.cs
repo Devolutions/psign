@@ -39,8 +39,9 @@ public sealed class PsignArtifactSigningIdentity
 /// <summary>Result of a successful Azure Artifact Signing validation.</summary>
 public sealed class PsignArtifactSigningVerification
 {
-    [JsonPropertyName("pkcs7_index")]
-    public int Pkcs7Index { get; init; }
+    /// <summary>PE certificate-table entry index; 0 for single-signature formats.</summary>
+    [JsonPropertyName("signature_index")]
+    public int SignatureIndex { get; init; }
 
     [JsonPropertyName("signer_subject")]
     public string SignerSubject { get; init; } = string.Empty;

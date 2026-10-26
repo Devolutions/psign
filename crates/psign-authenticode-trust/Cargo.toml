@@ -19,6 +19,9 @@ sha2 = "0.10"
 rsa = { version = "0.9.10", features = ["sha2"] }
 authenticode = { version = "0.5.0", features = ["std", "object"] }
 psign-sip-digest = { path = "../psign-sip-digest" }
+psign-opc-sign = { path = "../psign-opc-sign" }
+quick-xml = "0.38"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 picky = { version = "7.0.0-rc.23", features = ["pkcs7", "time_conversion"] }
 picky-asn1-x509 = "0.15.4"
 time = { version = "0.3", features = ["formatting", "parsing"] }

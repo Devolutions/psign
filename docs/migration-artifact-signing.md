@@ -238,7 +238,7 @@ psign-tool portable trust-verify-pe ./MyApp.exe \
 
 ### Artifact Signing-specific trust (pinned Microsoft root + publisher ID)
 
-**`trust-verify-pe`** accepts any root in AuthRoot. To require that a file was signed **by Azure Artifact Signing**, and optionally by one specific certificate profile, add the **`--artifact-signing…`** options. They behave the same in Windows and portable modes and across PE, CAB, MSI, WIM/ESD, catalog, ZIP, PowerShell script, and detached signatures:
+**`trust-verify-pe`** accepts any root in AuthRoot. To require that a file was signed **by Azure Artifact Signing**, and optionally by one specific certificate profile, add the **`--artifact-signing…`** options. They behave the same in Windows and portable modes and across PE, CAB, MSI, WIM/ESD, catalog, ZIP, PowerShell and WSH script, MSIX/AppX, NuGet, VSIX, and detached signatures:
 
 ```bash
 # Publisher ID (certificate profile identity EKU suffix) of each signer; no trust decision.

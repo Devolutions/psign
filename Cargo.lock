@@ -2058,7 +2058,9 @@ dependencies = [
  "digest 0.10.7",
  "picky",
  "picky-asn1-x509",
+ "psign-opc-sign",
  "psign-sip-digest",
+ "quick-xml",
  "rcgen",
  "rsa 0.9.10",
  "serde",
@@ -2068,6 +2070,7 @@ dependencies = [
  "tempfile",
  "time",
  "x509-cert",
+ "zip",
 ]
 
 [[package]]

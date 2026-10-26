@@ -136,3 +136,45 @@ Describe 'Get-PsignSignature Artifact Signing parameters' {
         $err[0].Exception.Message | Should -BeLike '*cannot be combined with Artifact Signing*'
     }
 }
+
+Describe 'Artifact Signing across script, MSIX, NuGet, and VSIX formats' {
+    BeforeAll {
+        $script:PrivateTrustDir = Join-Path $script:FixtureDir 'private-trust'
+        $script:PrivateTrustRoot = Join-Path $script:PrivateTrustDir 'root.cer'
+        $script:PrivateTrustId = '11.22.33.44.55.66.77.88'
+    }
+
+    It 'decodes the publisher ID from <File>' -TestCases @(
+        @{ File = 'sample.js' }, @{ File = 'sample.msix' }, @{ File = 'sample.nupkg' }, @{ File = 'sample.vsix' }
+    ) {
+        $id = Get-PsignArtifactSigningPublisherId -LiteralPath (Join-Path $script:PrivateTrustDir $File)
+        $id.PublisherId | Should -Be $script:PrivateTrustId
+        $id.Kind | Should -Be 'private_trust'
+    }
+
+    It 'validates <File> against the private trust root with publisher pinning' -TestCases @(
+        @{ File = 'sample.js' }, @{ File = 'sample.msix' }, @{ File = 'sample.nupkg' }, @{ File = 'sample.vsix' }
+    ) {
+        $path = Join-Path $script:PrivateTrustDir $File
+        $common = @{ LiteralPath = $path; PrivateTrustRoot = $script:PrivateTrustRoot; AllowMissingTimestamp = $true }
+        Test-PsignArtifactSigning @common -PublisherId $script:PrivateTrustId | Should -BeTrue
+        Test-PsignArtifactSigning @common -PublisherId '1.2.3.4' | Should -BeFalse
+        Test-PsignArtifactSigning -LiteralPath $path -AllowMissingTimestamp | Should -BeFalse
+
+        $detail = Test-PsignArtifactSigning @common -PublisherId $script:PrivateTrustId -Detailed
+        $detail.ArtifactSigningVerification.Identity.Kind | Should -Be 'private_trust'
+    }
+
+    It 'trust-verifies test-CA signed <File> with explicit anchors' -TestCases @(
+        @{ File = 'generated-signed\scripts\wsh\js\utf8-crlf.js' },
+        @{ File = 'generated-signed\msix\sample.msix' },
+        @{ File = 'package-signing\signed\sample.signed.nupkg' },
+        @{ File = 'package-signing\signed\sample.signed.vsix' }
+    ) {
+        $signature = Get-PsignSignature -LiteralPath (Join-Path $repoRoot "tests\fixtures\$File") `
+            -TrustedCertificatePath (Join-Path $repoRoot 'tests\fixtures\devolutions-authenticode\authenticode-test-ca.crt') `
+            -AsOf ([datetime]'2026-06-01')
+        $signature.Status | Should -Be 'Valid'
+        $signature.TrustStatus | Should -Be 'Valid'
+    }
+}

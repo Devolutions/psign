@@ -6,7 +6,8 @@
 use crate::trust_verify_pe::{TrustVerifyPeOptions, TrustVerifyPeReport};
 use crate::{
     trust_verify_cab_bytes, trust_verify_catalog_bytes, trust_verify_msi_bytes,
-    trust_verify_pe_bytes, trust_verify_script_bytes, trust_verify_wim_esd_path,
+    trust_verify_msix_bytes, trust_verify_nuget_bytes, trust_verify_pe_bytes,
+    trust_verify_script_bytes, trust_verify_vsix_bytes, trust_verify_wim_esd_path,
     trust_verify_zip_bytes,
 };
 use anyhow::{Context, Result, anyhow};
@@ -30,9 +31,13 @@ pub fn trust_verify_path(path: &Path, opts: &TrustVerifyPeOptions) -> Result<Tru
         "msi" | "msp" => trust_verify_msi_bytes(&read()?, opts),
         "cat" => trust_verify_catalog_bytes(&read()?, opts),
         "zip" => trust_verify_zip_bytes(&read()?, opts),
-        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" => {
-            trust_verify_script_bytes(&read()?, &ext, opts)
+        "ps1" | "psd1" | "psm1" | "ps1xml" | "psc1" | "cdxml" | "mof" | "js" | "jse" | "vbs"
+        | "vbe" | "wsf" => trust_verify_script_bytes(&read()?, &ext, opts),
+        "msix" | "appx" | "msixbundle" | "appxbundle" => {
+            trust_verify_msix_bytes(&read()?, &ext, opts)
         }
+        "nupkg" | "snupkg" => trust_verify_nuget_bytes(&read()?, opts),
+        "vsix" => trust_verify_vsix_bytes(&read()?, opts),
         _ => Err(anyhow!(
             "portable trust verification does not support this file format: {}",
             path.display()

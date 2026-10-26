@@ -14,6 +14,14 @@ use psign_authenticode_trust::{
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// NuGet / VSIX packages: signed with CMS or XMLDSig inside a ZIP, with no Windows SIP, so
+/// `WinVerifyTrust` cannot evaluate them and Windows mode relies on the shared check alone.
+pub fn is_package_without_windows_sip(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "nupkg" | "snupkg" | "vsix"))
+}
+
 /// `true` when any `--artifact-signing*` option was given.
 pub fn requested(args: &VerifyArgs) -> bool {
     args.artifact_signing

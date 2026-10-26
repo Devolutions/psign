@@ -21,9 +21,12 @@
 //! - <https://www.microsoft.com/pkiops/docs/repository.htm>
 
 use crate::anchor::{AnchorStore, cert_sha1_thumbprint, parse_cert_bytes};
+use crate::chain::verify_certificate_chain_to_anchors;
 use crate::chain::{issuer_chain_excluding_leaf, merge_unique_certs, terminal_root_cert};
 use crate::policy::AuthenticodeTrustPolicy;
-use crate::rfc3161_extract::trusted_utc_date_from_authenticode_timestamp_token;
+use crate::rfc3161_extract::{
+    trusted_utc_date_from_authenticode_timestamp_token, trusted_utc_date_from_timestamp_token,
+};
 use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding};
 use crate::trust_verify_pe::TrustVerifyPeOptions;
 use anyhow::{Context, Result, anyhow};
@@ -395,7 +398,8 @@ impl Default for ArtifactSigningPolicy {
 /// One verified Artifact Signing signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactSigningVerifiedSignature {
-    pub pkcs7_index: usize,
+    /// PE certificate-table entry index; `0` for single-signature formats.
+    pub signature_index: usize,
     pub signer_subject: String,
     pub identity: ArtifactSigningIdentity,
     /// Subject of the trust anchor that terminates the signer chain.
@@ -412,8 +416,8 @@ impl std::fmt::Display for ArtifactSigningVerifiedSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "PKCS#7[{}] {} publisher_id={} kind={} root={} time={}{}",
-            self.pkcs7_index,
+            "signature[{}] {} publisher_id={} kind={} root={} time={}{}",
+            self.signature_index,
             self.signer_subject,
             self.identity.publisher_id,
             self.identity.kind.as_str(),
@@ -447,27 +451,15 @@ pub fn public_trust_anchors() -> Result<(AnchorStore, Vec<Cert>)> {
     anchors_from_certs(public_trust_anchor_certs()?)
 }
 
-/// Verify one PKCS#7 as an Artifact Signing signature whose digest binding equals `subject_digest`.
-///
-/// Checks, in order: the signer carries an Artifact Signing identity EKU (and the Public Trust
-/// marker for Public Trust profiles), the publisher ID matches
-/// [`ArtifactSigningPolicy::expected_publisher_ids`], the timestamp countersignature chains to a
-/// pinned Microsoft root, and the signer chain terminates at a pinned Microsoft root (Public
-/// Trust) or a supplied subscriber root (Private Trust / Public Trust Test) with the CMS
-/// signature and code-signing EKU valid at the timestamp.
-pub fn verify_artifact_signing_pkcs7(
-    pkcs7_der: &[u8],
-    pkcs7_index: usize,
-    subject_digest: &[u8],
-    binding: Pkcs7DigestBinding,
+/// Identity of `signer`, checked against the Artifact Signing rules and the publisher pin.
+fn checked_identity(
+    signer: &Certificate,
     policy: &ArtifactSigningPolicy,
-    opts: &TrustVerifyPeOptions,
-) -> Result<ArtifactSigningVerifiedSignature> {
+) -> Result<(String, ArtifactSigningIdentity)> {
     use ArtifactSigningCertificateKind::*;
 
-    let (signer, identity) = pkcs7_signer_identity(pkcs7_der)?;
-    let signer_subject = subject_display(&signer);
-    let identity = identity.ok_or_else(|| {
+    let signer_subject = subject_display(signer);
+    let identity = artifact_signing_identity_from_certificate(signer)?.ok_or_else(|| {
         anyhow!(
             "signer {signer_subject:?} has no Artifact Signing identity EKU ({ARTIFACT_SIGNING_EKU_PREFIX}…)"
         )
@@ -501,57 +493,114 @@ pub fn verify_artifact_signing_pkcs7(
             policy.expected_publisher_ids.join(", ")
         ));
     }
+    Ok((signer_subject, identity))
+}
 
+/// Verification instant: the override, else a timestamp verified against [`PUBLIC_TRUST_ROOTS`].
+///
+/// `trusted_timestamp` verifies the format's timestamp with the given anchors; `Ok(None)` means
+/// the signature carries no timestamp.
+fn artifact_signing_instant(
+    policy: &ArtifactSigningPolicy,
+    opts: &TrustVerifyPeOptions,
+    trusted_timestamp: impl FnOnce(&AnchorStore, &[Cert]) -> Result<Option<UtcDate>>,
+) -> Result<(bool, UtcDate)> {
+    if let Some(instant) = &opts.verification_instant_override {
+        return Ok((false, instant.clone()));
+    }
     let (ms_anchors, ms_anchor_certs) = public_trust_anchors()?;
-    let (timestamped, verification_instant) = match &opts.verification_instant_override {
-        Some(instant) => (false, instant.clone()),
-        None => match trusted_utc_date_from_authenticode_timestamp_token(
-            pkcs7_der,
-            &ms_anchors,
-            &ms_anchor_certs,
-            &opts.online,
-            opts.verbose_chain,
-        )
+    match trusted_timestamp(&ms_anchors, &ms_anchor_certs)
         .context("Artifact Signing timestamp countersignature")?
-        {
-            Some(instant) => (true, instant),
-            None if policy.require_timestamp => {
-                return Err(anyhow!(
-                    "Artifact Signing signature has no RFC 3161 timestamp countersignature"
-                ));
-            }
-            None => (false, UtcDate::now()),
-        },
-    };
+    {
+        Some(instant) => Ok((true, instant)),
+        None if policy.require_timestamp => Err(anyhow!(
+            "Artifact Signing signature has no RFC 3161 timestamp countersignature"
+        )),
+        None => Ok((false, UtcDate::now())),
+    }
+}
 
-    let (anchors, anchor_certs) = match identity.kind {
-        PublicTrust => (ms_anchors, ms_anchor_certs),
-        _ => {
-            if policy.private_trust_root_files.is_empty() {
-                return Err(anyhow!(
-                    "{} signature requires the subscriber root certificate (private trust root)",
-                    identity.kind.as_str()
-                ));
-            }
-            let (_, certs) = AnchorStore::load_files(&policy.private_trust_root_files)?;
-            // Microsoft production roots must never anchor a non-Public-Trust profile.
-            let certs: Vec<Cert> = certs
-                .into_iter()
-                .filter(|c| {
-                    cert_sha1_thumbprint(c)
-                        .map(|t| !PUBLIC_TRUST_ROOTS.iter().any(|r| r.sha1 == t))
-                        .unwrap_or(false)
-                })
-                .collect();
-            if certs.is_empty() {
-                return Err(anyhow!(
-                    "no usable private trust roots (Microsoft Public Trust roots are not accepted for {})",
-                    identity.kind.as_str()
-                ));
-            }
-            anchors_from_certs(certs)?
-        }
-    };
+/// Anchors for an identity kind: [`PUBLIC_TRUST_ROOTS`] for Public Trust, else the subscriber roots.
+fn artifact_signing_anchors(
+    kind: ArtifactSigningCertificateKind,
+    policy: &ArtifactSigningPolicy,
+) -> Result<(AnchorStore, Vec<Cert>)> {
+    if kind == ArtifactSigningCertificateKind::PublicTrust {
+        return public_trust_anchors();
+    }
+    if policy.private_trust_root_files.is_empty() {
+        return Err(anyhow!(
+            "{} signature requires the subscriber root certificate (private trust root)",
+            kind.as_str()
+        ));
+    }
+    let (_, certs) = AnchorStore::load_files(&policy.private_trust_root_files)?;
+    // Microsoft production roots must never anchor a non-Public-Trust profile.
+    let certs: Vec<Cert> = certs
+        .into_iter()
+        .filter(|c| {
+            cert_sha1_thumbprint(c)
+                .map(|t| !PUBLIC_TRUST_ROOTS.iter().any(|r| r.sha1 == t))
+                .unwrap_or(false)
+        })
+        .collect();
+    if certs.is_empty() {
+        return Err(anyhow!(
+            "no usable private trust roots (Microsoft Public Trust roots are not accepted for {})",
+            kind.as_str()
+        ));
+    }
+    anchors_from_certs(certs)
+}
+
+fn verified_signature(
+    signature_index: usize,
+    signer_subject: String,
+    identity: ArtifactSigningIdentity,
+    root: &Cert,
+    timestamped: bool,
+    verification_instant: &UtcDate,
+) -> Result<ArtifactSigningVerifiedSignature> {
+    Ok(ArtifactSigningVerifiedSignature {
+        signature_index,
+        signer_subject,
+        identity,
+        root_subject: root.subject_name().to_string(),
+        root_sha1: hex_lower(&cert_sha1_thumbprint(root)?),
+        timestamped,
+        verification_time: utc_date_rfc3339(verification_instant),
+    })
+}
+
+/// Verify one PKCS#7 as an Artifact Signing signature whose digest binding equals `subject_digest`.
+///
+/// Checks, in order: the signer carries an Artifact Signing identity EKU (and the Public Trust
+/// marker for Public Trust profiles), the publisher ID matches
+/// [`ArtifactSigningPolicy::expected_publisher_ids`], the timestamp countersignature chains to a
+/// pinned Microsoft root, and the signer chain terminates at a pinned Microsoft root (Public
+/// Trust) or a supplied subscriber root (Private Trust / Public Trust Test) with the CMS
+/// signature and code-signing EKU valid at the timestamp.
+pub fn verify_artifact_signing_pkcs7(
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    subject_digest: &[u8],
+    binding: Pkcs7DigestBinding,
+    policy: &ArtifactSigningPolicy,
+    opts: &TrustVerifyPeOptions,
+) -> Result<ArtifactSigningVerifiedSignature> {
+    let (signer, _) = pkcs7_signer_identity(pkcs7_der)?;
+    let (signer_subject, identity) = checked_identity(&signer, policy)?;
+    let (timestamped, verification_instant) =
+        artifact_signing_instant(policy, opts, |anchors, certs| {
+            trusted_utc_date_from_authenticode_timestamp_token(
+                pkcs7_der,
+                anchors,
+                certs,
+                &opts.online,
+                opts.verbose_chain,
+            )
+        })?;
+    let (anchors, anchor_certs) = artifact_signing_anchors(identity.kind, policy)?;
 
     let trust_policy = AuthenticodeTrustPolicy {
         strict_code_signing_eku: true,
@@ -572,15 +621,65 @@ pub fn verify_artifact_signing_pkcs7(
     )?;
 
     let root = signer_terminal_root(pkcs7_der, &anchors, &anchor_certs)?;
-    Ok(ArtifactSigningVerifiedSignature {
+    verified_signature(
         pkcs7_index,
         signer_subject,
         identity,
-        root_subject: root.subject_name().to_string(),
-        root_sha1: hex_lower(&cert_sha1_thumbprint(&root)?),
+        &root,
         timestamped,
-        verification_time: utc_date_rfc3339(&verification_instant),
-    })
+        &verification_instant,
+    )
+}
+
+/// Artifact Signing policy for signatures that are not CMS (VSIX XMLDSig): the caller has already
+/// verified the signature value with `signer`'s key, so this checks the identity, the timestamp
+/// token (`timestamp` = token DER and the bytes it covers), and `signer`'s chain to the anchors.
+pub fn verify_artifact_signing_certificate(
+    signer: &Certificate,
+    extra_certs: Vec<Cert>,
+    timestamp: Option<(&[u8], &[u8])>,
+    signature_index: usize,
+    policy: &ArtifactSigningPolicy,
+    opts: &TrustVerifyPeOptions,
+) -> Result<ArtifactSigningVerifiedSignature> {
+    let (signer_subject, identity) = checked_identity(signer, policy)?;
+    let (timestamped, verification_instant) =
+        artifact_signing_instant(policy, opts, |anchors, certs| {
+            timestamp
+                .map(|(token, covered)| {
+                    trusted_utc_date_from_timestamp_token(
+                        token,
+                        covered,
+                        anchors,
+                        certs,
+                        &opts.online,
+                        opts.verbose_chain,
+                    )
+                })
+                .transpose()
+        })?;
+    let (anchors, anchor_certs) = artifact_signing_anchors(identity.kind, policy)?;
+
+    let leaf_der =
+        der::Encode::to_der(signer).map_err(|e| anyhow!("encode signer certificate: {e}"))?;
+    let leaf = Cert::from_der(&leaf_der).map_err(|e| anyhow!("picky signer certificate: {e}"))?;
+    let root = verify_certificate_chain_to_anchors(
+        &leaf,
+        extra_certs,
+        &anchors,
+        &anchor_certs,
+        &opts.online,
+        &verification_instant,
+        opts.verbose_chain,
+    )?;
+    verified_signature(
+        signature_index,
+        signer_subject,
+        identity,
+        &root,
+        timestamped,
+        &verification_instant,
+    )
 }
 
 /// Re-walk the (already verified) signer chain to report which anchor terminated it.
