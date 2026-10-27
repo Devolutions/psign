@@ -1,6 +1,6 @@
 [package]
 name = "psign-portable-ffi"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "C ABI shared library for psign portable Authenticode operations"
 license.workspace = true
