@@ -134,7 +134,11 @@ fn portable_signed_flat_msix_unpacks_cleanly_with_real_makeappx() {
 
 /// Run a Windows PowerShell script and return its trimmed stdout.
 fn run_powershell(script: &str) -> String {
+    // When cargo runs under PowerShell 7 (GitHub Actions `pwsh` steps), the inherited
+    // PSModulePath points at PowerShell 7 module builds that Windows PowerShell 5.1
+    // cannot load (`Get-AuthenticodeSignature`: CouldNotAutoloadMatchingModule).
     let output = StdCommand::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .expect("run powershell.exe");
@@ -251,7 +255,7 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
         );
 
         let status = run_powershell(&format!(
-            "(Get-AuthenticodeSignature -LiteralPath '{}').Status",
+            "Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'); (Get-AuthenticodeSignature -LiteralPath '{}').Status",
             signed.display()
         ));
         assert_eq!(
