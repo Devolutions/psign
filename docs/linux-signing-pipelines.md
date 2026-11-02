@@ -31,6 +31,19 @@ psign-tool portable sign-catalog --cert cert.der --key key.pk8 --output files.ca
 
 For native-shaped in-place local signing, use either `--pfx`/`--password` or portable certificate-store material selected by `--sha1`. The route supports PE/WinMD, CAB, MSI/MSP, flat MSIX/AppX, MSIX/AppX bundles (children must be signed before the bundle), NuGet/SNuGet, VSIX, ClickOnce manifests, App Installer descriptors, ZIP, and PowerShell scripts; it also accepts input file lists and batch controls. Catalog targets, WSH scripts, MSIX/AppX upload containers, and encrypted packages remain explicit unsupported cases.
 
+### MSIX/AppX without makeappx
+
+Flat MSIX/AppX signing does not need `makeappx.exe` to have packed the input. Any ZIP of the package layout (`AppxManifest.xml` plus payload files) works: psign regenerates `AppxBlockMap.xml`, merges or generates `[Content_Types].xml`, and writes the package in the AppxPackaging ZIP layout that Windows requires, with payloads deflated in independently decodable 64 KiB blocks like makeappx output. The result verifies with `signtool verify /pa` / `Get-AuthenticodeSignature` on Windows (subject to chain trust) and with `psign-tool portable trust-verify-msix` anywhere:
+
+```bash
+(cd package-layout && zip -r ../source2.msix .)
+psign-tool --mode portable sign --pfx signer.pfx --password "$PFX_PASSWORD" --fd SHA256 \
+  --timestamp-url http://timestamp.digicert.com --timestamp-digest SHA256 source2.msix
+psign-tool portable trust-verify-msix --trusted-ca signer.cer source2.msix
+```
+
+The manifest `Identity/@Publisher` must still match the signing certificate subject for Windows to install the package.
+
 ## 1.2 Portable signing with Azure Key Vault
 
 With **`--features azure-kv-sign-portable`**, PE/WinMD signing can use Azure Key Vault for the RSA signature while building and embedding Authenticode CMS locally:

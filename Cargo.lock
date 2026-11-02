@@ -2148,6 +2148,7 @@ dependencies = [
  "authenticode",
  "base64",
  "der 0.7.10",
+ "flate2",
  "picky",
  "psign-authenticode-trust",
  "psign-azure-kv-rest",
