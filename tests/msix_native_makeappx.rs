@@ -131,3 +131,143 @@ fn portable_signed_flat_msix_unpacks_cleanly_with_real_makeappx() {
 
     let _ = std::fs::remove_dir_all(temp_dir);
 }
+
+/// Run a Windows PowerShell script and return its trimmed stdout.
+fn run_powershell(script: &str) -> String {
+    let output = StdCommand::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .expect("run powershell.exe");
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        output.status.success(),
+        "powershell failed:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+/// Regression test for TRUST_E_BAD_DIGEST (**0x80096010**) on portable-signed MSIX:
+/// Windows AppxSip only accepts packages in the AppxPackaging ZIP layout (ZIP64 end
+/// records, "version made by" 45, zero external attributes), which the `zip` crate does
+/// not write on its own. A makeappx-built package is signed by `psign-tool --mode
+/// portable sign` with a throwaway self-signed PFX created in memory (never imported
+/// into any certificate store); Windows must then fail only on chain trust
+/// (CERT_E_UNTRUSTEDROOT, **0x800B0109**), never on the digest.
+#[test]
+fn portable_signed_makeappx_msix_fails_windows_verify_only_on_untrusted_root() {
+    let Some(makeappx) = find_makeappx() else {
+        eprintln!("skipping: makeappx.exe not found (Windows SDK not installed)");
+        return;
+    };
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_dir = unique_temp_dir("win-verify");
+    let layout = temp_dir.join("layout");
+    std::fs::create_dir_all(layout.join("Assets")).expect("create layout");
+    std::fs::copy(
+        manifest_dir.join("tests/fixtures/msix-minimal/AppxManifest.xml"),
+        layout.join("AppxManifest.xml"),
+    )
+    .expect("copy manifest");
+    // Any PE works as the package executable; a multi-block PE also makes SDK 26100+
+    // makeappx emit `b4:FileHash` block-map elements.
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    std::fs::copy(
+        Path::new(&system_root).join("System32\\whoami.exe"),
+        layout.join("noop.exe"),
+    )
+    .expect("copy PE payload");
+    std::fs::write(
+        layout.join("Assets\\StoreLogo.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0\x1f\x15\xc4\x89\0\0\0\rIDATx\xdac\xfc\xcf\xc0P\x0f\0\x04\x85\x01\x80\x84\xa9\x8c!\0\0\0\0IEND\xaeB`\x82",
+    )
+    .expect("write logo");
+
+    let unsigned = temp_dir.join("unsigned.msix");
+    let pack = StdCommand::new(&makeappx)
+        .args(["pack", "/h", "sha256", "/o", "/d"])
+        .arg(&layout)
+        .arg("/p")
+        .arg(&unsigned)
+        .output()
+        .expect("run makeappx pack");
+    assert!(
+        pack.status.success(),
+        "makeappx pack failed:\n{}\n{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+
+    // Subject must match the manifest Publisher (`CN=Test Code Signing Certificate`).
+    let pfx = temp_dir.join("throwaway.pfx");
+    let cer = temp_dir.join("throwaway.cer");
+    run_powershell(&format!(
+        r#"$ErrorActionPreference = 'Stop'
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$req = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest('CN=Test Code Signing Certificate', $rsa, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$eku = New-Object System.Security.Cryptography.OidCollection
+[void]$eku.Add((New-Object System.Security.Cryptography.Oid('1.3.6.1.5.5.7.3.3')))
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension($eku, $false)))
+$req.CertificateExtensions.Add((New-Object System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension($false, $false, 0, $true)))
+$cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(7))
+[IO.File]::WriteAllBytes('{pfx}', $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, 'throwaway'))
+[IO.File]::WriteAllBytes('{cer}', $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))"#,
+        pfx = pfx.display(),
+        cer = cer.display(),
+    ));
+
+    for digest in ["SHA256", "SHA384"] {
+        let signed = temp_dir.join(format!("signed-{digest}.msix"));
+        std::fs::copy(&unsigned, &signed).expect("copy unsigned package");
+        Command::cargo_bin("psign-tool")
+            .expect("psign-tool binary")
+            .args(["--mode", "portable", "sign", "--pfx"])
+            .arg(&pfx)
+            .args(["--password", "throwaway", "--fd", digest])
+            .arg(&signed)
+            .assert()
+            .success();
+
+        // WinVerifyTrust through the native psign-tool verify path reports the HRESULT.
+        let verify = Command::cargo_bin("psign-tool")
+            .expect("psign-tool binary")
+            .args(["verify", "/pa"])
+            .arg(&signed)
+            .output()
+            .expect("run psign-tool verify /pa");
+        let verify_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            !verify_text.contains("0x80096010"),
+            "{digest}: Windows rejected the portable MSIX digest (TRUST_E_BAD_DIGEST):\n{verify_text}"
+        );
+        assert!(
+            verify_text.contains("0x800B0109"),
+            "{digest}: expected only CERT_E_UNTRUSTEDROOT from WinVerifyTrust:\n{verify_text}"
+        );
+
+        let status = run_powershell(&format!(
+            "(Get-AuthenticodeSignature -LiteralPath '{}').Status",
+            signed.display()
+        ));
+        assert_eq!(
+            status, "UnknownError",
+            "{digest}: Get-AuthenticodeSignature must fail only on the untrusted root (HashMismatch = bad digest)"
+        );
+
+        // The portable verifier must agree with Windows on the digest.
+        Command::cargo_bin("psign-tool")
+            .expect("psign-tool binary")
+            .args(["portable", "trust-verify-msix", "--trusted-ca"])
+            .arg(&cer)
+            .arg(&signed)
+            .assert()
+            .success();
+    }
+
+    let _ = std::fs::remove_dir_all(temp_dir);
+}

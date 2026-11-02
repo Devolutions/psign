@@ -3440,7 +3440,7 @@ fn stage_flat_msix_for_signature(
         writer.write_all(b"PKCX")?;
         writer.finish()?;
     }
-    Ok(out.into_inner())
+    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
 }
 
 /// Stage a `.msixbundle` / `.appxbundle` for final AppX SIP signing.
@@ -3527,7 +3527,7 @@ fn stage_msix_bundle_for_signature(
         writer.write_all(b"PKCX")?;
         writer.finish()?;
     }
-    Ok(out.into_inner())
+    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
 }
 
 /// Native bundle block maps list exactly one `File` — the bundle manifest — using
@@ -3582,7 +3582,7 @@ fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
         }
         writer.finish()?;
     }
-    Ok(out.into_inner())
+    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
 }
 
 fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
@@ -3960,6 +3960,95 @@ mod tests {
                 "physical entry {physical:?} missing from AppxBlockMap.xml (expected \
                  Name={expected:?}); block map entries: {file_names:?}"
             );
+        }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// Independently check the AppxPackaging ZIP layout Windows AppxSip requires
+    /// (TRUST_E_BAD_DIGEST otherwise): ZIP64 EOCD + locator + all-sentinel classic EOCD,
+    /// and "version made by" 45 with zero external attributes on every CD entry.
+    fn assert_appx_zip_layout(zip: &[u8], label: &str) {
+        let u16_at = |off: usize| u16::from_le_bytes(zip[off..off + 2].try_into().unwrap());
+        let u32_at = |off: usize| u32::from_le_bytes(zip[off..off + 4].try_into().unwrap());
+        let u64_at = |off: usize| u64::from_le_bytes(zip[off..off + 8].try_into().unwrap());
+
+        let eocd = zip.len() - 22;
+        assert_eq!(u32_at(eocd), 0x0605_4b50, "{label}: classic EOCD at end");
+        assert!(
+            zip[eocd + 4..eocd + 20].iter().all(|&b| b == 0xFF),
+            "{label}: classic EOCD fields must be ZIP64 sentinels"
+        );
+        let locator = eocd - 20;
+        assert_eq!(u32_at(locator), 0x0706_4b50, "{label}: ZIP64 locator");
+        assert_eq!(u32_at(locator + 16), 1, "{label}: locator disk count");
+        let zip64 = usize::try_from(u64_at(locator + 8)).unwrap();
+        assert_eq!(zip64 + 56, locator, "{label}: ZIP64 EOCD precedes locator");
+        assert_eq!(u32_at(zip64), 0x0606_4b50, "{label}: ZIP64 EOCD signature");
+        assert_eq!(u64_at(zip64 + 4), 44, "{label}: ZIP64 EOCD record size");
+        assert_eq!(u16_at(zip64 + 12), 45, "{label}: ZIP64 version made by");
+        assert_eq!(u16_at(zip64 + 14), 45, "{label}: ZIP64 version needed");
+
+        let entries = u64_at(zip64 + 32);
+        let cd_size = usize::try_from(u64_at(zip64 + 40)).unwrap();
+        let cd_offset = usize::try_from(u64_at(zip64 + 48)).unwrap();
+        assert_eq!(cd_offset + cd_size, zip64, "{label}: CD ends at ZIP64 EOCD");
+        let mut p = cd_offset;
+        let mut seen = 0;
+        while p < zip64 {
+            assert_eq!(u32_at(p), 0x0201_4b50, "{label}: CD entry signature");
+            assert_eq!(u16_at(p + 4), 45, "{label}: CD version made by");
+            assert_eq!(u32_at(p + 38), 0, "{label}: CD external attributes");
+            p += 46
+                + usize::from(u16_at(p + 28))
+                + usize::from(u16_at(p + 30))
+                + usize::from(u16_at(p + 32));
+            seen += 1;
+        }
+        assert_eq!(seen, entries, "{label}: ZIP64 EOCD entry count");
+        ZipArchive::new(Cursor::new(zip)).unwrap_or_else(|e| panic!("{label}: reopen ZIP: {e}"));
+    }
+
+    #[test]
+    fn staged_and_signed_msix_use_appx_zip64_layout() {
+        let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-msix-zip64-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        for name in ["sample.msix", "sample.appx", "sample.msixbundle"] {
+            let source = PathBuf::from("../../tests/fixtures/generated-unsigned/msix").join(name);
+            let ext = name.rsplit_once('.').unwrap().1;
+            let package = std::fs::read(&source).expect("read fixture");
+            let staged =
+                stage_msix_family_for_signature(&package, ext, PortableDigestAlgorithm::Sha256)
+                    .expect("stage package");
+            assert_appx_zip_layout(&staged, &format!("staged {name}"));
+            if is_msix_bundle_extension(ext) {
+                // Bundle signing requires signed children, which this unsigned fixture
+                // lacks; the final embed uses the same `replace_msix_signature_part`.
+                continue;
+            }
+
+            let output = temp_dir.join(name);
+            portable_sign(PortableSignRequest {
+                path: source,
+                output_path: Some(output.clone()),
+                pfx_path: Some(fixture_dir.join("authenticode-test-cert.pfx")),
+                pfx_password: Some("CodeSign123!".to_string()),
+                ..default_sign_request()
+            })
+            .unwrap_or_else(|e| panic!("sign {name}: {e:#}"));
+            let signed = std::fs::read(&output).expect("read signed package");
+            assert_appx_zip_layout(&signed, &format!("signed {name}"));
+            msix_digest::msix_verified_signature(&signed, ext)
+                .unwrap_or_else(|e| panic!("verify signed {name}: {e:#}"));
         }
 
         let _ = std::fs::remove_dir_all(temp_dir);

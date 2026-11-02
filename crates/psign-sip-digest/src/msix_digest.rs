@@ -49,6 +49,11 @@ const CD_SIG: u32 = 0x0201_4b50;
 const EOCD_SIG: u32 = 0x0605_4b50;
 const ZIP64_EOCD_SIG: u32 = 0x0606_4b50;
 const ZIP64_LOC_SIG: u32 = 0x0706_4b50;
+/// ZIP64 EOCD record size (excluding the leading signature + size fields) for a record
+/// without an extensible data sector, as written by AppxPackaging / makeappx.
+const ZIP64_EOCD_RECORD_SIZE: u64 = 44;
+/// "Version made by" / "version needed to extract" (4.5, ZIP64) used by makeappx.
+const ZIP64_VERSION: u16 = 45;
 
 const DATA_DESCRIPTOR_BIT: u16 = 1 << 3;
 const DD_SIG: u32 = 0x0807_4b50;
@@ -114,6 +119,9 @@ struct AppxBlockMapFile {
     declared_size: u64,
     lfh_size: Option<u64>,
     blocks: Vec<AppxBlockMapBlock>,
+    /// `b4:FileHash` (`http://schemas.microsoft.com/appx/2021/blockmap`): digest of the
+    /// whole uncompressed file, emitted by Windows SDK 10.0.26100+ makeappx / signtool.
+    file_hash: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +343,7 @@ fn parse_block_map_xml(xml: &[u8]) -> Result<(PeAuthenticodeHashKind, Vec<AppxBl
                     declared_size,
                     lfh_size,
                     blocks: Vec::new(),
+                    file_hash: None,
                 });
             }
             Event::Empty(e) if e.local_name().as_ref() == b"File" => {
@@ -356,6 +365,7 @@ fn parse_block_map_xml(xml: &[u8]) -> Result<(PeAuthenticodeHashKind, Vec<AppxBl
                     declared_size,
                     lfh_size,
                     blocks: Vec::new(),
+                    file_hash: None,
                 });
             }
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Block" => {
@@ -371,6 +381,22 @@ fn parse_block_map_xml(xml: &[u8]) -> Result<(PeAuthenticodeHashKind, Vec<AppxBl
                     hash,
                     compressed_size,
                 });
+            }
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"FileHash" => {
+                let Some(file) = current.as_mut() else {
+                    return Err(anyhow!("AppxBlockMap.xml FileHash outside File"));
+                };
+                if file.file_hash.is_some() {
+                    return Err(anyhow!(
+                        "AppxBlockMap.xml File `{}` has duplicate FileHash elements",
+                        file.name
+                    ));
+                }
+                let encoded = required_xml_attr(&reader, &e, b"Hash")?;
+                let hash = base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .map_err(|e| anyhow!("AppxBlockMap.xml FileHash Hash is not base64: {e}"))?;
+                file.file_hash = Some(hash);
             }
             Event::End(e) if e.local_name().as_ref() == b"BlockMap" => {
                 if current.is_some() {
@@ -402,6 +428,15 @@ fn parse_block_map_xml(xml: &[u8]) -> Result<(PeAuthenticodeHashKind, Vec<AppxBl
     let kind = kind.ok_or_else(|| anyhow!("AppxBlockMap.xml missing HashMethod"))?;
     let expected_len = kind.digest_output_len();
     for file in &files {
+        if let Some(file_hash) = &file.file_hash
+            && file_hash.len() != expected_len
+        {
+            return Err(anyhow!(
+                "AppxBlockMap.xml File `{}` has {}-byte FileHash, expected {expected_len}",
+                file.name,
+                file_hash.len()
+            ));
+        }
         for block in &file.blocks {
             if block.hash.len() != expected_len {
                 return Err(anyhow!(
@@ -1178,6 +1213,15 @@ fn hash_cd_and_eocd(
             syn.extend_from_slice(&pay);
         }
 
+        // Windows AppxSip reports TRUST_E_BAD_DIGEST for any other "version made by" or
+        // external attributes than the AppxPackaging (makeappx / signtool) values, even
+        // when the digest below is consistent, so such packages never verify natively.
+        if version_made_by != ZIP64_VERSION || external_attr != 0 {
+            return Err(anyhow!(
+                "MSIX/AppX central directory entry `{name}` has version made by {version_made_by:#06x} and external attributes {external_attr:#010x}; Windows AppxSip only accepts the AppxPackaging layout ({ZIP64_VERSION:#06x}, 0x00000000)"
+            ));
+        }
+
         hasher.update(&CD_SIG.to_le_bytes());
         hasher.update(&version_made_by.to_le_bytes());
         hasher.update(&version_needed.to_le_bytes());
@@ -1236,28 +1280,35 @@ fn hash_cd_and_eocd(
 
     let no_entries_u64 = u64::from(no_entries);
 
-    if let Some(z) = &tail.zip64_eocd {
-        let loc = tail
-            .locator
-            .as_ref()
-            .ok_or_else(|| anyhow!("ZIP64 EOCD without locator"))?;
-        hasher.update(&ZIP64_EOCD_SIG.to_le_bytes());
-        hasher.update(&z.record_size.to_le_bytes());
-        hasher.update(&z.version_made_by.to_le_bytes());
-        hasher.update(&z.version_needed_to_extract.to_le_bytes());
-        hasher.update(&z.disk_number.to_le_bytes());
-        hasher.update(&z.disk_with_central_directory.to_le_bytes());
-        hasher.update(&no_entries_u64.to_le_bytes());
-        hasher.update(&no_entries_u64.to_le_bytes());
-        hasher.update(&cd_size.to_le_bytes());
-        hasher.update(&cd_offset_virtual.to_le_bytes());
-        hasher.update(&z.tail_after_fixed);
+    // AppxPackaging (makeappx, signtool) always writes ZIP64 end records, and Windows
+    // AppxSip reports TRUST_E_BAD_DIGEST for a package that only carries a classic EOCD
+    // (hashing synthesized makeappx-style records does not match either), so reject such
+    // packages instead of letting them pass a portable-only verification.
+    let z = tail.zip64_eocd.as_ref().ok_or_else(|| {
+        anyhow!(
+            "MSIX/AppX package has no ZIP64 end-of-central-directory record; Windows AppxSip rejects the signature digest of such packages"
+        )
+    })?;
+    let loc = tail
+        .locator
+        .as_ref()
+        .ok_or_else(|| anyhow!("ZIP64 EOCD without locator"))?;
+    hasher.update(&ZIP64_EOCD_SIG.to_le_bytes());
+    hasher.update(&z.record_size.to_le_bytes());
+    hasher.update(&z.version_made_by.to_le_bytes());
+    hasher.update(&z.version_needed_to_extract.to_le_bytes());
+    hasher.update(&z.disk_number.to_le_bytes());
+    hasher.update(&z.disk_with_central_directory.to_le_bytes());
+    hasher.update(&no_entries_u64.to_le_bytes());
+    hasher.update(&no_entries_u64.to_le_bytes());
+    hasher.update(&cd_size.to_le_bytes());
+    hasher.update(&cd_offset_virtual.to_le_bytes());
+    hasher.update(&z.tail_after_fixed);
 
-        hasher.update(&ZIP64_LOC_SIG.to_le_bytes());
-        hasher.update(&loc.disk_with_central_directory.to_le_bytes());
-        hasher.update(&(cd_offset_virtual.saturating_add(cd_size)).to_le_bytes());
-        hasher.update(&loc.number_of_disks.to_le_bytes());
-    }
+    hasher.update(&ZIP64_LOC_SIG.to_le_bytes());
+    hasher.update(&loc.disk_with_central_directory.to_le_bytes());
+    hasher.update(&(cd_offset_virtual.saturating_add(cd_size)).to_le_bytes());
+    hasher.update(&loc.number_of_disks.to_le_bytes());
 
     let c = &tail.classic;
     hasher.update(&EOCD_SIG.to_le_bytes());
@@ -1810,6 +1861,14 @@ fn validate_block_map_file_hashes(
                 block_file.name
             ));
         }
+        if let Some(file_hash) = &block_file.file_hash
+            && hash_bytes(kind, &data).as_slice() != file_hash.as_slice()
+        {
+            return Err(anyhow!(
+                "AppxBlockMap.xml File `{}` FileHash mismatch",
+                block_file.name
+            ));
+        }
     }
 
     Ok(())
@@ -1899,6 +1958,87 @@ pub fn msix_verified_signature(buf: &[u8], ext: &str) -> Result<(Vec<u8>, Vec<u8
         ));
     }
     verify_msix_digest_consistency_bytes(buf, &ext)
+}
+
+/// Rewrite a ZIP archive into the layout AppxPackaging (makeappx / signtool) writes:
+///
+/// - every central directory entry has "version made by" 45 (MS-DOS host, ZIP 4.5) and
+///   zero external file attributes;
+/// - the archive ends with a ZIP64 end-of-central-directory record (version 45, no
+///   extensible data), a ZIP64 locator, and a classic EOCD whose disk / count / size /
+///   offset fields are all `0xFFFF` / `0xFFFFFFFF` sentinels.
+///
+/// Windows AppxSip reports TRUST_E_BAD_DIGEST for packages that deviate from this layout,
+/// so every MSIX / AppX ZIP staged for signing (and the final package carrying the real
+/// `AppxSignature.p7x`) must pass through here. Generic ZIP writers such as the `zip`
+/// crate emit Unix "version made by" / permission bits and only a classic EOCD.
+/// Local file headers and entry data are left untouched, so entry offsets are preserved.
+pub fn normalize_zip_for_appx_signing(zip: Vec<u8>) -> Result<Vec<u8>> {
+    let tail = parse_zip_tail(&zip)?;
+    let cd_offset = tail.central_directory_offset;
+    let cd_size = tail.central_directory_size;
+    let cd_start = usize::try_from(cd_offset).map_err(|_| anyhow!("cd offset"))?;
+    let cd_end = cd_offset
+        .checked_add(cd_size)
+        .and_then(|end| usize::try_from(end).ok())
+        .ok_or_else(|| anyhow!("central directory extent overflow"))?;
+
+    let mut out = zip;
+    let mut entries = 0u64;
+    let mut p = cd_start;
+    while p < cd_end {
+        if read_u32_le(&out, p)? != CD_SIG || p + 46 > out.len() {
+            return Err(anyhow!("bad central directory entry"));
+        }
+        let name_len = read_u16_le(&out, p + 28)? as usize;
+        let extra_len = read_u16_le(&out, p + 30)? as usize;
+        let comment_len = read_u16_le(&out, p + 32)? as usize;
+        out[p + 4..p + 6].copy_from_slice(&ZIP64_VERSION.to_le_bytes());
+        out[p + 38..p + 42].copy_from_slice(&0u32.to_le_bytes());
+        p = p
+            .checked_add(46 + name_len + extra_len + comment_len)
+            .ok_or_else(|| anyhow!("central directory entry overflow"))?;
+        entries += 1;
+    }
+    if p != cd_end {
+        return Err(anyhow!(
+            "central directory entries overrun the declared size"
+        ));
+    }
+    if tail.zip64_eocd.is_some() {
+        return Ok(out);
+    }
+
+    let zip64_eocd_offset = u64::try_from(tail.eocd_offset).map_err(|_| anyhow!("eocd offset"))?;
+    let comment = tail.classic.zip_file_comment;
+    out.truncate(tail.eocd_offset);
+    out.extend_from_slice(&ZIP64_EOCD_SIG.to_le_bytes());
+    out.extend_from_slice(&ZIP64_EOCD_RECORD_SIZE.to_le_bytes());
+    out.extend_from_slice(&ZIP64_VERSION.to_le_bytes());
+    out.extend_from_slice(&ZIP64_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&entries.to_le_bytes());
+    out.extend_from_slice(&entries.to_le_bytes());
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+
+    out.extend_from_slice(&ZIP64_LOC_SIG.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+
+    out.extend_from_slice(&EOCD_SIG.to_le_bytes());
+    for _ in 0..4 {
+        out.extend_from_slice(&u16::MAX.to_le_bytes());
+    }
+    out.extend_from_slice(&u32::MAX.to_le_bytes());
+    out.extend_from_slice(&u32::MAX.to_le_bytes());
+    let comment_len =
+        u16::try_from(comment.len()).map_err(|_| anyhow!("ZIP comment is too long"))?;
+    out.extend_from_slice(&comment_len.to_le_bytes());
+    out.extend_from_slice(&comment);
+    Ok(out)
 }
 
 /// Fast `--skip-signed` preflight: does this OPC/ZIP package already carry an `AppxSignature.p7x` part?
@@ -2776,5 +2916,140 @@ mod tests {
             msg.contains("bundle child package `tampered.appx`"),
             "unexpected message: {msg}"
         );
+    }
+
+    fn cd_hash_for_test(zip: &[u8]) -> Result<Vec<u8>> {
+        let tail = parse_zip_tail(zip)?;
+        let mut archive = ZipArchive::new(Cursor::new(zip))?;
+        hash_cd_and_eocd(
+            zip,
+            &mut archive,
+            &tail,
+            PeAuthenticodeHashKind::Sha256,
+            tail.central_directory_offset,
+        )
+    }
+
+    #[test]
+    fn normalize_zip_for_appx_signing_writes_makeappx_layout() {
+        let zip = zip_with_entries(&[("a.txt", b"alpha"), ("dir/b.txt", b"beta")]);
+        let normalized = normalize_zip_for_appx_signing(zip.clone()).unwrap();
+
+        let tail = parse_zip_tail(&normalized).unwrap();
+        let z64 = tail.zip64_eocd.as_ref().expect("ZIP64 EOCD");
+        assert_eq!(z64.record_size, ZIP64_EOCD_RECORD_SIZE);
+        assert_eq!(z64.version_made_by, ZIP64_VERSION);
+        assert_eq!(z64.version_needed_to_extract, ZIP64_VERSION);
+        assert_eq!(z64.number_of_files, 2);
+        assert!(z64.tail_after_fixed.is_empty());
+        let locator = tail.locator.as_ref().expect("ZIP64 locator");
+        assert_eq!(locator.number_of_disks, 1);
+        assert_eq!(
+            Some(locator.end_of_central_directory_offset),
+            tail.zip64_eocd_offset
+        );
+        assert_eq!(tail.classic.disk_number, u16::MAX);
+        assert_eq!(tail.classic.number_of_files, u16::MAX);
+        assert_eq!(tail.classic.central_directory_size, u32::MAX);
+        assert_eq!(tail.classic.central_directory_offset, u32::MAX);
+
+        let mut archive = ZipArchive::new(Cursor::new(normalized.as_slice())).unwrap();
+        for i in 0..archive.len() {
+            let central = archive.by_index(i).unwrap().central_header_start() as usize;
+            assert_eq!(
+                read_u16_le(&normalized, central + 4).unwrap(),
+                ZIP64_VERSION
+            );
+            assert_eq!(read_u32_le(&normalized, central + 38).unwrap(), 0);
+        }
+        let mut data = Vec::new();
+        archive
+            .by_name("dir/b.txt")
+            .unwrap()
+            .read_to_end(&mut data)
+            .unwrap();
+        assert_eq!(data, b"beta");
+        // Local headers and payloads keep their offsets.
+        assert_eq!(
+            &normalized[..tail.central_directory_offset as usize],
+            &zip[..tail.central_directory_offset as usize]
+        );
+
+        assert_eq!(
+            normalize_zip_for_appx_signing(normalized.clone()).unwrap(),
+            normalized,
+            "normalization must be idempotent"
+        );
+    }
+
+    #[test]
+    fn cd_digest_rejects_layouts_windows_appx_sip_rejects() {
+        let zip = zip_with_entries(&[("a.txt", b"alpha")]);
+        let msg = format!("{:#}", cd_hash_for_test(&zip).unwrap_err());
+        assert!(msg.contains("version made by 0x032e"), "{msg}");
+
+        // AppxPackaging-style central directory but only a classic EOCD.
+        let mut classic_only = zip.clone();
+        let cd = first_central_directory_offset(&classic_only);
+        write_u16_test(&mut classic_only, cd + 4, ZIP64_VERSION);
+        write_u32_test(&mut classic_only, cd + 38, 0);
+        let msg = format!("{:#}", cd_hash_for_test(&classic_only).unwrap_err());
+        assert!(msg.contains("no ZIP64 end-of-central-directory"), "{msg}");
+
+        // Windows also rejects DOS attributes such as FILE_ATTRIBUTE_ARCHIVE.
+        let mut archive_attr = normalize_zip_for_appx_signing(zip.clone()).unwrap();
+        let tail = parse_zip_tail(&archive_attr).unwrap();
+        write_u32_test(
+            &mut archive_attr,
+            tail.central_directory_offset as usize + 38,
+            0x20,
+        );
+        let msg = format!("{:#}", cd_hash_for_test(&archive_attr).unwrap_err());
+        assert!(msg.contains("external attributes 0x00000020"), "{msg}");
+
+        cd_hash_for_test(&normalize_zip_for_appx_signing(zip).unwrap())
+            .expect("makeappx layout hashes");
+    }
+
+    #[test]
+    fn block_map_file_hash_is_parsed_and_validated() {
+        let payload = b"abc";
+        let hash = hash_bytes(PeAuthenticodeHashKind::Sha256, payload);
+        let hash_b64 = base64::engine::general_purpose::STANDARD.encode(&hash);
+        let block_map = |file_hash: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" xmlns:b4="http://schemas.microsoft.com/appx/2021/blockmap" IgnorableNamespaces="b4" HashMethod="{HASH_SHA256}"><File Name="payload.txt" Size="{}" LfhSize="41"><Block Hash="{hash_b64}"/>{file_hash}</File></BlockMap>"#,
+                payload.len()
+            )
+        };
+        let zip = zip_with_entries(&[("payload.txt", payload)]);
+
+        let good = block_map(&format!(r#"<b4:FileHash Hash="{hash_b64}"/>"#));
+        let (kind, files) = parse_block_map_xml(good.as_bytes()).unwrap();
+        assert_eq!(files[0].file_hash.as_deref(), Some(hash.as_slice()));
+        validate_block_map_file_hashes(&zip, kind, &files).expect("FileHash matches");
+
+        let other = base64::engine::general_purpose::STANDARD
+            .encode(hash_bytes(PeAuthenticodeHashKind::Sha256, b"abd"));
+        let mismatch = block_map(&format!(r#"<b4:FileHash Hash="{other}"/>"#));
+        let (kind, files) = parse_block_map_xml(mismatch.as_bytes()).unwrap();
+        let msg = format!(
+            "{:#}",
+            validate_block_map_file_hashes(&zip, kind, &files).unwrap_err()
+        );
+        assert!(msg.contains("FileHash mismatch"), "{msg}");
+
+        let short = block_map(r#"<b4:FileHash Hash="AAAA"/>"#);
+        let msg = format!("{:#}", parse_block_map_xml(short.as_bytes()).unwrap_err());
+        assert!(msg.contains("3-byte FileHash"), "{msg}");
+
+        let duplicate = block_map(&format!(
+            r#"<b4:FileHash Hash="{hash_b64}"/><b4:FileHash Hash="{hash_b64}"/>"#
+        ));
+        let msg = format!(
+            "{:#}",
+            parse_block_map_xml(duplicate.as_bytes()).unwrap_err()
+        );
+        assert!(msg.contains("duplicate FileHash"), "{msg}");
     }
 }
