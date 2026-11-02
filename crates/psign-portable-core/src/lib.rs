@@ -1,6 +1,8 @@
 //! Reusable portable Authenticode operations for CLI adapters and foreign-function callers.
 
-use std::io::{Cursor, Read, Write};
+mod appx_zip;
+
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -35,8 +37,7 @@ use psign_sip_digest::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
-use zip::write::FileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, ZipArchive};
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -3414,33 +3415,28 @@ fn stage_flat_msix_for_signature(
     if !payloads.iter().any(|(name, _)| name == "AppxManifest.xml") {
         bail!("flat MSIX package is missing AppxManifest.xml");
     }
-    let content_types = add_msix_signature_content_type(
-        std::str::from_utf8(
-            content_types
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("MSIX package is missing [Content_Types].xml"))?,
-        )
-        .context("[Content_Types].xml is not UTF-8")?,
-    )?;
-    let block_map = build_flat_msix_block_map(&payloads, digest_algorithm)?;
+    let part_names: Vec<&str> = payloads.iter().map(|(name, _)| name.as_str()).collect();
+    let content_types =
+        msix_digest::appx_content_types_for_signing(content_types.as_deref(), &part_names, false)?;
+    let mut entries = payloads
+        .iter()
+        .map(|(name, data)| appx_zip::AppxZipEntry::payload(name.as_str(), data))
+        .collect::<Result<Vec<_>>>()?;
+    let block_map = build_flat_msix_block_map(&payloads, &entries, digest_algorithm)?;
 
-    let mut out = Cursor::new(Vec::new());
-    {
-        let mut writer = ZipWriter::new(&mut out);
-        let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
-        for (name, data) in &payloads {
-            writer.start_file(name, stored)?;
-            writer.write_all(data)?;
-        }
-        writer.start_file("AppxBlockMap.xml", stored)?;
-        writer.write_all(block_map.as_bytes())?;
-        writer.start_file("[Content_Types].xml", stored)?;
-        writer.write_all(content_types.as_bytes())?;
-        writer.start_file("AppxSignature.p7x", stored)?;
-        writer.write_all(b"PKCX")?;
-        writer.finish()?;
-    }
-    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
+    entries.push(appx_zip::AppxZipEntry::payload(
+        "AppxBlockMap.xml",
+        block_map.as_bytes(),
+    )?);
+    entries.push(appx_zip::AppxZipEntry::payload(
+        "[Content_Types].xml",
+        content_types.as_bytes(),
+    )?);
+    entries.push(appx_zip::AppxZipEntry::stored(
+        "AppxSignature.p7x",
+        b"PKCX".to_vec(),
+    ));
+    appx_zip::write_appx_zip(&entries)
 }
 
 /// Stage a `.msixbundle` / `.appxbundle` for final AppX SIP signing.
@@ -3491,10 +3487,15 @@ fn stage_msix_bundle_for_signature(
     let manifest = bundle_manifest.ok_or_else(|| {
         anyhow::anyhow!("MSIX bundle is missing AppxMetadata/AppxBundleManifest.xml")
     })?;
-    let content_types = bundle_content_types
-        .ok_or_else(|| anyhow::anyhow!("MSIX bundle is missing [Content_Types].xml"))?;
-    let content_types = add_msix_signature_content_type(
-        std::str::from_utf8(&content_types).context("[Content_Types].xml is not UTF-8")?,
+    let mut part_names: Vec<&str> = child_payloads
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    part_names.push("AppxMetadata/AppxBundleManifest.xml");
+    let content_types = msix_digest::appx_content_types_for_signing(
+        bundle_content_types.as_deref(),
+        &part_names,
+        true,
     )?;
     for (name, _data) in &child_payloads {
         let child_ext = name
@@ -3509,25 +3510,29 @@ fn stage_msix_bundle_for_signature(
     }
     let block_map = build_msix_bundle_block_map(&manifest, digest_algorithm)?;
 
-    let mut out = Cursor::new(Vec::new());
-    {
-        let mut writer = ZipWriter::new(&mut out);
-        let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
-        for (name, data) in &child_payloads {
-            writer.start_file(name, stored)?;
-            writer.write_all(data)?;
-        }
-        writer.start_file("AppxMetadata/AppxBundleManifest.xml", stored)?;
-        writer.write_all(&manifest)?;
-        writer.start_file("AppxBlockMap.xml", stored)?;
-        writer.write_all(block_map.as_bytes())?;
-        writer.start_file("[Content_Types].xml", stored)?;
-        writer.write_all(content_types.as_bytes())?;
-        writer.start_file("AppxSignature.p7x", stored)?;
-        writer.write_all(b"PKCX")?;
-        writer.finish()?;
-    }
-    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
+    // Child packages and the bundle manifest stay stored: children must remain
+    // byte-identical, and the bundle block map lists the manifest's stored block sizes.
+    let mut entries: Vec<appx_zip::AppxZipEntry> = child_payloads
+        .into_iter()
+        .map(|(name, data)| appx_zip::AppxZipEntry::stored(name, data))
+        .collect();
+    entries.push(appx_zip::AppxZipEntry::stored(
+        "AppxMetadata/AppxBundleManifest.xml",
+        manifest,
+    ));
+    entries.push(appx_zip::AppxZipEntry::payload(
+        "AppxBlockMap.xml",
+        block_map.as_bytes(),
+    )?);
+    entries.push(appx_zip::AppxZipEntry::payload(
+        "[Content_Types].xml",
+        content_types.as_bytes(),
+    )?);
+    entries.push(appx_zip::AppxZipEntry::stored(
+        "AppxSignature.p7x",
+        b"PKCX".to_vec(),
+    ));
+    appx_zip::write_appx_zip(&entries)
 }
 
 /// Native bundle block maps list exactly one `File` — the bundle manifest — using
@@ -3561,28 +3566,34 @@ fn build_msix_bundle_block_map(
     Ok(xml)
 }
 
+/// Rewrite the staged package with the real `AppxSignature.p7x`, copying every other entry's
+/// compressed bytes verbatim so the AXPC / AXCD digests signed over the staged package hold.
 fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
     let mut source = ZipArchive::new(Cursor::new(package)).context("open staged MSIX ZIP")?;
-    let mut out = Cursor::new(Vec::new());
-    {
-        let mut writer = ZipWriter::new(&mut out);
-        for i in 0..source.len() {
-            let mut entry = source.by_index(i).context("read staged MSIX ZIP entry")?;
-            if entry.name().ends_with('/') {
-                continue;
-            }
-            let name = entry.name().to_owned();
-            let options = FileOptions::default().compression_method(entry.compression());
-            writer.start_file(&name, options)?;
-            if name == "AppxSignature.p7x" {
-                writer.write_all(p7x)?;
-            } else {
-                std::io::copy(&mut entry, &mut writer)?;
-            }
+    let mut entries = Vec::with_capacity(source.len());
+    for i in 0..source.len() {
+        let mut entry = source
+            .by_index_raw(i)
+            .context("read staged MSIX ZIP entry")?;
+        let name = entry.name().to_owned();
+        if name == "AppxSignature.p7x" {
+            entries.push(appx_zip::AppxZipEntry::stored(name, p7x.to_vec()));
+            continue;
         }
-        writer.finish()?;
+        let method = match entry.compression() {
+            CompressionMethod::Stored => 0,
+            CompressionMethod::Deflated => 8,
+            other => bail!("unsupported compression {other:?} in staged MSIX entry `{name}`"),
+        };
+        let crc32 = entry.crc32();
+        let size = entry.size();
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        entries.push(appx_zip::AppxZipEntry::raw(
+            name, method, crc32, size, data,
+        )?);
     }
-    msix_digest::normalize_zip_for_appx_signing(out.into_inner())
+    appx_zip::write_appx_zip(&entries)
 }
 
 fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
@@ -3598,25 +3609,9 @@ fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
     Ok(pkcs7.to_vec())
 }
 
-fn add_msix_signature_content_type(xml: &str) -> Result<String> {
-    if xml.contains("PartName=\"/AppxSignature.p7x\"")
-        || xml.contains("PartName='/AppxSignature.p7x'")
-    {
-        return Ok(xml.to_string());
-    }
-    let insertion = r#"<Override PartName="/AppxSignature.p7x" ContentType="application/vnd.ms-appx.signature"/>"#;
-    if let Some(pos) = xml.rfind("</Types>") {
-        let mut out = String::with_capacity(xml.len() + insertion.len());
-        out.push_str(&xml[..pos]);
-        out.push_str(insertion);
-        out.push_str(&xml[pos..]);
-        return Ok(out);
-    }
-    bail!("[Content_Types].xml does not contain a closing </Types> element");
-}
-
 fn build_flat_msix_block_map(
     payloads: &[(String, Vec<u8>)],
+    entries: &[appx_zip::AppxZipEntry],
     digest_algorithm: PortableDigestAlgorithm,
 ) -> Result<String> {
     let hash_method = match digest_algorithm {
@@ -3627,7 +3622,7 @@ fn build_flat_msix_block_map(
     let mut xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="{hash_method}">"#
     );
-    for (name, data) in payloads {
+    for ((name, data), entry) in payloads.iter().zip(entries) {
         // `AppxBlockMap.xml` `File/@Name` uses Windows-style backslash separators
         // (matching native `AppxSip`/`makeappx` output), even though the physical
         // ZIP entry name uses forward slashes. Getting this wrong makes real Windows
@@ -3637,16 +3632,21 @@ fn build_flat_msix_block_map(
         xml.push_str(&format!(
             r#"<File Name="{escaped_name}" Size="{}" LfhSize="{}">"#,
             data.len(),
-            30 + name.len()
+            entry.local_header_size()
         ));
-        for chunk in data.chunks(64 * 1024) {
+        // Deflated entries list each block's compressed size, as makeappx does.
+        let block_sizes = entry.block_sizes.as_deref().unwrap_or_default();
+        for (index, chunk) in data.chunks(appx_zip::APPX_BLOCK_SIZE).enumerate() {
             let digest = match digest_algorithm {
                 PortableDigestAlgorithm::Sha256 => sha2::Sha256::digest(chunk).to_vec(),
                 PortableDigestAlgorithm::Sha384 => sha2::Sha384::digest(chunk).to_vec(),
                 PortableDigestAlgorithm::Sha512 => sha2::Sha512::digest(chunk).to_vec(),
             };
             let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
-            xml.push_str(&format!(r#"<Block Hash="{encoded}"/>"#));
+            match block_sizes.get(index) {
+                Some(size) => xml.push_str(&format!(r#"<Block Hash="{encoded}" Size="{size}"/>"#)),
+                None => xml.push_str(&format!(r#"<Block Hash="{encoded}"/>"#)),
+            }
         }
         xml.push_str("</File>");
     }
@@ -4050,6 +4050,119 @@ mod tests {
             msix_digest::msix_verified_signature(&signed, ext)
                 .unwrap_or_else(|e| panic!("verify signed {name}: {e:#}"));
         }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    /// Publishers that drop makeappx (e.g. pinget's `source2.msix`) hand psign a plain ZIP
+    /// of the package layout: deflated by a generic writer, with no `AppxBlockMap.xml` and
+    /// possibly no `[Content_Types].xml`. Signing must still produce a complete,
+    /// compressed AppxPackaging-layout package.
+    #[test]
+    fn signs_plain_zip_package_without_makeappx_metadata() {
+        use std::io::Write as _;
+
+        let manifest = std::fs::read("../../tests/fixtures/msix-minimal/AppxManifest.xml")
+            .expect("manifest fixture");
+        let index_db: Vec<u8> = (0..40_000u32)
+            .flat_map(|i| format!("package-{i:06}|Contoso.App|1.{}.0\n", i % 97).into_bytes())
+            .collect();
+        let mut plain = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut plain);
+            let deflated =
+                zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated);
+            for (name, data) in [
+                ("AppxManifest.xml", manifest.as_slice()),
+                ("Public/index.db", index_db.as_slice()),
+                ("Assets/StoreLogo.png", b"\x89PNG not really".as_slice()),
+            ] {
+                writer.start_file(name, deflated).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-plain-zip-msix-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let source = temp_dir.join("source2.msix");
+        std::fs::write(&source, plain.into_inner()).unwrap();
+        let output = temp_dir.join("source2.signed.msix");
+        portable_sign(PortableSignRequest {
+            path: source,
+            output_path: Some(output.clone()),
+            pfx_path: Some(
+                PathBuf::from("../../tests/fixtures/devolutions-authenticode")
+                    .join("authenticode-test-cert.pfx"),
+            ),
+            pfx_password: Some("CodeSign123!".to_string()),
+            ..default_sign_request()
+        })
+        .expect("sign plain ZIP package");
+
+        let signed = std::fs::read(&output).unwrap();
+        assert_appx_zip_layout(&signed, "signed plain ZIP");
+        msix_digest::msix_verified_signature(&signed, "msix").expect("verify signed package");
+        assert!(
+            signed.len() < index_db.len() / 4,
+            "payload must stay compressed ({} bytes for a {}-byte index)",
+            signed.len(),
+            index_db.len()
+        );
+
+        let mut archive = ZipArchive::new(Cursor::new(&signed)).unwrap();
+        let index = archive.by_name("Public/index.db").unwrap();
+        assert_eq!(index.compression(), CompressionMethod::Deflated);
+        drop(index);
+        assert_eq!(
+            archive
+                .by_name("Assets/StoreLogo.png")
+                .unwrap()
+                .compression(),
+            CompressionMethod::Stored
+        );
+        let mut read_part = |name: &str| {
+            let mut text = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            text
+        };
+        let content_types = read_part("[Content_Types].xml");
+        for expected in [
+            r#"<Default Extension="db" ContentType="application/octet-stream"/>"#,
+            r#"<Default Extension="xml" ContentType="application/vnd.ms-appx.manifest+xml"/>"#,
+            r#"<Override PartName="/AppxBlockMap.xml" ContentType="application/vnd.ms-appx.blockmap+xml"/>"#,
+            r#"<Override PartName="/AppxSignature.p7x" ContentType="application/vnd.ms-appx.signature"/>"#,
+        ] {
+            assert!(
+                content_types.contains(expected),
+                "{expected} in {content_types}"
+            );
+        }
+        let block_map = read_part("AppxBlockMap.xml");
+        let index_file = block_map
+            .split("<File ")
+            .find(|file| file.starts_with(r#"Name="Public\index.db""#))
+            .expect("index.db in block map");
+        let blocks: Vec<&str> = index_file.split("<Block ").skip(1).collect();
+        assert_eq!(
+            blocks.len(),
+            index_db.len().div_ceil(appx_zip::APPX_BLOCK_SIZE)
+        );
+        assert!(
+            blocks.iter().all(|block| block.contains(" Size=\"")),
+            "every deflated block lists its compressed Size: {index_file}"
+        );
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

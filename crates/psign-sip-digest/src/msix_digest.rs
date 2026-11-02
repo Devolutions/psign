@@ -2041,6 +2041,132 @@ pub fn normalize_zip_for_appx_signing(zip: Vec<u8>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+const CONTENT_TYPE_MANIFEST: &str = "application/vnd.ms-appx.manifest+xml";
+const CONTENT_TYPE_BUNDLE_MANIFEST: &str = "application/vnd.ms-appx.bundlemanifest+xml";
+const CONTENT_TYPE_BLOCK_MAP: &str = "application/vnd.ms-appx.blockmap+xml";
+const CONTENT_TYPE_SIGNATURE: &str = "application/vnd.ms-appx.signature";
+
+/// makeappx-style `Default` content type for a payload extension without one.
+fn default_content_type_for_extension(extension: &str) -> &'static str {
+    match extension {
+        "xml" => CONTENT_TYPE_MANIFEST,
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "ico" => "image/vnd.microsoft.icon",
+        "svg" => "image/svg+xml",
+        "exe" | "dll" | "sys" => "application/x-msdownload",
+        "json" => "application/json",
+        "txt" => "text/plain",
+        "htm" | "html" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "cat" => "application/vnd.ms-pkiseccat",
+        "appx" => "application/vnd.ms-appx",
+        "msix" => "application/msix",
+        "appxbundle" => "application/vnd.ms-appx.bundle",
+        "msixbundle" => "application/msixbundle",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Build the `[Content_Types].xml` for an MSIX / AppX package staged for signing.
+///
+/// `payload_parts` are the ZIP entry names (forward slashes) of every part that stays in
+/// the package besides `[Content_Types].xml`, `AppxBlockMap.xml` and `AppxSignature.p7x`.
+/// Content types from `existing` are kept; payload extensions without a `Default` get a
+/// makeappx-style one, the (bundle) manifest is forced to its AppX content type, and the
+/// block map / signature overrides that signing requires are added. When `existing` is
+/// `None` (a package zipped without makeappx), the whole file is generated, so a plain ZIP
+/// of a package layout can be signed directly.
+pub fn appx_content_types_for_signing(
+    existing: Option<&[u8]>,
+    payload_parts: &[&str],
+    bundle: bool,
+) -> Result<String> {
+    let AppxContentTypes {
+        defaults: input_defaults,
+        overrides: input_overrides,
+    } = existing
+        .map(validate_content_types_xml)
+        .transpose()?
+        .unwrap_or_default();
+    let mut defaults: std::collections::BTreeMap<String, String> =
+        input_defaults.into_iter().collect();
+    let mut overrides: Vec<(String, String)> = Vec::new();
+    let (manifest_part, manifest_type) = if bundle {
+        (ascii_part(BUNDLE_MANIFEST), CONTENT_TYPE_BUNDLE_MANIFEST)
+    } else {
+        (ascii_part(APP_MANIFEST), CONTENT_TYPE_MANIFEST)
+    };
+
+    for &part in payload_parts {
+        let normalized = normalize_appx_part_name(part)?;
+        let extension = normalized
+            .rsplit('/')
+            .next()
+            .and_then(|leaf| leaf.rsplit_once('.'))
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        let explicit = input_overrides.get(&normalized.to_ascii_lowercase());
+        if normalized.eq_ignore_ascii_case(manifest_part) {
+            if explicit.is_none() && !extension.is_empty() && !defaults.contains_key(&extension) {
+                defaults.insert(extension.clone(), manifest_type.to_owned());
+            }
+            let resolved = explicit.or_else(|| defaults.get(&extension));
+            if !resolved.is_some_and(|ct| ct.eq_ignore_ascii_case(manifest_type)) {
+                overrides.push((normalized, manifest_type.to_owned()));
+            }
+        } else if let Some(content_type) = explicit {
+            overrides.push((normalized, content_type.clone()));
+        } else if extension.is_empty() {
+            overrides.push((normalized, "application/octet-stream".to_owned()));
+        } else {
+            let content_type = default_content_type_for_extension(&extension);
+            defaults
+                .entry(extension)
+                .or_insert_with(|| content_type.to_owned());
+        }
+    }
+    overrides.push((
+        ascii_part(BLOCK_MAP).to_owned(),
+        CONTENT_TYPE_BLOCK_MAP.to_owned(),
+    ));
+    overrides.push((
+        ascii_part(APP_SIGNATURE).to_owned(),
+        CONTENT_TYPE_SIGNATURE.to_owned(),
+    ));
+
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+    );
+    for (extension, content_type) in &defaults {
+        xml.push_str(&format!(
+            r#"<Default Extension="{}" ContentType="{}"/>"#,
+            escape(extension),
+            escape(content_type)
+        ));
+    }
+    for (part, content_type) in &overrides {
+        xml.push_str(&format!(
+            r#"<Override PartName="/{}" ContentType="{}"/>"#,
+            escape(part),
+            escape(content_type)
+        ));
+    }
+    xml.push_str("</Types>");
+    Ok(xml)
+}
+
 /// Fast `--skip-signed` preflight: does this OPC/ZIP package already carry an `AppxSignature.p7x` part?
 pub fn msix_signature_part_present(package: &[u8]) -> Result<bool> {
     let archive = ZipArchive::new(Cursor::new(package))?;
@@ -3051,5 +3177,70 @@ mod tests {
             parse_block_map_xml(duplicate.as_bytes()).unwrap_err()
         );
         assert!(msg.contains("duplicate FileHash"), "{msg}");
+    }
+
+    #[test]
+    fn content_types_for_signing_fill_gaps_and_keep_existing_types() {
+        let parts = [
+            "AppxManifest.xml",
+            "Public/index.db",
+            "Assets/Logo.PNG",
+            "LICENSE",
+        ];
+        let generated = appx_content_types_for_signing(None, &parts, false).unwrap();
+        let parsed = validate_content_types_xml(generated.as_bytes()).unwrap();
+        assert_eq!(
+            content_type_for_part(&parsed, "AppxManifest.xml"),
+            Some(CONTENT_TYPE_MANIFEST)
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "Assets/Logo.PNG"),
+            Some("image/png")
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "Public/index.db"),
+            Some("application/octet-stream")
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "LICENSE"),
+            Some("application/octet-stream")
+        );
+        let inventory = AppxPackageInventory {
+            has_code_integrity: false,
+        };
+        validate_reserved_content_types(&parsed, inventory, "msix").unwrap();
+
+        // A generic `xml` Default (as plain OPC tools write) keeps its type for other XML
+        // parts; the manifest gets an Override and stale reserved overrides are replaced.
+        let existing = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="db" ContentType="application/x-sqlite3"/><Override PartName="/AppxBlockMap.xml" ContentType="application/xml"/></Types>"#;
+        let parts = ["AppxManifest.xml", "Public/index.db", "Public/extra.xml"];
+        let merged = appx_content_types_for_signing(Some(existing), &parts, false).unwrap();
+        let parsed = validate_content_types_xml(merged.as_bytes()).unwrap();
+        assert_eq!(
+            content_type_for_part(&parsed, "AppxManifest.xml"),
+            Some(CONTENT_TYPE_MANIFEST)
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "Public/extra.xml"),
+            Some("application/xml")
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "Public/index.db"),
+            Some("application/x-sqlite3")
+        );
+        validate_reserved_content_types(&parsed, inventory, "msix").unwrap();
+
+        let bundle = appx_content_types_for_signing(
+            None,
+            &["app.msix", "AppxMetadata/AppxBundleManifest.xml"],
+            true,
+        )
+        .unwrap();
+        let parsed = validate_content_types_xml(bundle.as_bytes()).unwrap();
+        validate_reserved_content_types(&parsed, inventory, "msixbundle").unwrap();
+        assert_eq!(
+            content_type_for_part(&parsed, "app.msix"),
+            Some("application/msix")
+        );
     }
 }

@@ -154,10 +154,12 @@ fn run_powershell(script: &str) -> String {
 /// Regression test for TRUST_E_BAD_DIGEST (**0x80096010**) on portable-signed MSIX:
 /// Windows AppxSip only accepts packages in the AppxPackaging ZIP layout (ZIP64 end
 /// records, "version made by" 45, zero external attributes), which the `zip` crate does
-/// not write on its own. A makeappx-built package is signed by `psign-tool --mode
-/// portable sign` with a throwaway self-signed PFX created in memory (never imported
-/// into any certificate store); Windows must then fail only on chain trust
-/// (CERT_E_UNTRUSTEDROOT, **0x800B0109**), never on the digest.
+/// not write on its own. A makeappx-built package and a plain ZIP of the same layout
+/// (no `AppxBlockMap.xml` / `[Content_Types].xml`, as publishers that drop makeappx
+/// produce) are signed by `psign-tool --mode portable sign` with a throwaway self-signed
+/// PFX created in memory (never imported into any certificate store). Windows must then
+/// fail only on chain trust (CERT_E_UNTRUSTEDROOT, **0x800B0109**), never on the digest,
+/// and `makeappx unpack` must accept the block map.
 #[test]
 fn portable_signed_makeappx_msix_fails_windows_verify_only_on_untrusted_root() {
     let Some(makeappx) = find_makeappx() else {
@@ -203,6 +205,22 @@ fn portable_signed_makeappx_msix_fails_windows_verify_only_on_untrusted_root() {
         String::from_utf8_lossy(&pack.stderr)
     );
 
+    let plain_zip = temp_dir.join("plain-zip.msix");
+    {
+        use std::io::Write as _;
+        let mut writer =
+            zip::ZipWriter::new(std::fs::File::create(&plain_zip).expect("create plain ZIP"));
+        let deflated =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for name in ["AppxManifest.xml", "noop.exe", "Assets/StoreLogo.png"] {
+            writer.start_file(name, deflated).expect("start ZIP entry");
+            writer
+                .write_all(&std::fs::read(layout.join(name)).expect("read layout file"))
+                .expect("write ZIP entry");
+        }
+        writer.finish().expect("finish plain ZIP");
+    }
+
     // Subject must match the manifest Publisher (`CN=Test Code Signing Certificate`).
     let pfx = temp_dir.join("throwaway.pfx");
     let cer = temp_dir.join("throwaway.cer");
@@ -221,9 +239,17 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
         cer = cer.display(),
     ));
 
-    for digest in ["SHA256", "SHA384"] {
-        let signed = temp_dir.join(format!("signed-{digest}.msix"));
-        std::fs::copy(&unsigned, &signed).expect("copy unsigned package");
+    for (input, digest) in [
+        (&unsigned, "SHA256"),
+        (&unsigned, "SHA384"),
+        (&plain_zip, "SHA256"),
+    ] {
+        let label = format!(
+            "{} {digest}",
+            input.file_stem().unwrap_or_default().to_string_lossy()
+        );
+        let signed = temp_dir.join(format!("signed-{}.msix", label.replace(' ', "-")));
+        std::fs::copy(input, &signed).expect("copy unsigned package");
         Command::cargo_bin("psign-tool")
             .expect("psign-tool binary")
             .args(["--mode", "portable", "sign", "--pfx"])
@@ -247,11 +273,11 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
         );
         assert!(
             !verify_text.contains("0x80096010"),
-            "{digest}: Windows rejected the portable MSIX digest (TRUST_E_BAD_DIGEST):\n{verify_text}"
+            "{label}: Windows rejected the portable MSIX digest (TRUST_E_BAD_DIGEST):\n{verify_text}"
         );
         assert!(
             verify_text.contains("0x800B0109"),
-            "{digest}: expected only CERT_E_UNTRUSTEDROOT from WinVerifyTrust:\n{verify_text}"
+            "{label}: expected only CERT_E_UNTRUSTEDROOT from WinVerifyTrust:\n{verify_text}"
         );
 
         let status = run_powershell(&format!(
@@ -260,7 +286,23 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
         ));
         assert_eq!(
             status, "UnknownError",
-            "{digest}: Get-AuthenticodeSignature must fail only on the untrusted root (HashMismatch = bad digest)"
+            "{label}: Get-AuthenticodeSignature must fail only on the untrusted root (HashMismatch = bad digest)"
+        );
+
+        let unpack = StdCommand::new(&makeappx)
+            .args(["unpack", "/o", "/p"])
+            .arg(&signed)
+            .arg("/d")
+            .arg(temp_dir.join(format!("unpacked-{}", label.replace(' ', "-"))))
+            .output()
+            .expect("run makeappx unpack");
+        assert!(
+            unpack.status.success(),
+            "{label}: makeappx unpack rejected the signed package:
+{}
+{}",
+            String::from_utf8_lossy(&unpack.stdout),
+            String::from_utf8_lossy(&unpack.stderr)
         );
 
         // The portable verifier must agree with Windows on the digest.
