@@ -235,7 +235,7 @@ pub struct CodeArgs {
     /// Override Artifact Signing data-plane origin for deterministic local tests.
     #[arg(long = "artifact-signing-endpoint-base-url", hide = true)]
     pub artifact_signing_endpoint_base_url: Option<String>,
-    /// Additional certificate to include in generated package PKCS#7 signatures.
+    /// Additional certificate to include in generated PKCS#7 signatures.
     #[arg(long = "chain-cert", value_name = "PATH")]
     pub chain_certs: Vec<PathBuf>,
     /// Build and print the signing graph without modifying files.

@@ -42,7 +42,28 @@ psign-tool --mode portable sign --pfx signer.pfx --password "$PFX_PASSWORD" --fd
 psign-tool portable trust-verify-msix --trusted-ca signer.cer source2.msix
 ```
 
-The manifest `Identity/@Publisher` must still match the signing certificate subject for Windows to install the package.
+The manifest `Identity/@Publisher` must still match the signing certificate subject for Windows to install the package. When signing with `--pfx`, any CA certificates bundled inside the PFX are automatically embedded in `AppxSignature.p7x` (and other CMS signatures).
+
+### Test PKI generation (isolated dev/test environments)
+
+For local or test-VM workflows that need both package signing and HTTPS trust from a single private Root CA without touching host certificate stores during generation:
+
+```bash
+psign-tool portable generate-root-ca \
+  --subject "CN=Example Test Root CA, O=Example Inc., C=CA" \
+  --cert-out root-ca.cer --pfx-out root-ca.pfx --password "$ROOT_PW"
+
+psign-tool portable issue-code-signing-cert \
+  --ca-pfx root-ca.pfx --ca-password "$ROOT_PW" \
+  --subject "CN=Example Inc., O=Example Inc., C=CA" \
+  --pfx-out codesign.pfx --password "$SIGN_PW"
+
+psign-tool portable issue-tls-server-cert \
+  --ca-pfx root-ca.pfx --ca-password "$ROOT_PW" \
+  --dns feed.example.test --ip 127.0.0.1 \
+  --pfx-out tls-server.pfx --password "$TLS_PW" \
+  --pem-out tls-fullchain.pem --key-out tls-server.key
+```
 
 ## 1.2 Portable signing with Azure Key Vault
 

@@ -10,11 +10,6 @@ use authenticode::SpcIndirectDataContent;
 use base64::Engine as _;
 use der::Encode as _;
 use der::asn1::ObjectIdentifier;
-use picky::key::PrivateKey;
-use picky::pkcs12::{
-    Pfx, Pkcs12CryptoContext, Pkcs12ParsingParams, SafeBag, SafeBagKind, SafeContentsKind,
-};
-use picky::x509::Cert as PickyCert;
 use picky::x509::date::UtcDate;
 use psign_authenticode_trust::policy::{OnlineTrustOptions, RevocationMode};
 use psign_authenticode_trust::{
@@ -2356,12 +2351,17 @@ fn load_signing_material(
         bail!("provide either pfx_path or certificate/private key material, not both");
     }
 
-    let (cert_bytes, key_bytes) = if let Some(pfx_path) = &request.pfx_path {
+    let (cert_bytes, key_bytes, pfx_chain_ders) = if let Some(pfx_path) = &request.pfx_path {
         let pfx_bytes =
             std::fs::read(pfx_path).with_context(|| format!("read {}", pfx_path.display()))?;
         let password = request.pfx_password.as_deref().unwrap_or_default();
-        load_pfx_cert_and_key(&pfx_bytes, password)
-            .with_context(|| format!("parse PFX {}", pfx_path.display()))?
+        let parsed = psign_authenticode_trust::pkcs12::parse_pfx_identity(&pfx_bytes, password)
+            .with_context(|| format!("parse PFX {}", pfx_path.display()))?;
+        (
+            parsed.signer_cert_der,
+            parsed.private_key_pem.into_bytes(),
+            parsed.chain_certs_der,
+        )
     } else {
         let cert_bytes = match (&request.certificate_der_base64, &request.certificate_path) {
             (Some(_), Some(_)) => {
@@ -2391,12 +2391,20 @@ fn load_signing_material(
                 bail!("portable signing requires private_key_der_base64 or private_key_path")
             }
         };
-        (cert_bytes, key_bytes)
+        (cert_bytes, key_bytes, Vec::new())
     };
 
     let signer_cert = rdp::parse_certificate(&cert_bytes).context("parse signer certificate")?;
     let private_key = rdp::parse_rsa_private_key(&key_bytes).context("parse RSA private key")?;
-    let chain = load_chain_certificates(request)?;
+    let mut chain =
+        Vec::with_capacity(pfx_chain_ders.len() + request.chain_certificate_paths.len());
+    for (index, der) in pfx_chain_ders.iter().enumerate() {
+        chain.push(
+            rdp::parse_certificate(der)
+                .with_context(|| format!("parse PFX chain certificate[{index}]"))?,
+        );
+    }
+    chain.extend(load_chain_certificates(request)?);
 
     Ok((signer_cert, private_key, chain))
 }
@@ -2420,87 +2428,6 @@ fn load_chain_certificates(request: &PortableSignRequest) -> Result<Vec<x509_cer
         );
     }
     Ok(chain)
-}
-
-fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-    let crypto_context = Pkcs12CryptoContext::new_with_password(password)?;
-    let parsing_params = Pkcs12ParsingParams::default();
-    let pfx = Pfx::from_der(bytes, &crypto_context, &parsing_params)?;
-    let mut certs: Vec<Vec<u8>> = Vec::new();
-    let mut keys: Vec<(Vec<u8>, PrivateKey)> = Vec::new();
-    for safe_contents in pfx.safe_contents() {
-        collect_pfx_bags(safe_contents.kind(), &mut certs, &mut keys)?;
-    }
-    if certs.is_empty() {
-        bail!("PFX did not contain an X.509 certificate");
-    }
-    if keys.is_empty() {
-        bail!("PFX did not contain a private key");
-    }
-    for cert in certs {
-        for (key_pem, key) in &keys {
-            if ensure_key_matches_cert(&cert, key).is_ok() {
-                return Ok((cert, key_pem.clone()));
-            }
-        }
-    }
-    bail!("PFX did not contain a certificate matching an included private key")
-}
-
-fn collect_pfx_bags(
-    kind: &SafeContentsKind,
-    certs: &mut Vec<Vec<u8>>,
-    keys: &mut Vec<(Vec<u8>, PrivateKey)>,
-) -> Result<()> {
-    match kind {
-        SafeContentsKind::SafeBags(bags)
-        | SafeContentsKind::EncryptedSafeBags {
-            safe_bags: bags, ..
-        } => {
-            for bag in bags {
-                collect_safe_bag(bag, certs, keys)?;
-            }
-        }
-        SafeContentsKind::Unknown => {}
-    }
-    Ok(())
-}
-
-fn collect_safe_bag(
-    bag: &SafeBag,
-    certs: &mut Vec<Vec<u8>>,
-    keys: &mut Vec<(Vec<u8>, PrivateKey)>,
-) -> Result<()> {
-    match bag.kind() {
-        SafeBagKind::PrivateKey(key) | SafeBagKind::EncryptedPrivateKey { key, .. } => {
-            let mut pem = key
-                .to_pem_str()
-                .context("encode PFX private key as PKCS#8 PEM")?;
-            pem.push('\n');
-            keys.push((pem.into_bytes(), key.clone()));
-        }
-        SafeBagKind::Certificate(cert) => {
-            certs.push(cert.to_der().context("encode PFX certificate as DER")?);
-        }
-        SafeBagKind::Nested(bags) => {
-            for nested in bags {
-                collect_safe_bag(nested, certs, keys)?;
-            }
-        }
-        SafeBagKind::Secret(_) | SafeBagKind::Unknown => {}
-    }
-    Ok(())
-}
-
-fn ensure_key_matches_cert(cert_der: &[u8], key: &PrivateKey) -> Result<()> {
-    let cert = PickyCert::from_der(cert_der).context("parse certificate for key matching")?;
-    let key_public = key
-        .to_public_key()
-        .context("derive public key from private key")?;
-    if cert.public_key() != &key_public {
-        bail!("private key does not match certificate public key");
-    }
-    Ok(())
 }
 
 fn maybe_timestamp_pkcs7(request: &PortableSignRequest, pkcs7_der: Vec<u8>) -> Result<Vec<u8>> {

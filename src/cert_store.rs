@@ -7,9 +7,6 @@ use crate::cli::{
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use picky::key::PrivateKey;
-use picky::pkcs12::{
-    Pfx, Pkcs12CryptoContext, Pkcs12ParsingParams, SafeBag, SafeBagKind, SafeContentsKind,
-};
 use picky::x509::Cert as PickyCert;
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
@@ -549,75 +546,8 @@ fn write_private_key_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, String)> {
-    let crypto_context = Pkcs12CryptoContext::new_with_password(password)?;
-    let parsing_params = Pkcs12ParsingParams::default();
-    let pfx = Pfx::from_der(bytes, &crypto_context, &parsing_params)?;
-    let mut certs: Vec<Vec<u8>> = Vec::new();
-    let mut keys: Vec<(String, PrivateKey)> = Vec::new();
-    for safe_contents in pfx.safe_contents() {
-        collect_pfx_bags(safe_contents.kind(), &mut certs, &mut keys)?;
-    }
-    if certs.is_empty() {
-        return Err(anyhow!("PFX did not contain an X.509 certificate"));
-    }
-    if keys.is_empty() {
-        return Err(anyhow!("PFX did not contain a private key"));
-    }
-    for cert in certs {
-        for (key_pem, key) in &keys {
-            if ensure_key_matches_cert(&cert, key).is_ok() {
-                return Ok((cert, key_pem.clone()));
-            }
-        }
-    }
-    Err(anyhow!(
-        "PFX did not contain a certificate matching an included private key"
-    ))
-}
-
-fn collect_pfx_bags(
-    kind: &SafeContentsKind,
-    certs: &mut Vec<Vec<u8>>,
-    keys: &mut Vec<(String, PrivateKey)>,
-) -> Result<()> {
-    match kind {
-        SafeContentsKind::SafeBags(bags)
-        | SafeContentsKind::EncryptedSafeBags {
-            safe_bags: bags, ..
-        } => {
-            for bag in bags {
-                collect_safe_bag(bag, certs, keys)?;
-            }
-        }
-        SafeContentsKind::Unknown => {}
-    }
-    Ok(())
-}
-
-fn collect_safe_bag(
-    bag: &SafeBag,
-    certs: &mut Vec<Vec<u8>>,
-    keys: &mut Vec<(String, PrivateKey)>,
-) -> Result<()> {
-    match bag.kind() {
-        SafeBagKind::PrivateKey(key) | SafeBagKind::EncryptedPrivateKey { key, .. } => {
-            let mut pem = key
-                .to_pem_str()
-                .context("encode PFX private key as PKCS#8 PEM")?;
-            pem.push('\n');
-            keys.push((pem, key.clone()));
-        }
-        SafeBagKind::Certificate(cert) => {
-            certs.push(cert.to_der().context("encode PFX certificate as DER")?);
-        }
-        SafeBagKind::Nested(bags) => {
-            for nested in bags {
-                collect_safe_bag(nested, certs, keys)?;
-            }
-        }
-        SafeBagKind::Secret(_) | SafeBagKind::Unknown => {}
-    }
-    Ok(())
+    let parsed = psign_authenticode_trust::pkcs12::parse_pfx_identity(bytes, password)?;
+    Ok((parsed.signer_cert_der, parsed.private_key_pem))
 }
 
 fn sha1_thumbprint_upper(der: &[u8]) -> String {

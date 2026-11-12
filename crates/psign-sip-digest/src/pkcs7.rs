@@ -554,6 +554,7 @@ pub fn create_authenticode_pkcs7_der_with_rsa_signature(
     let digest_algorithms =
         SetOfVec::try_from(vec![digest_algorithm.authenticode_digest_algorithm()])
             .map_err(|e| anyhow!("DigestAlgorithmIdentifiers SET: {e}"))?;
+    let chain_certs = dedup_chain_certs(&signer_cert, chain_certs)?;
     let mut certs = Vec::with_capacity(chain_certs.len() + 1);
     certs.push(CertificateChoices::Certificate(signer_cert));
     certs.extend(chain_certs.into_iter().map(CertificateChoices::Certificate));
@@ -695,14 +696,10 @@ pub fn create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
         .map_err(|e| anyhow!("trailing octets after encapsulated content DER: {e}"))?;
     let digest_algorithms = SetOfVec::try_from(vec![input.digest_algorithm.digest_algorithm()])
         .map_err(|e| anyhow!("DigestAlgorithmIdentifiers SET: {e}"))?;
-    let mut certs = Vec::with_capacity(input.chain_certs.len() + 1);
+    let chain_certs = dedup_chain_certs(&input.signer_cert, input.chain_certs)?;
+    let mut certs = Vec::with_capacity(chain_certs.len() + 1);
     certs.push(CertificateChoices::Certificate(input.signer_cert));
-    certs.extend(
-        input
-            .chain_certs
-            .into_iter()
-            .map(CertificateChoices::Certificate),
-    );
+    certs.extend(chain_certs.into_iter().map(CertificateChoices::Certificate));
     let certificates = Some(CertificateSet(
         SetOfVec::try_from(certs).map_err(|e| anyhow!("CertificateSet SET: {e}"))?,
     ));
@@ -955,6 +952,7 @@ where
             .add_signed_attribute(spc_statement_type_attribute()?)
             .map_err(|e| anyhow!("add Authenticode SpcStatementType attribute: {e}"))?;
     }
+    let chain_certs = dedup_chain_certs(&signer_cert, chain_certs)?;
     let mut builder = SignedDataBuilder::new(&content);
     builder
         .add_digest_algorithm(digest_alg)
@@ -987,6 +985,28 @@ where
         );
     }
     encode_pkcs7_content_info_signed_data_der(&sd)
+}
+
+fn dedup_chain_certs(
+    signer_cert: &Certificate,
+    chain_certs: Vec<Certificate>,
+) -> Result<Vec<Certificate>> {
+    let mut seen = std::collections::HashSet::with_capacity(chain_certs.len() + 1);
+    seen.insert(
+        signer_cert
+            .to_der()
+            .map_err(|e| anyhow!("encode signer certificate DER: {e}"))?,
+    );
+    let mut unique = Vec::with_capacity(chain_certs.len());
+    for cert in chain_certs {
+        let der = cert
+            .to_der()
+            .map_err(|e| anyhow!("encode chain certificate DER: {e}"))?;
+        if seen.insert(der) {
+            unique.push(cert);
+        }
+    }
+    Ok(unique)
 }
 
 /// Encode **`SignedData`** as a PKCS#7 **`ContentInfo`** (**`contentType`** = **`id-signedData`**, RFC 5652).

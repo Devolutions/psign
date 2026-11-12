@@ -99,15 +99,23 @@ fn sign_zip_comment_from_pfx(args: &SignArgs, digest: &str) -> Result<Option<Str
         .as_ref()
         .expect("can_sign_zip_directly_from_pfx checked PFX");
     let pfx_bytes = std::fs::read(pfx).with_context(|| format!("read PFX {}", pfx.display()))?;
-    let (cert_der, key_pem) = crate::cert_store::load_pfx_cert_and_key(
+    let parsed_pfx = psign_authenticode_trust::pkcs12::parse_pfx_identity(
         &pfx_bytes,
         args.password.as_deref().unwrap_or_default(),
     )
     .with_context(|| format!("parse PFX {}", pfx.display()))?;
-    let signer_cert = rdp::parse_certificate(&cert_der).context("parse PFX signer certificate")?;
-    let private_key =
-        rdp::parse_rsa_private_key(key_pem.as_bytes()).context("parse PFX private key")?;
-    let mut chain = Vec::with_capacity(args.additional_certs.len());
+    let signer_cert = rdp::parse_certificate(&parsed_pfx.signer_cert_der)
+        .context("parse PFX signer certificate")?;
+    let private_key = rdp::parse_rsa_private_key(parsed_pfx.private_key_pem.as_bytes())
+        .context("parse PFX private key")?;
+    let mut chain =
+        Vec::with_capacity(parsed_pfx.chain_certs_der.len() + args.additional_certs.len());
+    for (index, der) in parsed_pfx.chain_certs_der.iter().enumerate() {
+        chain.push(
+            rdp::parse_certificate(der)
+                .with_context(|| format!("parse PFX chain certificate[{index}]"))?,
+        );
+    }
     for cert in &args.additional_certs {
         let bytes = std::fs::read(cert)
             .with_context(|| format!("read additional cert {}", cert.display()))?;

@@ -132,6 +132,10 @@ cargo build -p psign --bin psign-tool --locked
 # psign-tool portable business-central-app-info package.app
 # psign-tool portable msix-manifest-info package.msix
 # psign-tool portable msix-set-publisher package.msix --publisher "CN=Example" --output updated.msix
+# Portable test PKI generation (isolated Root CA, Code Signing PFX with chain, TLS Server PFX/PEM):
+# psign-tool portable generate-root-ca --subject "CN=Test Root CA" --cert-out root.cer --pfx-out root.pfx --password "$ROOT_PW"
+# psign-tool portable issue-code-signing-cert --ca-pfx root.pfx --ca-password "$ROOT_PW" --subject "CN=Example" --pfx-out codesign.pfx --password "$SIGN_PW"
+# psign-tool portable issue-tls-server-cert --ca-pfx root.pfx --ca-password "$ROOT_PW" --dns example.test --ip 127.0.0.1 --pfx-out tls.pfx --password "$TLS_PW"
 # psign-tool portable clickonce-deploy-info app.exe.deploy
 # psign-tool portable clickonce-copy-deploy-payload app.exe.deploy --output app.exe
 # psign-tool portable clickonce-update-manifest-hashes app.exe.manifest --base-directory . --output updated.manifest
