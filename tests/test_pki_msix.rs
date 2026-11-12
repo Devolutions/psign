@@ -229,7 +229,6 @@ fn portable_test_pki_signs_msix_with_embedded_chain_and_passes_portable_verify_i
 
 #[test]
 fn portable_test_pki_3tier_pfx_embeds_intermediate_and_verifies_against_root_only() {
-    use der::Encode as _;
     use psign_authenticode_trust::test_pki::{
         CaIssuerMaterial, CodeSigningCertSpec, RootCaSpec, encode_pfx_der, generate_root_ca,
         issue_code_signing_cert, parse_distinguished_name,
@@ -241,7 +240,8 @@ fn portable_test_pki_3tier_pfx_embeds_intermediate_and_verifies_against_root_onl
     use sha1::Digest as _;
     use sha2::Sha256;
     use std::time::{Duration, SystemTime};
-    use x509_cert::der::asn1::{Any, AnyRef, BitString, OctetString, UtcTime};
+    use x509_cert::der::Encode as _;
+    use x509_cert::der::asn1::{Any, AnyRef, BitString, ObjectIdentifier, OctetString, UtcTime};
     use x509_cert::ext::AsExtension as _;
     use x509_cert::ext::pkix::{
         AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
@@ -281,7 +281,7 @@ fn portable_test_pki_3tier_pfx_embeds_intermediate_and_verifies_against_root_onl
         ),
     };
     let alg = AlgorithmIdentifierOwned {
-        oid: der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+        oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
         parameters: Some(Any::from(AnyRef::NULL)),
     };
     let sub_ski = SubjectKeyIdentifier(
