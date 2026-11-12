@@ -546,7 +546,7 @@ fn write_private_key_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub(crate) fn load_pfx_cert_and_key(bytes: &[u8], password: &str) -> Result<(Vec<u8>, String)> {
-    let parsed = psign_authenticode_trust::test_pki::parse_pfx_identity(bytes, password)?;
+    let parsed = psign_authenticode_trust::pkcs12::parse_pfx_identity(bytes, password)?;
     Ok((parsed.signer_cert_der, parsed.private_key_pem))
 }
 

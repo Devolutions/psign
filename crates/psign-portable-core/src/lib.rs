@@ -2355,7 +2355,7 @@ fn load_signing_material(
         let pfx_bytes =
             std::fs::read(pfx_path).with_context(|| format!("read {}", pfx_path.display()))?;
         let password = request.pfx_password.as_deref().unwrap_or_default();
-        let parsed = psign_authenticode_trust::test_pki::parse_pfx_identity(&pfx_bytes, password)
+        let parsed = psign_authenticode_trust::pkcs12::parse_pfx_identity(&pfx_bytes, password)
             .with_context(|| format!("parse PFX {}", pfx_path.display()))?;
         (
             parsed.signer_cert_der,

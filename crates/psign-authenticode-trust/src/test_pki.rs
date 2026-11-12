@@ -3,10 +3,10 @@
 //! Produces RFC 5280 / Windows CryptoAPI-compatible X.509 v3 Root CA, Code Signing, and TLS Server
 //! certificates and PKCS#12 (`.pfx`) bundles without modifying OS certificate stores.
 
-use std::collections::HashSet;
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
+pub use crate::pkcs12::{ParsedPfxIdentity, parse_pfx_identity};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use der::asn1::{
@@ -16,9 +16,8 @@ use der::asn1::{
 use der::{Decode, Encode, Tag, Tagged};
 use picky::key::PrivateKey;
 use picky::pkcs12::{
-    Pbes2Cipher, Pbes2Encryption, Pfx, Pkcs12Attribute, Pkcs12AttributeKind, Pkcs12CryptoContext,
-    Pkcs12Encryption, Pkcs12HashAlgorithm, Pkcs12MacAlgorithmHmac, Pkcs12ParsingParams, SafeBag,
-    SafeBagKind, SafeContents, SafeContentsKind,
+    Pbes2Cipher, Pbes2Encryption, Pfx, Pkcs12Attribute, Pkcs12CryptoContext, Pkcs12Encryption,
+    Pkcs12HashAlgorithm, Pkcs12MacAlgorithmHmac, SafeBag, SafeContents,
 };
 use picky::x509::Cert as PickyCert;
 use psign_sip_digest::rdp;
@@ -67,14 +66,6 @@ const OID_EKU_CODE_SIGNING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3
 
 /// Backdate generated certificates by 24 hours so guest/host VM clock skew does not reject fresh certs.
 const NOT_BEFORE_CLOCK_SKEW_SECS: u64 = 86_400;
-
-/// Parsed signer identity and accompanying certificate chain extracted from a PKCS#12 (`.pfx`) archive.
-#[derive(Debug, Clone)]
-pub struct ParsedPfxIdentity {
-    pub signer_cert_der: Vec<u8>,
-    pub private_key_pem: String,
-    pub chain_certs_der: Vec<Vec<u8>>,
-}
 
 /// Parameters for generating a self-signed test Root CA.
 #[derive(Debug, Clone)]
@@ -142,179 +133,33 @@ pub struct GeneratedCertSummary {
     pub chain_certificate_count: usize,
 }
 
-#[derive(Debug, Clone)]
-struct PfxCertEntry {
-    der: Vec<u8>,
-    local_key_id: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone)]
-struct PfxKeyEntry {
-    pem: String,
-    key: PrivateKey,
-    local_key_id: Option<Vec<u8>>,
-}
-
-/// Parse a PKCS#12 (`.pfx`) archive into its matched signer certificate, PKCS#8 PEM private key,
-/// and any additional issuer/root certificates bundled in the PFX.
-///
-/// # Errors
-///
-/// Returns an error if the PFX cannot be decrypted or parsed, or if no certificate matches an
-/// included private key.
-pub fn parse_pfx_identity(bytes: &[u8], password: &str) -> Result<ParsedPfxIdentity> {
-    let crypto_context = Pkcs12CryptoContext::new_with_password(password)?;
-    let parsing_params = Pkcs12ParsingParams::default();
-    let pfx = Pfx::from_der(bytes, &crypto_context, &parsing_params)?;
-    let mut certs = Vec::new();
-    let mut keys = Vec::new();
-    for safe_contents in pfx.safe_contents() {
-        collect_pfx_bags(safe_contents.kind(), &mut certs, &mut keys)?;
-    }
-    if certs.is_empty() {
-        bail!("PFX did not contain an X.509 certificate");
-    }
-    if keys.is_empty() {
-        bail!("PFX did not contain a private key");
-    }
-
-    let matched = find_matching_pfx_pair(&certs, &keys).ok_or_else(|| {
-        anyhow!("PFX did not contain a certificate matching an included private key")
-    })?;
-    let signer_cert_der = certs[matched.0].der.clone();
-    let private_key_pem = keys[matched.1].pem.clone();
-
-    let mut seen = HashSet::with_capacity(certs.len());
-    seen.insert(signer_cert_der.clone());
-    let mut chain_certs_der = Vec::new();
-    for entry in certs {
-        if seen.insert(entry.der.clone()) {
-            chain_certs_der.push(entry.der);
-        }
-    }
-
-    Ok(ParsedPfxIdentity {
-        signer_cert_der,
-        private_key_pem,
-        chain_certs_der,
-    })
-}
-
-fn find_matching_pfx_pair(certs: &[PfxCertEntry], keys: &[PfxKeyEntry]) -> Option<(usize, usize)> {
-    // Prefer an explicit PKCS#12 localKeyId match that also satisfies public-key equality.
-    for (ci, cert) in certs.iter().enumerate() {
-        let Some(cert_id) = cert.local_key_id.as_deref() else {
-            continue;
-        };
-        for (ki, key) in keys.iter().enumerate() {
-            if key.local_key_id.as_deref() == Some(cert_id)
-                && key_matches_cert(&cert.der, &key.key).is_ok()
-            {
-                return Some((ci, ki));
-            }
-        }
-    }
-    for (ci, cert) in certs.iter().enumerate() {
-        for (ki, key) in keys.iter().enumerate() {
-            if key_matches_cert(&cert.der, &key.key).is_ok() {
-                return Some((ci, ki));
-            }
-        }
-    }
-    None
-}
-
-fn collect_pfx_bags(
-    kind: &SafeContentsKind,
-    certs: &mut Vec<PfxCertEntry>,
-    keys: &mut Vec<PfxKeyEntry>,
-) -> Result<()> {
-    match kind {
-        SafeContentsKind::SafeBags(bags)
-        | SafeContentsKind::EncryptedSafeBags {
-            safe_bags: bags, ..
-        } => {
-            for bag in bags {
-                collect_safe_bag(bag, certs, keys)?;
-            }
-        }
-        SafeContentsKind::Unknown => {}
-    }
-    Ok(())
-}
-
-fn collect_safe_bag(
-    bag: &SafeBag,
-    certs: &mut Vec<PfxCertEntry>,
-    keys: &mut Vec<PfxKeyEntry>,
-) -> Result<()> {
-    let local_key_id = bag.attributes().iter().find_map(|attr| match attr.kind() {
-        Pkcs12AttributeKind::LocalKeyId(id) => Some(id.clone()),
-        _ => None,
-    });
-    match bag.kind() {
-        SafeBagKind::PrivateKey(key) | SafeBagKind::EncryptedPrivateKey { key, .. } => {
-            let mut pem = key
-                .to_pem_str()
-                .context("encode PFX private key as PKCS#8 PEM")?;
-            pem.push('\n');
-            keys.push(PfxKeyEntry {
-                pem,
-                key: key.clone(),
-                local_key_id,
-            });
-        }
-        SafeBagKind::Certificate(cert) => {
-            let der = cert.to_der().context("encode PFX certificate as DER")?;
-            certs.push(PfxCertEntry { der, local_key_id });
-        }
-        SafeBagKind::Nested(bags) => {
-            for nested in bags {
-                collect_safe_bag(nested, certs, keys)?;
-            }
-        }
-        SafeBagKind::Secret(_) | SafeBagKind::Unknown => {}
-    }
-    Ok(())
-}
-
-fn key_matches_cert(cert_der: &[u8], key: &PrivateKey) -> Result<()> {
-    let cert = PickyCert::from_der(cert_der).context("parse certificate for key matching")?;
-    let key_public = key
-        .to_public_key()
-        .context("derive public key from private key")?;
-    if cert.public_key() != &key_public {
-        bail!("private key does not match certificate public key");
-    }
-    Ok(())
-}
-
 /// Parse a Windows `X500DistinguishedName` or RFC 4514 distinguished name string into an X.509 [`Name`].
 ///
-/// Supports standard Windows attribute aliases (`S=`, `E=`, spaces after commas, double-quoted values
-/// containing commas) as well as RFC 4514 escaping (`\,`), reversing the RDN list into ASN.1
-/// `RDNSequence` order so Windows `X509Certificate2.Subject` formats it back in the exact input order.
+/// Supports standard Windows attribute aliases (`S=`, `E=`, `SN=`, spaces after commas, double-quoted
+/// values containing commas or backslashes) as well as RFC 4514 escaping (`\,`, `\\`, `\ `, `\XX`),
+/// reversing the RDN list into ASN.1 `RDNSequence` order so Windows `X509Certificate2.Subject`
+/// formats it back in the exact input order.
 ///
 /// # Errors
 ///
-/// Returns an error if `input` is empty, contains malformed `KEY=VALUE` components, or uses an
-/// unknown attribute name.
+/// Returns an error if `input` is empty, contains malformed `KEY=VALUE` components, violates
+/// `PrintableString` / `IA5String` character-set rules, or uses an unknown attribute name.
 pub fn parse_distinguished_name(input: &str) -> Result<Name> {
-    let trimmed = input.trim();
+    let trimmed = trim_unescaped_spaces(input);
     if trimmed.is_empty() {
         bail!("distinguished name must not be empty");
     }
     let rdn_tokens = split_unescaped(trimmed, ',')?;
     let mut rdns = Vec::with_capacity(rdn_tokens.len());
     for token in rdn_tokens {
-        let token = token.trim();
+        let token = trim_unescaped_spaces(token);
         if token.is_empty() {
             bail!("distinguished name '{input}' contains an empty RDN component");
         }
         let atv_tokens = split_unescaped(token, '+')?;
         let mut atvs = Vec::with_capacity(atv_tokens.len());
         for atv_str in atv_tokens {
-            atvs.push(parse_atv(atv_str.trim())?);
+            atvs.push(parse_atv(trim_unescaped_spaces(atv_str))?);
         }
         let set = SetOfVec::try_from(atvs)
             .map_err(|e| anyhow!("encode RDN attribute set for '{token}': {e}"))?;
@@ -324,6 +169,28 @@ pub fn parse_distinguished_name(input: &str) -> Result<Name> {
     // most-general (C) first in ASN.1 RDNSequence.
     rdns.reverse();
     Ok(RdnSequence(rdns))
+}
+
+/// Trim surrounding ASCII whitespace while preserving an RFC 4514 escaped trailing space (`\ `).
+fn trim_unescaped_spaces(raw: &str) -> &str {
+    let bytes = raw.as_bytes();
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while start < end && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && bytes[end - 1].is_ascii_whitespace() {
+        let backslashes = bytes[start..end - 1]
+            .iter()
+            .rev()
+            .take_while(|&&c| c == b'\\')
+            .count();
+        if bytes[end - 1] == b' ' && backslashes % 2 == 1 {
+            break;
+        }
+        end -= 1;
+    }
+    &raw[start..end]
 }
 
 fn split_unescaped(input: &str, delimiter: char) -> Result<Vec<&str>> {
@@ -376,7 +243,7 @@ fn parse_atv(token: &str) -> Result<AttributeTypeAndValue> {
         bail!("distinguished name component '{token}' has an empty attribute name");
     }
     let oid = resolve_dn_attribute_oid(key)?;
-    let val_trimmed = raw_val.trim();
+    let val_trimmed = trim_unescaped_spaces(raw_val);
     if let Some(hex_body) = val_trimmed.strip_prefix('#') {
         let raw_der = decode_hex(hex_body)
             .with_context(|| format!("decode hex DER value in RDN '{token}'"))?;
@@ -386,15 +253,31 @@ fn parse_atv(token: &str) -> Result<AttributeTypeAndValue> {
     }
 
     let unescaped = unescape_dn_value(val_trimmed)?;
-    let tag = if oid == OID_COUNTRY_NAME || oid == OID_SERIAL_NUMBER {
-        Tag::PrintableString
+    let value = if oid == OID_COUNTRY_NAME {
+        if unescaped.len() != 2 {
+            bail!("RDN '{key}' must be a 2-character ISO 3166 country code, got '{unescaped}'");
+        }
+        let ps = PrintableStringRef::new(unescaped.as_bytes())
+            .map_err(|e| anyhow!("RDN '{key}' must be PrintableString: {e}"))?;
+        Any::from(ps)
+    } else if oid == OID_SERIAL_NUMBER {
+        if unescaped.is_empty() {
+            bail!("RDN '{key}' must not be empty");
+        }
+        let ps = PrintableStringRef::new(unescaped.as_bytes())
+            .map_err(|e| anyhow!("RDN '{key}' must be PrintableString: {e}"))?;
+        Any::from(ps)
     } else if oid == OID_DOMAIN_COMPONENT || oid == OID_EMAIL_ADDRESS {
-        Tag::Ia5String
+        if unescaped.is_empty() {
+            bail!("RDN '{key}' must not be empty");
+        }
+        let ia5 = Ia5String::new(&unescaped)
+            .map_err(|e| anyhow!("RDN '{key}' must be ASCII IA5String: {e}"))?;
+        Any::from(&ia5)
     } else {
-        Tag::Utf8String
+        Any::new(Tag::Utf8String, unescaped.as_bytes())
+            .map_err(|e| anyhow!("encode RDN '{key}={unescaped}' as Utf8String: {e}"))?
     };
-    let value = Any::new(tag, unescaped.as_bytes())
-        .map_err(|e| anyhow!("encode RDN '{key}={unescaped}' as {tag:?}: {e}"))?;
     Ok(AttributeTypeAndValue { oid, value })
 }
 
@@ -409,11 +292,11 @@ fn resolve_dn_attribute_oid(key: &str) -> Result<ObjectIdentifier> {
         "STREET" | "STREETADDRESS" => Ok(OID_STREET_ADDRESS),
         "E" | "EMAIL" | "EMAILADDRESS" => Ok(OID_EMAIL_ADDRESS),
         "DC" | "DOMAINCOMPONENT" => Ok(OID_DOMAIN_COMPONENT),
-        "SERIALNUMBER" | "SN" => Ok(OID_SERIAL_NUMBER),
+        "SERIALNUMBER" => Ok(OID_SERIAL_NUMBER),
         "UID" | "USERID" => Ok(OID_USER_ID),
         "T" | "TITLE" => Ok(OID_TITLE),
         "G" | "GN" | "GIVENNAME" => Ok(OID_GIVEN_NAME),
-        "SURNAME" => Ok(OID_SURNAME),
+        "SN" | "SURNAME" => Ok(OID_SURNAME),
         other => {
             let dotted = other.strip_prefix("OID.").unwrap_or(other);
             ObjectIdentifier::new(dotted)
@@ -423,20 +306,23 @@ fn resolve_dn_attribute_oid(key: &str) -> Result<ObjectIdentifier> {
 }
 
 fn unescape_dn_value(raw: &str) -> Result<String> {
-    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+    if raw.starts_with('"') {
+        if !raw.ends_with('"') || raw.len() < 2 {
+            bail!("improperly quoted RDN value '{raw}'");
+        }
         let inner = &raw[1..raw.len() - 1];
         let mut out = String::with_capacity(inner.len());
         let mut chars = inner.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == '"' && chars.peek() == Some(&'"') {
-                let _ = chars.next();
-                out.push('"');
-            } else if ch == '\\' {
-                let next = chars
-                    .next()
-                    .ok_or_else(|| anyhow!("trailing backslash inside quoted RDN value '{raw}'"))?;
-                out.push(next);
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    let _ = chars.next();
+                    out.push('"');
+                } else {
+                    bail!("unescaped double quote inside quoted RDN value '{raw}'");
+                }
             } else {
+                // Inside Windows CERT_X500_NAME_STR quotes, only `""` is an escape; `\` is literal.
                 out.push(ch);
             }
         }
@@ -446,6 +332,9 @@ fn unescape_dn_value(raw: &str) -> Result<String> {
     let mut bytes = Vec::with_capacity(raw.len());
     let mut iter = raw.as_bytes().iter().copied();
     while let Some(b) = iter.next() {
+        if b == b'"' {
+            bail!("unescaped double quote in RDN value '{raw}'");
+        }
         if b != b'\\' {
             bytes.push(b);
             continue;
@@ -453,15 +342,26 @@ fn unescape_dn_value(raw: &str) -> Result<String> {
         let esc = iter
             .next()
             .ok_or_else(|| anyhow!("trailing backslash in RDN value '{raw}'"))?;
-        if esc.is_ascii_hexdigit() {
-            let lo = iter
-                .next()
-                .ok_or_else(|| anyhow!("incomplete hex escape in RDN value '{raw}'"))?;
+        if matches!(
+            esc,
+            b' ' | b'"' | b'#' | b'+' | b',' | b';' | b'<' | b'=' | b'>' | b'\\'
+        ) {
+            bytes.push(esc);
+        } else if esc.is_ascii_hexdigit() {
+            let lo = iter.next().ok_or_else(|| {
+                anyhow!(
+                    "incomplete hex escape '\\{}' in RDN value '{raw}'; escape literal backslashes as '\\\\' or quote the value",
+                    esc as char
+                )
+            })?;
             let byte = decode_hex_pair(esc, lo)
                 .ok_or_else(|| anyhow!("invalid hex escape in RDN value '{raw}'"))?;
             bytes.push(byte);
         } else {
-            bytes.push(esc);
+            bail!(
+                "invalid backslash escape '\\{}' in RDN value '{raw}'; escape literal backslashes as '\\\\' or quote the value",
+                esc as char
+            );
         }
     }
     String::from_utf8(bytes).context("RDN value is not valid UTF-8")
@@ -540,6 +440,7 @@ fn format_windows_atv(atv: &AttributeTypeAndValue) -> String {
         Tag::TeletexString => TeletexStringRef::try_from(&atv.value)
             .ok()
             .map(|s| s.as_str().to_owned()),
+        Tag::BmpString => decode_bmp_string(atv.value.value()),
         _ => None,
     };
     match decoded {
@@ -551,12 +452,24 @@ fn format_windows_atv(atv: &AttributeTypeAndValue) -> String {
     }
 }
 
+fn decode_bmp_string(bytes: &[u8]) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = String::with_capacity(bytes.len() / 2);
+    for &[hi, lo] in bytes.as_chunks::<2>().0 {
+        let unit = u16::from_be_bytes([hi, lo]);
+        out.push(char::from_u32(u32::from(unit))?);
+    }
+    Some(out)
+}
+
 fn quote_windows_dn_value(val: &str) -> String {
     let needs_quotes = val.is_empty()
         || val.starts_with(' ')
         || val.ends_with(' ')
         || val.starts_with('#')
-        || val.contains([',', '+', '=', '"', '<', '>', ';', '\r', '\n']);
+        || val.contains([',', '+', '=', '"', '<', '>', ';', '\\', '\r', '\n']);
     if !needs_quotes {
         return val.to_owned();
     }
@@ -615,7 +528,7 @@ fn build_ca_issuer_material(
         .to_pkcs8_pem(LineEnding::LF)
         .context("encode CA private key PKCS#8 PEM")?;
     let picky_key = PrivateKey::from_pem_str(&key_pem).context("parse CA key for verification")?;
-    key_matches_cert(&cert_der, &picky_key)
+    crate::pkcs12::key_matches_cert(&cert_der, &picky_key)
         .context("verify CA private key matches CA certificate")?;
     Ok(CaIssuerMaterial {
         cert,
@@ -886,7 +799,8 @@ pub fn issue_tls_server_cert(
 }
 
 /// Encode a [`GeneratedCertMaterial`] (leaf certificate, private key, and any CA chain certificates)
-/// as a password-protected PKCS#12 (`.pfx`) archive compatible with Windows CryptoAPI / `.NET` and `psign`.
+/// as a password-protected PKCS#12 (`.pfx`) archive using PBES2 (`AES-256-CBC` + `PBKDF2-HMAC-SHA256`)
+/// and `HMAC-SHA256` MAC integrity (tested with `psign`, `.NET`, and Windows 10/11/Server 2022+ `PFXImportCertStore`).
 ///
 /// # Errors
 ///
@@ -1153,6 +1067,76 @@ mod tests {
         assert_eq!(first_atv.oid, OID_COUNTRY_NAME);
         assert_eq!(last_atv.oid, OID_COMMON_NAME);
         assert_eq!(format_windows_dn(&parsed), input);
+    }
+
+    #[test]
+    fn dn_distinguishes_sn_surname_from_serialnumber() {
+        let input = "SN=Doe, SERIALNUMBER=ABC-12345, CN=Jane Doe, C=CA";
+        let parsed = parse_distinguished_name(input).expect("parse SN + SERIALNUMBER");
+        // Reversed RDNSequence: [C=CA, CN=Jane Doe, SERIALNUMBER=ABC-12345, SN=Doe]
+        let serial_atv = parsed.0[2].0.iter().next().expect("serialnumber ATV");
+        let surname_atv = parsed.0[3].0.iter().next().expect("surname ATV");
+        assert_eq!(serial_atv.oid, OID_SERIAL_NUMBER);
+        assert_eq!(surname_atv.oid, OID_SURNAME);
+        assert_eq!(format_windows_dn(&parsed), input);
+    }
+
+    #[test]
+    fn dn_handles_backslashes_escaped_spaces_and_bmp_string_roundtrips() {
+        // Quoted backslash + comma matches Windows X509Certificate2.Subject formatting.
+        let quoted_bs = "CN=\"ACME\\Engineering, Corp.\", O=\"Div\\Unit\", C=US";
+        let parsed_bs = parse_distinguished_name(quoted_bs).expect("parse quoted backslashes");
+        assert_eq!(format_windows_dn(&parsed_bs), quoted_bs);
+
+        // RFC 4514 unquoted `\\` produces the exact same RDN value as Windows quoted `"a\b"`.
+        let rfc_bs = parse_distinguished_name("CN=a\\\\b, C=US").expect("parse RFC 4514 \\\\");
+        assert_eq!(format_windows_dn(&rfc_bs), "CN=\"a\\b\", C=US");
+        assert_eq!(
+            parse_distinguished_name(&format_windows_dn(&rfc_bs)).expect("reparse formatted"),
+            rfc_bs
+        );
+
+        // Unquoted single `\b` / `\z` must be rejected rather than silently dropping `\`.
+        assert!(parse_distinguished_name("CN=a\\b").is_err());
+        assert!(parse_distinguished_name("CN=a\\z").is_err());
+
+        // RFC 4514 escaped leading and trailing spaces (`\ foo\ `) are preserved despite trimming.
+        let spaced =
+            parse_distinguished_name("  CN=\\ foo\\   ,  O=Trailing\\   ").expect("spaced");
+        assert_eq!(format_windows_dn(&spaced), "CN=\" foo \", O=\"Trailing \"");
+        assert_eq!(
+            parse_distinguished_name(&format_windows_dn(&spaced)).expect("reparse spaced"),
+            spaced
+        );
+
+        // External Windows CA BMPString RDN (`0x1E` big-endian UTF-16) decodes cleanly instead of #1E...
+        let bmp_bytes = [0x00, b'a', 0x00, b'\\', 0x00, b'b'];
+        let bmp_atv = AttributeTypeAndValue {
+            oid: OID_COMMON_NAME,
+            value: Any::new(Tag::BmpString, bmp_bytes.as_slice()).expect("BMPString Any"),
+        };
+        let bmp_name = RdnSequence(vec![RelativeDistinguishedName(
+            SetOfVec::try_from(vec![bmp_atv]).expect("RDN set"),
+        )]);
+        assert_eq!(format_windows_dn(&bmp_name), "CN=\"a\\b\"");
+    }
+
+    #[test]
+    fn dn_validates_country_code_printablestring_and_ia5string() {
+        assert!(parse_distinguished_name("C=USA, CN=Test").is_err());
+        assert!(parse_distinguished_name("C=U, CN=Test").is_err());
+        assert!(parse_distinguished_name("C=U$, CN=Test").is_err());
+        assert!(parse_distinguished_name("SERIALNUMBER=bad$char, CN=Test").is_err());
+        assert!(parse_distinguished_name("E=user@ex\u{00e4}mple.com, CN=Test").is_err());
+        assert!(parse_distinguished_name("DC=ex\u{00e4}mple, CN=Test").is_err());
+
+        let valid =
+            parse_distinguished_name("CN=Test, E=ops@devolutions.net, DC=devolutions, C=CA")
+                .expect("valid PrintableString and IA5String");
+        assert_eq!(
+            format_windows_dn(&valid),
+            "CN=Test, E=ops@devolutions.net, DC=devolutions, C=CA"
+        );
     }
 
     #[test]

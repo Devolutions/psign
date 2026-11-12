@@ -14,6 +14,7 @@ pub mod authroot_ctl;
 pub mod chain;
 pub mod inspect;
 pub mod online;
+pub mod pkcs12;
 pub mod policy;
 pub mod rfc3161_extract;
 pub mod test_pki;
@@ -43,6 +44,7 @@ pub use inspect::{
     InspectAuthenticodeDigest, InspectPeEntry, InspectPeFileReport, InspectPkcs7Report,
     InspectSigner, TimestampHint, inspect_authenticode_pkcs7_der, inspect_pe_authenticode,
 };
+pub use pkcs12::{ParsedPfxIdentity, parse_pfx_identity};
 pub use policy::AuthenticodeTrustPolicy;
 pub use trust_verify_cab::trust_verify_cab_bytes;
 pub use trust_verify_catalog::trust_verify_catalog_bytes;

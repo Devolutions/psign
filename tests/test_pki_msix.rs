@@ -514,6 +514,23 @@ fn windows_cryptoapi_and_appxsip_accept_generated_test_pki_without_machine_store
         .assert()
         .success();
 
+    // Also mint an empty-password PFX (`--pfx-out` without `--password`) to prove PBES2 empty-password
+    // interop with both .NET (`pwsh`) and classic Win32 `PFXImportCertStore` (`powershell.exe`).
+    let empty_pw_pfx = dir.join("empty-password.pfx");
+    psign_tool()
+        .args(["portable", "issue-code-signing-cert", "--ca-pfx"])
+        .arg(&root_pfx)
+        .args([
+            "--ca-password",
+            "RootPass123!",
+            "--subject",
+            publisher,
+            "--pfx-out",
+        ])
+        .arg(&empty_pw_pfx)
+        .assert()
+        .success();
+
     // Native Windows AppxSip / WinVerifyTrust check (without touching LocalMachine\Root):
     // must accept the MSIX digest, PKCS#7, and EKU, failing ONLY on CERT_E_UNTRUSTEDROOT (0x800B0109).
     let win_verify = psign_tool()
@@ -585,11 +602,18 @@ $sanFormatted = $sanExt.Format($false)
 if ($sanFormatted -notmatch 'winget\.devolutions\.test' -or $sanFormatted -notmatch '127\.0\.0\.1') {{
     throw "Unexpected SAN extension formatting: $sanFormatted"
 }}
+
+$emptyCol = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+$emptyCol.Import('{empty_pfx}', '', [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+if ($emptyCol.Count -ne 2 -or -not ($emptyCol | Where-Object {{ $_.HasPrivateKey }})) {{
+    throw "Empty-password PFX failed .NET import (count=$($emptyCol.Count))"
+}}
 Write-Output 'WINDOWS_CRYPTOAPI_CUSTOM_TRUST_OK'
 "#,
         root = root_cer.display(),
         cs_pfx = codesign_pfx.display(),
         tls_pfx = tls_pfx.display(),
+        empty_pfx = empty_pw_pfx.display(),
         publisher = publisher,
     );
 
@@ -603,4 +627,190 @@ Write-Output 'WINDOWS_CRYPTOAPI_CUSTOM_TRUST_OK'
         pwsh.status.success() && stdout.contains("WINDOWS_CRYPTOAPI_CUSTOM_TRUST_OK"),
         "pwsh Windows CryptoAPI verification failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+
+    let winps_check = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+$col.Import('{empty_pfx}', '', [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
+if ($col.Count -ne 2 -or -not ($col | Where-Object {{ $_.HasPrivateKey }})) {{
+    throw "Win32 PFXImportCertStore empty-password import failed (count=$($col.Count))"
+}}
+Write-Output 'WIN32_PFXIMPORT_EMPTY_PW_OK'
+"#,
+        empty_pfx = empty_pw_pfx.display(),
+    );
+    let winps = std::process::Command::new("powershell.exe")
+        .env_remove("PSModulePath")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &winps_check])
+        .output()
+        .expect("run powershell.exe Win32 PFXImportCertStore verification");
+    let winps_stdout = String::from_utf8_lossy(&winps.stdout);
+    let winps_stderr = String::from_utf8_lossy(&winps.stderr);
+    assert!(
+        winps.status.success() && winps_stdout.contains("WIN32_PFXIMPORT_EMPTY_PW_OK"),
+        "powershell.exe Win32 PFXImportCertStore verification failed:\nstdout:\n{winps_stdout}\nstderr:\n{winps_stderr}"
+    );
+}
+
+#[test]
+fn code_command_pe_signing_embeds_explicit_chain_cert_with_cert_and_key() {
+    use psign_authenticode_trust::test_pki::{
+        CaIssuerMaterial, CodeSigningCertSpec, RootCaSpec, generate_root_ca,
+        issue_code_signing_cert, parse_distinguished_name,
+    };
+    use rand::rngs::OsRng;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{Keypair as _, SignatureEncoding as _, Signer as _};
+    use sha1::Digest as _;
+    use sha2::Sha256;
+    use std::time::{Duration, SystemTime};
+    use x509_cert::der::Encode as _;
+    use x509_cert::der::asn1::{Any, AnyRef, BitString, ObjectIdentifier, OctetString, UtcTime};
+    use x509_cert::ext::AsExtension as _;
+    use x509_cert::ext::pkix::{
+        AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
+    };
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+    use x509_cert::time::{Time, Validity};
+    use x509_cert::{Certificate, TbsCertificate, Version};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dir = temp.path();
+
+    let root = generate_root_ca(&RootCaSpec {
+        subject: "CN=Code PE Chain Root CA, C=CA".into(),
+        validity_days: 3650,
+        key_bits: 2048,
+    })
+    .expect("generate root");
+    let root_cer = dir.join("root.cer");
+    std::fs::write(&root_cer, &root.cert_der).expect("write root.cer");
+
+    let sub_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("sub key");
+    let sub_signing_key = SigningKey::<Sha256>::new(sub_key.clone());
+    let sub_spki =
+        SubjectPublicKeyInfoOwned::from_key(sub_signing_key.verifying_key()).expect("sub SPKI");
+    let sub_subject = parse_distinguished_name("CN=Code PE Issuing CA, C=CA").expect("sub DN");
+    let now = SystemTime::now();
+    let validity = Validity {
+        not_before: Time::UtcTime(
+            UtcTime::from_system_time(now - Duration::from_secs(3600)).expect("not_before"),
+        ),
+        not_after: Time::UtcTime(
+            UtcTime::from_system_time(now + Duration::from_secs(86_400 * 30)).expect("not_after"),
+        ),
+    };
+    let alg = AlgorithmIdentifierOwned {
+        oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+        parameters: Some(Any::from(AnyRef::NULL)),
+    };
+    let sub_ski = SubjectKeyIdentifier(
+        OctetString::new(sha1::Sha1::digest(sub_spki.subject_public_key.raw_bytes()).to_vec())
+            .expect("sub SKI"),
+    );
+    let root_ski = root
+        .cert
+        .tbs_certificate
+        .get::<SubjectKeyIdentifier>()
+        .expect("decode root SKI")
+        .expect("root SKI")
+        .1
+        .0;
+    let sub_exts = vec![
+        sub_ski.to_extension(&sub_subject, &[]).expect("ext"),
+        AuthorityKeyIdentifier {
+            key_identifier: Some(root_ski),
+            authority_cert_issuer: None,
+            authority_cert_serial_number: None,
+        }
+        .to_extension(&sub_subject, &[])
+        .expect("ext"),
+        BasicConstraints {
+            ca: true,
+            path_len_constraint: Some(0),
+        }
+        .to_extension(&sub_subject, &[])
+        .expect("ext"),
+        KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign)
+            .to_extension(&sub_subject, &[])
+            .expect("ext"),
+    ];
+    let sub_tbs = TbsCertificate {
+        version: Version::V3,
+        serial_number: SerialNumber::from(88u32),
+        signature: alg.clone(),
+        issuer: root.cert.tbs_certificate.subject.clone(),
+        validity,
+        subject: sub_subject,
+        subject_public_key_info: sub_spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions: Some(sub_exts),
+    };
+    let root_key = psign_sip_digest::rdp::parse_rsa_private_key(root.private_key_pem.as_bytes())
+        .expect("root key");
+    let root_signer = SigningKey::<Sha256>::new(root_key);
+    let sub_sig = root_signer.sign(&sub_tbs.to_der().expect("sub TBS DER"));
+    let sub_cert = Certificate {
+        tbs_certificate: sub_tbs,
+        signature_algorithm: alg,
+        signature: BitString::from_bytes(&sub_sig.to_bytes()).expect("sub sig"),
+    };
+    let sub_der = sub_cert.to_der().expect("sub DER");
+    let sub_cer = dir.join("subca.cer");
+    std::fs::write(&sub_cer, &sub_der).expect("write subca.cer");
+
+    let sub_ca_material = CaIssuerMaterial {
+        cert: sub_cert,
+        cert_der: sub_der,
+        private_key: sub_key,
+        extra_chain_certs_der: Vec::new(),
+    };
+    let leaf = issue_code_signing_cert(
+        &sub_ca_material,
+        &CodeSigningCertSpec {
+            subject: "CN=Code PE Leaf, C=CA".into(),
+            validity_days: 7,
+            key_bits: 2048,
+            extra_eku_oids: Vec::new(),
+        },
+    )
+    .expect("issue leaf");
+    let leaf_cer = dir.join("leaf.cer");
+    let leaf_key = dir.join("leaf.key");
+    std::fs::write(&leaf_cer, &leaf.cert_der).expect("write leaf.cer");
+    std::fs::write(&leaf_key, leaf.private_key_pem.as_bytes()).expect("write leaf.key");
+
+    let unsigned_pe = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pe-authenticode-upstream/tiny32.efi");
+    let input_pe = dir.join("tiny32.efi");
+    let signed_pe = dir.join("tiny32.signed.efi");
+    std::fs::copy(unsigned_pe, &input_pe).expect("copy unsigned PE");
+
+    psign_tool()
+        .args(["code", "--base-directory"])
+        .arg(dir)
+        .arg("--cert")
+        .arg(&leaf_cer)
+        .arg("--key")
+        .arg(&leaf_key)
+        .arg("--chain-cert")
+        .arg(&sub_cer)
+        .arg("--output")
+        .arg(&signed_pe)
+        .arg("tiny32.efi")
+        .assert()
+        .success();
+
+    // Trust-verify against root.cer alone: succeeds only if `--chain-cert subca.cer` was embedded!
+    psign_tool()
+        .args(["portable", "trust-verify-pe"])
+        .arg(&signed_pe)
+        .arg("--trusted-ca")
+        .arg(&root_cer)
+        .assert()
+        .success();
 }

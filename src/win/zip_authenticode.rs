@@ -99,7 +99,7 @@ fn sign_zip_comment_from_pfx(args: &SignArgs, digest: &str) -> Result<Option<Str
         .as_ref()
         .expect("can_sign_zip_directly_from_pfx checked PFX");
     let pfx_bytes = std::fs::read(pfx).with_context(|| format!("read PFX {}", pfx.display()))?;
-    let parsed_pfx = psign_authenticode_trust::test_pki::parse_pfx_identity(
+    let parsed_pfx = psign_authenticode_trust::pkcs12::parse_pfx_identity(
         &pfx_bytes,
         args.password.as_deref().unwrap_or_default(),
     )
