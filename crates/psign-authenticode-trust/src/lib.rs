@@ -16,6 +16,7 @@ pub mod inspect;
 pub mod online;
 pub mod policy;
 pub mod rfc3161_extract;
+pub mod test_pki;
 pub mod trust_pkcs7;
 pub mod trust_verify_cab;
 pub mod trust_verify_catalog;

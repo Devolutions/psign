@@ -1951,6 +1951,7 @@ enum CodeSignerBackend {
 struct CodeSignerPaths {
     cert: PathBuf,
     key: PathBuf,
+    pfx_chain_certs: Vec<x509_cert::Certificate>,
     temp_dir: Option<PathBuf>,
 }
 
@@ -2007,9 +2008,9 @@ impl Drop for CodeSignerPaths {
 }
 
 impl CodeSigner {
-    fn local_paths(&self) -> Option<(&Path, &Path)> {
+    fn local_paths(&self) -> Option<&CodeSignerPaths> {
         match &self.backend {
-            CodeSignerBackend::Local(paths) => Some((&paths.cert, &paths.key)),
+            CodeSignerBackend::Local(paths) => Some(paths),
             #[cfg(feature = "azure-kv-sign")]
             CodeSignerBackend::AzureKeyVault(_) => None,
             #[cfg(feature = "artifact-signing-rest")]
@@ -2026,7 +2027,9 @@ impl CodeSigner {
         content_mode: pkcs7::Pkcs7ContentMode,
         signed_attribute_profile: pkcs7::Pkcs7SignedAttributeProfile,
     ) -> Result<Vec<u8>> {
-        if let Some((cert, key)) = self.local_paths() {
+        if let Some(paths) = self.local_paths() {
+            let cert = &paths.cert;
+            let key = &paths.key;
             let cert_bytes =
                 std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
             let signer_cert = rdp::parse_certificate(&cert_bytes)
@@ -2044,13 +2047,16 @@ impl CodeSigner {
             )?;
             let prehash = pkcs7::pkcs7_signed_attrs_digest(&signed_attrs, digest)?;
             let signature = sign_pkcs7_signed_attrs_digest(digest, private_key, &prehash)?;
+            let mut full_chain = Vec::with_capacity(paths.pfx_chain_certs.len() + chain.len());
+            full_chain.extend(paths.pfx_chain_certs.iter().cloned());
+            full_chain.extend(chain);
             return pkcs7::create_pkcs7_signed_data_der_with_signed_attrs_and_rsa_signature(
                 pkcs7::Pkcs7SignedDataDerInput {
                     econtent_type,
                     econtent_der,
                     digest_algorithm: digest,
                     signer_cert,
-                    chain_certs: chain,
+                    chain_certs: full_chain,
                     encrypted_digest: &signature,
                     content_mode,
                     signed_attrs,
@@ -2153,7 +2159,9 @@ impl CodeSigner {
         algorithm: vsix::VsixHashAlgorithm,
         signed_info: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>)> {
-        if let Some((cert, key)) = self.local_paths() {
+        if let Some(paths) = self.local_paths() {
+            let cert = &paths.cert;
+            let key = &paths.key;
             let cert_bytes =
                 std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
             let key_bytes =
@@ -2176,16 +2184,35 @@ impl CodeSigner {
         input_bytes: &[u8],
         signing_digest: pkcs7::AuthenticodeSigningDigest,
     ) -> Result<Vec<u8>> {
-        if let Some((cert, key)) = self.local_paths() {
+        if let Some(paths) = self.local_paths() {
+            let cert = &paths.cert;
+            let key = &paths.key;
             let cert_bytes =
                 std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
             let key_bytes =
                 std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
-            return psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(
-                input_bytes,
-                &cert_bytes,
-                &key_bytes,
-            );
+            if paths.pfx_chain_certs.is_empty() {
+                return psign_sip_digest::pe_sign::sign_pe_image_rsa_sha256(
+                    input_bytes,
+                    &cert_bytes,
+                    &key_bytes,
+                );
+            }
+            let prepared = pe_embed::pe_prepare_for_authenticode_signing(input_bytes.to_vec())
+                .context("prepare PE certificate table alignment")?;
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let private_key = rdp::parse_rsa_private_key(&key_bytes)
+                .with_context(|| format!("parse RSA private key {}", key.display()))?;
+            let pkcs7 = pkcs7::create_pe_authenticode_pkcs7_der_rsa(
+                &prepared,
+                signing_digest,
+                signer_cert,
+                paths.pfx_chain_certs.clone(),
+                private_key,
+            )?;
+            return pe_embed::pe_append_authenticode_pkcs7_certificate(prepared, &pkcs7)
+                .context("embed Authenticode PKCS#7");
         }
 
         let prepared = pe_embed::pe_prepare_for_authenticode_signing(input_bytes.to_vec())
@@ -2387,6 +2414,7 @@ fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
             backend: CodeSignerBackend::Local(CodeSignerPaths {
                 cert,
                 key,
+                pfx_chain_certs: Vec::new(),
                 temp_dir: None,
             }),
         });
@@ -2395,12 +2423,20 @@ fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
     if let Some(pfx) = args.pfx.as_deref() {
         let bytes = std::fs::read(pfx).with_context(|| format!("read PFX '{}'", pfx.display()))?;
         let password = args.password.as_deref().unwrap_or("");
-        let (cert_der, key_pem) = crate::cert_store::load_pfx_cert_and_key(&bytes, password)
+        let parsed = psign_authenticode_trust::test_pki::parse_pfx_identity(&bytes, password)
             .with_context(|| format!("extract signer identity from PFX '{}'", pfx.display()))?;
+        let mut pfx_chain_certs = Vec::with_capacity(parsed.chain_certs_der.len());
+        for (index, der) in parsed.chain_certs_der.iter().enumerate() {
+            pfx_chain_certs.push(
+                rdp::parse_certificate(der)
+                    .with_context(|| format!("parse PFX chain certificate[{index}]"))?,
+            );
+        }
         return Ok(CodeSigner {
             backend: CodeSignerBackend::Local(write_temp_signer_material(
-                cert_der,
-                key_pem.into_bytes(),
+                parsed.signer_cert_der,
+                parsed.private_key_pem.into_bytes(),
+                pfx_chain_certs,
             )?),
         });
     }
@@ -2416,6 +2452,7 @@ fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
             backend: CodeSignerBackend::Local(write_temp_signer_material(
                 identity.cert_der,
                 identity.key_pem,
+                Vec::new(),
             )?),
         });
     }
@@ -2431,7 +2468,11 @@ fn resolve_code_signer(args: &CodeArgs) -> Result<CodeSigner> {
     unreachable!("provider_count checked above");
 }
 
-fn write_temp_signer_material(cert_der: Vec<u8>, key_pem: Vec<u8>) -> Result<CodeSignerPaths> {
+fn write_temp_signer_material(
+    cert_der: Vec<u8>,
+    key_pem: Vec<u8>,
+    pfx_chain_certs: Vec<x509_cert::Certificate>,
+) -> Result<CodeSignerPaths> {
     let dir = unique_code_signer_temp_dir()?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create signer material temp directory {}", dir.display()))?;
@@ -2444,6 +2485,7 @@ fn write_temp_signer_material(cert_der: Vec<u8>, key_pem: Vec<u8>) -> Result<Cod
     Ok(CodeSignerPaths {
         cert,
         key,
+        pfx_chain_certs,
         temp_dir: Some(dir),
     })
 }

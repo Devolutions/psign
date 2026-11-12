@@ -2061,6 +2061,7 @@ dependencies = [
  "psign-opc-sign",
  "psign-sip-digest",
  "quick-xml",
+ "rand 0.8.6",
  "rcgen",
  "rsa 0.9.10",
  "serde",

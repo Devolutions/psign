@@ -61,7 +61,7 @@ use rsa::pkcs8::DecodePublicKey as _;
 use rsa::signature::{
     SignatureEncoding as _, Signer as _, Verifier as _, hazmat::PrehashSigner as _,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use std::ffi::{OsStr, OsString};
@@ -3077,6 +3077,116 @@ enum Command {
     },
     /// Inspect a Dynamics 365 Business Central `.app` package header.
     BusinessCentralAppInfo { path: PathBuf },
+    /// Generate a self-signed X.509 v3 Root CA for local/test environments (no OS trust-store writes).
+    GenerateRootCa {
+        /// Root CA Subject DN in Windows or RFC 4514 order (for example, `CN=Devolutions Test Root CA, O=Devolutions Inc., C=CA`).
+        #[arg(long, default_value = "CN=psign Test Root CA")]
+        subject: String,
+        /// Certificate validity period in days.
+        #[arg(long, default_value_t = 3650)]
+        validity_days: u32,
+        /// RSA key size in bits (2048, 3072, or 4096).
+        #[arg(long, default_value_t = 2048)]
+        key_bits: usize,
+        #[command(flatten)]
+        outputs: TestPkiOutputArgs,
+    },
+    /// Issue an X.509 v3 Code Signing leaf certificate (`1.3.6.1.5.5.7.3.3`) chained to a test CA.
+    ///
+    /// When `--pfx-out` is used, the full certificate chain (`[leaf, ca, ...]`) is bundled in the PFX.
+    IssueCodeSigningCert {
+        #[command(flatten)]
+        ca: TestPkiCaInputArgs,
+        /// Signer Subject DN in Windows or RFC 4514 order (must match MSIX `Identity/@Publisher` when signing MSIX).
+        #[arg(long)]
+        subject: String,
+        /// Certificate validity period in days (clamped to the CA's `notAfter`).
+        #[arg(long, default_value_t = 365)]
+        validity_days: u32,
+        /// RSA key size in bits (2048, 3072, or 4096).
+        #[arg(long, default_value_t = 2048)]
+        key_bits: usize,
+        /// Additional Extended Key Usage OID to include alongside Code Signing (`1.3.6.1.5.5.7.3.3`).
+        #[arg(long = "eku-oid", value_name = "OID", action = clap::ArgAction::Append)]
+        extra_eku_oids: Vec<String>,
+        #[command(flatten)]
+        outputs: TestPkiOutputArgs,
+    },
+    /// Issue an X.509 v3 TLS Server leaf certificate (`1.3.6.1.5.5.7.3.1`) with DNS/IP SANs chained to a test CA.
+    ///
+    /// When `--pfx-out` or `--pem-out` is used, the full certificate chain (`[leaf, ca, ...]`) is written.
+    IssueTlsServerCert {
+        #[command(flatten)]
+        ca: TestPkiCaInputArgs,
+        /// Optional Subject DN; defaults to `CN=<first --dns or --ip>`.
+        #[arg(long)]
+        subject: Option<String>,
+        /// DNS Subject Alternative Name (repeatable, for example `--dns winget.devolutions.test --dns localhost`).
+        #[arg(long = "dns", value_name = "HOSTNAME", action = clap::ArgAction::Append)]
+        dns_names: Vec<String>,
+        /// IPv4 or IPv6 Subject Alternative Name (repeatable, for example `--ip 127.0.0.1`).
+        #[arg(long = "ip", value_name = "IP", action = clap::ArgAction::Append)]
+        ip_addresses: Vec<std::net::IpAddr>,
+        /// Certificate validity period in days (clamped to the CA's `notAfter`).
+        #[arg(long, default_value_t = 365)]
+        validity_days: u32,
+        /// RSA key size in bits (2048, 3072, or 4096).
+        #[arg(long, default_value_t = 2048)]
+        key_bits: usize,
+        #[command(flatten)]
+        outputs: TestPkiOutputArgs,
+    },
+}
+
+#[derive(Args, Clone, Debug)]
+struct TestPkiCaInputArgs {
+    /// Issuing CA PKCS#12 (`.pfx`) file.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["ca_cert", "ca_key", "ca_chain_certs"]
+    )]
+    ca_pfx: Option<PathBuf>,
+    /// Password for `--ca-pfx` (defaults to empty password).
+    #[arg(long, requires = "ca_pfx")]
+    ca_password: Option<String>,
+    /// Issuing CA certificate file (DER or PEM); requires `--ca-key`.
+    #[arg(long, value_name = "PATH", requires = "ca_key", conflicts_with = "ca_pfx")]
+    ca_cert: Option<PathBuf>,
+    /// Issuing CA RSA private key file (DER or unencrypted PEM); requires `--ca-cert`.
+    #[arg(long, value_name = "PATH", requires = "ca_cert", conflicts_with = "ca_pfx")]
+    ca_key: Option<PathBuf>,
+    /// Optional higher-level CA certificate(s) to append to the issued chain when using `--ca-cert`.
+    #[arg(
+        long = "ca-chain-cert",
+        value_name = "PATH",
+        requires = "ca_cert",
+        conflicts_with = "ca_pfx",
+        action = clap::ArgAction::Append
+    )]
+    ca_chain_certs: Vec<PathBuf>,
+}
+
+#[derive(Args, Clone, Debug)]
+struct TestPkiOutputArgs {
+    /// Write the generated certificate as DER (`.cer` / `.der`).
+    #[arg(long, value_name = "PATH")]
+    cert_out: Option<PathBuf>,
+    /// Write the generated certificate (plus issuer chain for issued leaves) as PEM (`.pem` / `.crt`).
+    #[arg(long, value_name = "PATH")]
+    pem_out: Option<PathBuf>,
+    /// Write the generated RSA private key as unencrypted PKCS#8 PEM (`.key`).
+    #[arg(long, value_name = "PATH")]
+    key_out: Option<PathBuf>,
+    /// Write a PKCS#12 (`.pfx`) bundle containing the certificate, private key, and issuer chain.
+    #[arg(long, value_name = "PATH")]
+    pfx_out: Option<PathBuf>,
+    /// Password for `--pfx-out` (defaults to empty password when `--pfx-out` is set).
+    #[arg(long, requires = "pfx_out")]
+    password: Option<String>,
+    /// Emit machine-readable JSON metadata to stdout.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -6462,6 +6572,241 @@ where
             println!("header={}", if info.is_navx { "NAVX" } else { "-" });
             println!("len={}", info.len);
         }
+        Command::GenerateRootCa {
+            subject,
+            validity_days,
+            key_bits,
+            outputs,
+        } => {
+            ensure_test_pki_outputs(&outputs, "generate-root-ca")?;
+            let material = psign_authenticode_trust::test_pki::generate_root_ca(
+                &psign_authenticode_trust::test_pki::RootCaSpec {
+                    subject,
+                    validity_days,
+                    key_bits,
+                },
+            )
+            .context("generate-root-ca")?;
+            write_and_print_test_pki_material(&material, &outputs)?;
+        }
+        Command::IssueCodeSigningCert {
+            ca,
+            subject,
+            validity_days,
+            key_bits,
+            extra_eku_oids,
+            outputs,
+        } => {
+            ensure_test_pki_outputs(&outputs, "issue-code-signing-cert")?;
+            let ca_material = load_test_pki_ca_input(&ca).context("load issuing CA")?;
+            let material = psign_authenticode_trust::test_pki::issue_code_signing_cert(
+                &ca_material,
+                &psign_authenticode_trust::test_pki::CodeSigningCertSpec {
+                    subject,
+                    validity_days,
+                    key_bits,
+                    extra_eku_oids,
+                },
+            )
+            .context("issue-code-signing-cert")?;
+            write_and_print_test_pki_material(&material, &outputs)?;
+        }
+        Command::IssueTlsServerCert {
+            ca,
+            subject,
+            dns_names,
+            ip_addresses,
+            validity_days,
+            key_bits,
+            outputs,
+        } => {
+            ensure_test_pki_outputs(&outputs, "issue-tls-server-cert")?;
+            let ca_material = load_test_pki_ca_input(&ca).context("load issuing CA")?;
+            let material = psign_authenticode_trust::test_pki::issue_tls_server_cert(
+                &ca_material,
+                &psign_authenticode_trust::test_pki::TlsServerCertSpec {
+                    subject,
+                    dns_names,
+                    ip_addresses,
+                    validity_days,
+                    key_bits,
+                },
+            )
+            .context("issue-tls-server-cert")?;
+            write_and_print_test_pki_material(&material, &outputs)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct TestPkiCommandReport<'a> {
+    #[serde(flatten)]
+    summary: &'a psign_authenticode_trust::test_pki::GeneratedCertSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cert_out: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pem_out: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_out: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pfx_out: Option<&'a Path>,
+}
+
+fn ensure_test_pki_outputs(outputs: &TestPkiOutputArgs, command: &str) -> Result<()> {
+    if outputs.cert_out.is_none()
+        && outputs.pem_out.is_none()
+        && outputs.key_out.is_none()
+        && outputs.pfx_out.is_none()
+    {
+        return Err(anyhow!(
+            "{command} requires at least one output flag (--cert-out, --pem-out, --key-out, or --pfx-out)"
+        ));
+    }
+    Ok(())
+}
+
+fn load_test_pki_ca_input(
+    ca: &TestPkiCaInputArgs,
+) -> Result<psign_authenticode_trust::test_pki::CaIssuerMaterial> {
+    if let Some(pfx_path) = &ca.ca_pfx {
+        let pfx_bytes =
+            std::fs::read(pfx_path).with_context(|| format!("read {}", pfx_path.display()))?;
+        let password = ca.ca_password.as_deref().unwrap_or_default();
+        return psign_authenticode_trust::test_pki::load_ca_issuer_from_pfx(&pfx_bytes, password)
+            .with_context(|| format!("load CA PFX {}", pfx_path.display()));
+    }
+    let (Some(cert_path), Some(key_path)) = (&ca.ca_cert, &ca.ca_key) else {
+        return Err(anyhow!(
+            "specify either --ca-pfx <PATH> [--ca-password <PW>] or --ca-cert <PATH> --ca-key <PATH>"
+        ));
+    };
+    let cert_bytes =
+        std::fs::read(cert_path).with_context(|| format!("read {}", cert_path.display()))?;
+    let key_bytes =
+        std::fs::read(key_path).with_context(|| format!("read {}", key_path.display()))?;
+    let mut extra_chain = Vec::with_capacity(ca.ca_chain_certs.len());
+    for extra_path in &ca.ca_chain_certs {
+        let raw =
+            std::fs::read(extra_path).with_context(|| format!("read {}", extra_path.display()))?;
+        let parsed = rdp::parse_certificate(&raw)
+            .with_context(|| format!("parse CA chain certificate {}", extra_path.display()))?;
+        extra_chain.push(
+            parsed
+                .to_der()
+                .with_context(|| format!("encode CA chain certificate {}", extra_path.display()))?,
+        );
+    }
+    psign_authenticode_trust::test_pki::load_ca_issuer_from_cert_and_key(
+        &cert_bytes,
+        &key_bytes,
+        extra_chain,
+    )
+}
+
+fn ensure_parent_directory(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create parent directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn write_restricted_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    ensure_parent_directory(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("write {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+    }
+}
+
+fn write_and_print_test_pki_material(
+    material: &psign_authenticode_trust::test_pki::GeneratedCertMaterial,
+    outputs: &TestPkiOutputArgs,
+) -> Result<()> {
+    if let Some(cert_out) = &outputs.cert_out {
+        ensure_parent_directory(cert_out)?;
+        std::fs::write(cert_out, &material.cert_der)
+            .with_context(|| format!("write {}", cert_out.display()))?;
+    }
+    if let Some(pem_out) = &outputs.pem_out {
+        ensure_parent_directory(pem_out)?;
+        let mut bundle = Vec::with_capacity(1 + material.chain_certs_der.len());
+        bundle.push(material.cert_der.as_slice());
+        for chain_der in &material.chain_certs_der {
+            bundle.push(chain_der.as_slice());
+        }
+        let pem = psign_authenticode_trust::test_pki::encode_pem_certificate_bundle(&bundle);
+        std::fs::write(pem_out, pem).with_context(|| format!("write {}", pem_out.display()))?;
+    }
+    if let Some(key_out) = &outputs.key_out {
+        write_restricted_file(key_out, material.private_key_pem.as_bytes())?;
+    }
+    if let Some(pfx_out) = &outputs.pfx_out {
+        let password = outputs.password.as_deref().unwrap_or_default();
+        let pfx_der = psign_authenticode_trust::test_pki::encode_pfx_der(material, password)
+            .with_context(|| format!("encode PFX {}", pfx_out.display()))?;
+        write_restricted_file(pfx_out, &pfx_der)?;
+    }
+
+    if outputs.json {
+        let report = TestPkiCommandReport {
+            summary: &material.summary,
+            cert_out: outputs.cert_out.as_deref(),
+            pem_out: outputs.pem_out.as_deref(),
+            key_out: outputs.key_out.as_deref(),
+            pfx_out: outputs.pfx_out.as_deref(),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("subject={}", material.summary.subject);
+    println!("issuer={}", material.summary.issuer);
+    println!("thumbprint_sha1={}", material.summary.thumbprint_sha1);
+    println!("thumbprint_sha256={}", material.summary.thumbprint_sha256);
+    println!("serial_hex={}", material.summary.serial_hex);
+    println!("not_before={}", material.summary.not_before);
+    println!("not_after={}", material.summary.not_after);
+    println!("is_ca={}", if material.summary.is_ca { "yes" } else { "no" });
+    if !material.summary.eku_oids.is_empty() {
+        println!("eku_oids={}", material.summary.eku_oids.join(","));
+    }
+    if !material.summary.dns_names.is_empty() {
+        println!("dns_names={}", material.summary.dns_names.join(","));
+    }
+    if !material.summary.ip_addresses.is_empty() {
+        println!("ip_addresses={}", material.summary.ip_addresses.join(","));
+    }
+    println!(
+        "chain_certificate_count={}",
+        material.summary.chain_certificate_count
+    );
+    if let Some(cert_out) = &outputs.cert_out {
+        println!("cert_out={}", cert_out.display());
+    }
+    if let Some(pem_out) = &outputs.pem_out {
+        println!("pem_out={}", pem_out.display());
+    }
+    if let Some(key_out) = &outputs.key_out {
+        println!("key_out={}", key_out.display());
+    }
+    if let Some(pfx_out) = &outputs.pfx_out {
+        println!("pfx_out={}", pfx_out.display());
     }
     Ok(())
 }
