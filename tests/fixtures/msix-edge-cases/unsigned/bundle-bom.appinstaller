@@ -1,0 +1,30 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2021"
+  Version="1.0.0.0"
+  Uri="https://example.invalid/psign/bundle-bom.appinstaller">
+  <MainBundle
+    Name="Psign.EdgeTest"
+    Version="1.0.0.0"
+    Publisher="CN=Test Code Signing Certificate"
+    Uri="https://example.invalid/psign/bundle-multi.signed.msixbundle" />
+  <OptionalPackages>
+    <Package
+      Name="Psign.EdgeTest.OptionalData"
+      Version="1.0.0.0"
+      Publisher="CN=Test Code Signing Certificate"
+      ProcessorArchitecture="neutral"
+      Uri="https://example.invalid/psign/flat-optional-nonexec.signed.msix" />
+  </OptionalPackages>
+  <Dependencies>
+    <Package
+      Name="Microsoft.WindowsAppRuntime.1.5"
+      Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+      Version="5001.119.156.0"
+      ProcessorArchitecture="x64"
+      Uri="https://example.invalid/psign/WindowsAppRuntime.msix" />
+  </Dependencies>
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="0" ShowPrompt="true" />
+  </UpdateSettings>
+</AppInstaller>

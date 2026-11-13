@@ -368,6 +368,107 @@ fn zip_authenticode_fixture_manifest_matches_files() {
     );
 }
 
+#[test]
+fn msix_edge_case_fixture_manifest_matches_files() {
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/msix-edge-cases/msix-edge-case-fixtures.json"
+    ))
+    .expect("MSIX edge-case fixture manifest JSON");
+
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(
+        manifest["generated_by"],
+        "scripts/ci/build-msix-edge-case-fixtures.ps1"
+    );
+    assert_eq!(
+        manifest["pfx_thumbprint"],
+        "A9FDF3593E91689CC93B1CEBED5E8FFC1F6FEE38"
+    );
+
+    let entries = manifest["entries"]
+        .as_array()
+        .expect("MSIX edge-case entries must be an array");
+    assert_eq!(entries.len(), 23, "MSIX edge-case fixture count");
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut ids = HashSet::new();
+    for entry in entries {
+        let id = entry["id"].as_str().expect("entry id");
+        assert!(
+            ids.insert(id.to_owned()),
+            "duplicate MSIX edge-case id: {id}"
+        );
+
+        for (path_key, size_key, hash_key) in [
+            ("unsigned_path", "unsigned_size_bytes", "unsigned_sha256"),
+            ("signed_path", "signed_size_bytes", "signed_sha256"),
+        ] {
+            let Some(rel) = entry.get(path_key).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let path = repo_path(repo_root, rel);
+            assert!(path.is_file(), "MSIX edge-case file missing ({id}): {rel}");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let expected_size = entry[size_key].as_u64().expect(size_key);
+            assert_eq!(bytes.len() as u64, expected_size, "size mismatch for {rel}");
+            let actual_hash = hex_lower(&Sha256::digest(&bytes));
+            let expected_hash = entry[hash_key].as_str().expect(hash_key);
+            assert_eq!(actual_hash, expected_hash, "sha256 mismatch for {rel}");
+        }
+
+        if let Some(signed_rel) = entry.get("signed_path").and_then(|v| v.as_str()) {
+            let ext = entry["extension"].as_str().expect("extension");
+            let is_encrypted = entry["is_encrypted"].as_bool().expect("is_encrypted");
+            if matches!(ext, ".msix" | ".appx") && !is_encrypted {
+                let path = repo_path(repo_root, signed_rel);
+                let file = File::open(&path).expect("open signed flat MSIX");
+                let archive = zip::ZipArchive::new(file).expect("parse signed flat MSIX ZIP");
+                let has_ci = archive
+                    .file_names()
+                    .any(|n| n == "AppxMetadata/CodeIntegrity.cat");
+                let expected_ci = entry["has_code_integrity_cat"]
+                    .as_bool()
+                    .expect("has_code_integrity_cat");
+                assert_eq!(
+                    has_ci, expected_ci,
+                    "{id}: AppxMetadata/CodeIntegrity.cat presence mismatch in {signed_rel}"
+                );
+            }
+            if entry["is_sparse_bundle"]
+                .as_bool()
+                .expect("is_sparse_bundle")
+            {
+                let path = repo_path(repo_root, signed_rel);
+                let file = File::open(&path).expect("open sparse bundle");
+                let archive = zip::ZipArchive::new(file).expect("parse sparse bundle ZIP");
+                assert!(
+                    !archive
+                        .file_names()
+                        .any(|n| n.ends_with(".msix") || n.ends_with(".appx")),
+                    "{id}: sparse bundle must not embed child packages"
+                );
+            }
+        }
+    }
+
+    assert_zip_contains(
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi.signed.msixbundle",
+        "resources/scale-200.msix",
+    );
+    assert_zip_contains(
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi.signed.appxbundle",
+        "resources/scale-200.appx",
+    );
+    assert_zip_contains(
+        "tests/fixtures/msix-edge-cases/unsigned/sample.msixupload",
+        "Psign.EdgeTest_1.0.0.0.msixbundle",
+    );
+    assert_zip_contains(
+        "tests/fixtures/msix-edge-cases/unsigned/sample.appxupload",
+        "Psign.EdgeTest_1.0.0.0.appxbundle",
+    );
+}
+
 fn assert_package_fixture_ids(entries: &[serde_json::Value]) {
     let actual: HashSet<_> = entries
         .iter()

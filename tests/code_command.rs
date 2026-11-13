@@ -810,7 +810,7 @@ fn code_updates_appinstaller_publisher_before_signing_companion() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "publisher=CN=Updated App Installer Publisher, O=Example &amp; Co",
+            "publisher=CN=Updated App Installer Publisher, O=Example & Co",
         ));
 
     let mut verify = psign();
@@ -1259,7 +1259,7 @@ fn code_prepares_msix_with_nested_pe_and_publisher_update() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "publisher=CN=Updated Publisher, O=Example &amp; Co",
+            "publisher=CN=Updated Publisher, O=Example & Co",
         ));
 
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();

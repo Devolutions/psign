@@ -47,6 +47,34 @@ Signed package outputs may change when regenerated because signing metadata and
 reference-signing tool output can vary; review and commit the refreshed manifest
 with the files.
 
+MSIX/AppX edge-case fixtures live under `tests/fixtures/msix-edge-cases/`:
+
+- `unsigned/` and `signed/` cover SHA-384 and SHA-512 block maps, `/nc` stored
+  packages, multi-block (>64 KiB) + `b4:FileHash` + OPC special/UTF-8 paths +
+  0-byte + incompressible payloads, `/ph` page-hashed `CodeIntegrity.cat`,
+  resource `.msix`/`.appx` (no `AXCI`), `uap6:AllowExecution="false"` optional
+  packages with PE payloads (suppressing `CodeIntegrity.cat`), `.pkgSignConfig`
+  `SkipPackageContentHash="true"` (`AXPC` sentinel), plain non-MakeAppx ZIPs,
+  multi-child `.msixbundle` (both unsigned-children and pre-signed-children
+  with subdirectory resource packages), genuine `.appxbundle` with `.appx`
+  children, `/fb` sparse `.msixbundle`/`.appxbundle`, real `makeappx encrypt /kt`
+  `.emsix`/`.eappx`/`.emsixbundle`/`.eappxbundle`, `.msixupload`/`.appxupload`
+  upload containers, UTF-8-BOM 2021 `.appinstaller` + `.p7`, and standalone
+  `bundle-signature.p7x`.
+- `msix-edge-case-fixtures.json` records hashes, sizes, expected `AX*`
+  sentinels, and portable/Windows capability flags.
+- Exercised on all platforms by `tests/fixture_vector_manifest.rs`,
+  `crates/psign-authenticode-trust/tests/format_trust.rs`, and
+  `tests/msix_edge_cases_portable.rs`, and on Windows by
+  `tests/msix_native_makeappx.rs`.
+
+Regenerate on Windows with the Windows SDK (`makeappx.exe`, `signtool.exe`) and
+the Devolutions test signing PFX:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci\build-msix-edge-case-fixtures.ps1 -WorkspaceRoot . -Force
+```
+
 `tests/corpus_sign_verify.rs` exercises the corpus on Windows by verifying every
 committed signed vector, native-signing the unsigned source rows and verifying
 the fresh outputs with `psign`, and psign-signing the offline-supported subset

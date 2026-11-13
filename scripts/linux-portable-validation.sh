@@ -57,6 +57,9 @@ cargo test -p psign --test cli_pe_digest --locked
 echo "== integration: psign-tool code planner =="
 cargo test -p psign --test code_command --locked
 
+echo "== integration: MSIX/AppX edge-case portable corpus =="
+cargo test -p psign --test msix_edge_cases_portable --locked
+
 echo "== integration: psign-tool portable (artifact-signing-rest) =="
 cargo test -p psign --test cli_pe_digest --features artifact-signing-rest --locked
 

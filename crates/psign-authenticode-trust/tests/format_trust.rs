@@ -46,9 +46,83 @@ fn msix_packages_trust_verify() {
         "tests/fixtures/generated-signed/msix/sample.appx",
         "tests/fixtures/generated-signed/msix/sample.msixbundle",
         "tests/fixtures/generated-signed/msix/sample.appxbundle",
+        "tests/fixtures/msix-edge-cases/signed/flat-sha384.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-sha512.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-nocompress.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-multiblock-paths.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-pagehashes.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-resource.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-resource.signed.appx",
+        "tests/fixtures/msix-edge-cases/signed/flat-optional-nonexec.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-skip-pcontent-hash.signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/flat-plain-zip.portable-signed.msix",
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi.signed.msixbundle",
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi-presigned-children.portable-signed.msixbundle",
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi.signed.appxbundle",
+        "tests/fixtures/msix-edge-cases/signed/bundle-sparse.signed.msixbundle",
+        "tests/fixtures/msix-edge-cases/signed/bundle-sparse.signed.appxbundle",
     ] {
         trust_verify_path(&repo(rel), &test_ca_opts()).unwrap_or_else(|e| panic!("{rel}: {e:#}"));
     }
+}
+
+#[test]
+fn msix_skip_pcontent_hash_and_nested_bundle_child_tamper_are_rejected() {
+    use std::io::{Cursor, Read, Write};
+
+    // Even when AXPC uses the SkipPackageContentHash sentinel, block-map validation must
+    // reject payload byte modifications without changing ZIP record lengths.
+    let mut skip_axpc = std::fs::read(repo(
+        "tests/fixtures/msix-edge-cases/signed/flat-skip-pcontent-hash.signed.msix",
+    ))
+    .unwrap();
+    let archive = zip::ZipArchive::new(Cursor::new(&skip_axpc)).unwrap();
+    let logo = archive
+        .file_names()
+        .find(|n| n.ends_with(".png"))
+        .unwrap()
+        .to_owned();
+    drop(archive);
+    let mut archive = zip::ZipArchive::new(Cursor::new(&skip_axpc)).unwrap();
+    let data_start = usize::try_from(archive.by_name(&logo).unwrap().data_start()).unwrap();
+    drop(archive);
+    skip_axpc[data_start] ^= 0xFF;
+    let err =
+        psign_authenticode_trust::trust_verify_msix_bytes(&skip_axpc, "msix", &test_ca_opts())
+            .unwrap_err();
+    let msg = format!("{err:#}");
+    let lower = msg.to_ascii_lowercase();
+    assert!(
+        lower.contains("checksum") || lower.contains("crc") || lower.contains("mismatch"),
+        "expected checksum/block mismatch when tampering SkipPackageContentHash payload: {msg}"
+    );
+
+    // Tampering inside a subdirectory resource child of a 3-child bundle must fail verification.
+    let bundle_bytes = std::fs::read(repo(
+        "tests/fixtures/msix-edge-cases/signed/bundle-multi-presigned-children.portable-signed.msixbundle",
+    ))
+    .unwrap();
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bundle_bytes)).unwrap();
+    let child = archive.by_name("resources/scale-200.msix").unwrap();
+    let child_data_start = usize::try_from(child.data_start()).unwrap();
+    let mut child_bytes = Vec::new();
+    let mut child = child;
+    child.read_to_end(&mut child_bytes).unwrap();
+    drop(child);
+    drop(archive);
+
+    // Corrupt a byte inside the nested child's AppxSignature.p7x PKCS#7 payload and keep outer CRC valid?
+    // Even simpler: corrupting inside the stored child triggers either outer AXPC/CRC or child SIP failure.
+    let mut tampered = bundle_bytes;
+    let _ = Write::write_all(
+        &mut &mut tampered[child_data_start + 40..child_data_start + 41],
+        &[0xAA],
+    );
+    assert!(
+        psign_authenticode_trust::trust_verify_msix_bytes(&tampered, "msixbundle", &test_ca_opts())
+            .is_err(),
+        "tampering with subdirectory bundle child must fail trust_verify_msix_bytes"
+    );
 }
 
 #[test]

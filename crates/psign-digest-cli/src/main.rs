@@ -1330,10 +1330,16 @@ fn set_msix_manifest_publisher_path(input: &Path, output: &Path, publisher: &str
     if publisher.is_empty() {
         return Err(anyhow!("MSIX/AppX publisher cannot be empty"));
     }
-    let reader = File::open(input).with_context(|| format!("open {}", input.display()))?;
-    let writer = File::create(output).with_context(|| format!("create {}", output.display()))?;
-    set_msix_manifest_publisher(reader, writer, publisher)
-        .with_context(|| format!("set MSIX/AppX manifest publisher in {}", input.display()))
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let bytes = std::fs::read(input).with_context(|| format!("read {}", input.display()))?;
+    let updated =
+        psign_sip_digest::appx_package::set_unsigned_msix_family_publisher_bytes(&bytes, &ext, publisher)
+            .with_context(|| format!("set MSIX/AppX manifest publisher in {}", input.display()))?;
+    std::fs::write(output, updated).with_context(|| format!("write {}", output.display()))
 }
 
 fn reject_encrypted_msix_path(path: &Path) -> Result<()> {
@@ -1371,66 +1377,6 @@ fn read_msix_manifest(path: &Path) -> Result<String> {
         .read_to_string(&mut text)
         .context("read AppxMetadata/AppxBundleManifest.xml as UTF-8")?;
     Ok(text)
-}
-
-fn set_msix_manifest_publisher<R, W>(reader: R, writer: W, publisher: &str) -> Result<()>
-where
-    R: std::io::Read + std::io::Seek,
-    W: std::io::Write + std::io::Seek,
-{
-    let escaped = xml_escape_attr(publisher);
-    let mut input = zip::ZipArchive::new(reader).context("open MSIX/AppX ZIP")?;
-    if input.by_name("AppxSignature.p7x").is_ok() {
-        return Err(anyhow!(
-            "MSIX/AppX package already contains AppxSignature.p7x; update the unsigned package before final signing"
-        ));
-    }
-    let is_bundle = input.by_name("AppxManifest.xml").is_err();
-    if is_bundle && input.by_name("AppxMetadata/AppxBundleManifest.xml").is_err() {
-        return Err(anyhow!(
-            "MSIX/AppX package is missing AppxManifest.xml (or AppxMetadata/AppxBundleManifest.xml for bundles)"
-        ));
-    }
-    let mut output = zip::ZipWriter::new(writer);
-    let mut updated_manifest = false;
-
-    for i in 0..input.len() {
-        let mut file = input.by_index(i).context("read MSIX/AppX ZIP entry")?;
-        let name = psign_opc_sign::opc::normalize_zip_part_name(file.name())?;
-        let options = zip::write::FileOptions::default().compression_method(file.compression());
-        if file.is_dir() {
-            output.add_directory(name, options)?;
-            continue;
-        }
-        output.start_file(&name, options)?;
-        if name == "AppxManifest.xml" {
-            let mut text = String::new();
-            file.read_to_string(&mut text)
-                .context("read AppxManifest.xml as UTF-8")?;
-            let updated = update_attr_for_tags(&text, "Identity", "Publisher", &escaped)?;
-            output.write_all(updated.as_bytes())?;
-            updated_manifest = true;
-        } else if name == "AppxMetadata/AppxBundleManifest.xml" {
-            let mut text = String::new();
-            file.read_to_string(&mut text)
-                .context("read AppxMetadata/AppxBundleManifest.xml as UTF-8")?;
-            // Bundle manifests carry Identity@Publisher plus per-child Package@Publisher mirrors.
-            let mut updated = update_attr_for_local_tags(&text, "Identity", "Publisher", &escaped)?;
-            updated = update_attr_for_local_tags(&updated, "Package", "Publisher", &escaped)?;
-            output.write_all(updated.as_bytes())?;
-            updated_manifest = true;
-        } else {
-            std::io::copy(&mut file, &mut output)?;
-        }
-    }
-
-    if !updated_manifest {
-        return Err(anyhow!(
-            "MSIX/AppX package is missing AppxManifest.xml (or AppxMetadata/AppxBundleManifest.xml for bundles)"
-        ));
-    }
-    output.finish()?;
-    Ok(())
 }
 
 fn parse_appinstaller_descriptor(text: &str) -> Result<AppInstallerDescriptorInfo> {
@@ -1627,28 +1573,6 @@ fn sign_pkcs7_id_data_with_external_signature(
     )
 }
 
-fn update_attr_for_tags(text: &str, tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-    let needle = format!("<{tag}");
-    while let Some(rel_start) = text[cursor..].find(&needle) {
-        let start = cursor + rel_start;
-        let end = text[start..]
-            .find('>')
-            .map(|offset| start + offset)
-            .ok_or_else(|| anyhow!("App Installer <{tag}> tag is not closed"))?;
-        out.push_str(&text[cursor..start]);
-        out.push_str(&replace_or_insert_xml_attr(
-            &text[start..=end],
-            attr,
-            escaped_value,
-        )?);
-        cursor = end + 1;
-    }
-    out.push_str(&text[cursor..]);
-    Ok(out)
-}
-
 fn update_attr_for_local_tags(
     text: &str,
     local_name: &str,
@@ -1719,10 +1643,59 @@ fn first_start_tag_by_local_name<'a>(text: &'a str, local_name: &str) -> Result<
 }
 
 fn xml_attr(tag: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=\"");
-    let start = tag.find(&needle)? + needle.len();
-    let end = tag[start..].find('"')? + start;
-    Some(tag[start..end].to_owned())
+    for quote in ['"', '\''] {
+        let needle = format!("{name}={quote}");
+        let mut search_from = 0usize;
+        while let Some(rel) = tag[search_from..].find(&needle) {
+            let attr_pos = search_from + rel;
+            let boundary_ok = attr_pos == 0
+                || tag.as_bytes()[attr_pos - 1].is_ascii_whitespace();
+            let val_start = attr_pos + needle.len();
+            if boundary_ok {
+                let val_end = tag[val_start..].find(quote)? + val_start;
+                return Some(xml_unescape_attr(&tag[val_start..val_end]));
+            }
+            search_from = val_start;
+        }
+    }
+    None
+}
+
+fn xml_unescape_attr(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after_amp = &rest[amp + 1..];
+        if let Some(semi) = after_amp.find(';') {
+            let entity = &after_amp[..semi];
+            let decoded = match entity {
+                "amp" => Some('&'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                    u32::from_str_radix(&entity[2..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                }
+                _ if let Some(dec) = entity.strip_prefix('#') => {
+                    dec.parse::<u32>().ok().and_then(char::from_u32)
+                }
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                rest = &after_amp[semi + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = after_amp;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn run_rfc3161_timestamp_resp_inspect(

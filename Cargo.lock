@@ -2188,6 +2188,7 @@ dependencies = [
  "cms",
  "der 0.7.10",
  "digest 0.10.7",
+ "flate2",
  "object",
  "quick-xml",
  "rsa 0.9.10",

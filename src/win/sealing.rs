@@ -32,8 +32,6 @@ pub fn validate_sign_constraints_paths<'a>(
     args: &SignArgs,
     paths: impl IntoIterator<Item = &'a std::path::Path>,
 ) -> Result<()> {
-    let decoupled_digest =
-        (args.dlib.is_some() || args.trusted_signing_dlib_root.is_some()) && args.dmdf.is_some();
     if (args.dlib.is_some() || args.trusted_signing_dlib_root.is_some()) != args.dmdf.is_some() {
         return Err(anyhow!(
             "--dmdf must be provided together with either --dlib or --trusted-signing-dlib-root"
@@ -62,19 +60,9 @@ pub fn validate_sign_constraints_paths<'a>(
 
     for path in paths.into_iter() {
         let is_appx = is_appx_family(path);
-        if is_appx && args.timestamp_url.is_none() && args.seal_timestamp_url.is_none() {
-            return Err(anyhow!(
-                "AppX/MSIX packages must be timestamped during signing (--timestamp-url or --seal-timestamp-url /tseal)"
-            ));
-        }
         if is_appx && args.append_signature {
             return Err(anyhow!(
                 "AppX/MSIX signing does not support append-signature mode in this implementation"
-            ));
-        }
-        if is_appx && args.page_hashes && !decoupled_digest {
-            return Err(anyhow!(
-                "AppX/MSIX page hashes require decoupled digest inputs (--dlib or --trusted-signing-dlib-root, with --dmdf)"
             ));
         }
     }
@@ -155,9 +143,9 @@ pub fn validate_timestamp_constraints(args: &TimestampArgs) -> Result<()> {
     }
 
     for path in &args.files {
-        if is_appx_family(path) && has_legacy {
+        if is_appx_family(path) {
             return Err(anyhow!(
-                "AppX/MSIX files must be timestamped with RFC3161 mode (--rfc3161-url)"
+                "AppX/MSIX packages must be timestamped during signing (using sign --timestamp-url /tr)"
             ));
         }
     }

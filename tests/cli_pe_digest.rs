@@ -1328,7 +1328,7 @@ fn appinstaller_set_publisher_updates_descriptor_metadata() {
     let mut info = portable_cmd();
     info.arg("appinstaller-info").arg(&output);
     info.assert().success().stdout(predicate::str::contains(
-        "publisher=CN=Updated Publisher, O=Example &amp; Co",
+        "publisher=CN=Updated Publisher, O=Example & Co",
     ));
 }
 
@@ -1425,7 +1425,7 @@ fn msix_manifest_info_and_set_publisher_update_identity() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "publisher=CN=Updated MSIX Publisher, O=Example &amp; Co",
+            "publisher=CN=Updated MSIX Publisher, O=Example & Co",
         ));
 }
 
@@ -1458,8 +1458,9 @@ fn msix_manifest_info_and_set_publisher_support_bundles() {
         "publisher=CN=Updated Bundle Publisher",
     ));
 
-    // Both Identity@Publisher and Package@Publisher mirrors are updated, and the
-    // bundle manifest stays readable by the same helper afterwards.
+    // Identity@Publisher is updated on both the bundle manifest and unsigned child
+    // manifests, while real 2013/bundle <Package> elements stay XSD-valid without an
+    // illegal Publisher attribute.
     let mut updated_info = portable_cmd();
     updated_info.arg("msix-manifest-info").arg(&output);
     updated_info
@@ -1468,11 +1469,10 @@ fn msix_manifest_info_and_set_publisher_support_bundles() {
         .stdout(predicate::str::contains(
             "publisher=CN=Updated Bundle Publisher",
         ))
-        .stdout(predicate::str::contains(
-            "package_publisher=CN=Updated Bundle Publisher",
-        ));
+        .stdout(predicate::str::contains("package_publisher=").not());
 
     let mut manifest = String::new();
+    let mut child_bytes = Vec::new();
     {
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&output).unwrap()).unwrap();
         archive
@@ -1480,13 +1480,33 @@ fn msix_manifest_info_and_set_publisher_support_bundles() {
             .unwrap()
             .read_to_string(&mut manifest)
             .unwrap();
+        let child_name = (0..archive.len())
+            .map(|idx| archive.by_index(idx).unwrap().name().to_string())
+            .find(|name| name.ends_with(".msix"))
+            .expect("bundle child .msix");
+        archive
+            .by_name(&child_name)
+            .unwrap()
+            .read_to_end(&mut child_bytes)
+            .unwrap();
     }
     assert_eq!(
         manifest
             .matches(r#"Publisher="CN=Updated Bundle Publisher""#)
             .count(),
-        2,
-        "Identity@Publisher and Package@Publisher must both be updated:\n{manifest}"
+        1,
+        "Bundle Identity@Publisher must be updated without adding Package@Publisher:\n{manifest}"
+    );
+    let mut child_archive = zip::ZipArchive::new(std::io::Cursor::new(child_bytes)).unwrap();
+    let mut child_manifest = String::new();
+    child_archive
+        .by_name("AppxManifest.xml")
+        .unwrap()
+        .read_to_string(&mut child_manifest)
+        .unwrap();
+    assert!(
+        child_manifest.contains(r#"Publisher="CN=Updated Bundle Publisher""#),
+        "embedded child AppxManifest.xml Identity@Publisher must be updated:\n{child_manifest}"
     );
 }
 
