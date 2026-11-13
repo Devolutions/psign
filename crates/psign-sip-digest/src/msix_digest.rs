@@ -268,6 +268,103 @@ fn optional_u64_xml_attr(
         .transpose()
 }
 
+/// Decode an OPC/AppxPackaging ZIP entry name (such as `Assets/Sub%20Dir/notes%20%26%20config.xml`
+/// or `Assets/donn%C3%A9es-utf8.txt`) into its logical forward-slash path (`Assets/Sub Dir/notes & config.xml`),
+/// rejecting percent-encoded path separators (`%2F`, `%5C`), NULs, drive colons, or traversal segments.
+///
+/// # Errors
+///
+/// Returns an error if decoded bytes are not valid UTF-8 or contain forbidden path characters/segments.
+pub fn decode_opc_zip_part_name(name: &str) -> Result<String> {
+    if name == "[Content_Types].xml" {
+        return Ok(name.to_owned());
+    }
+    if name.is_empty() || name.bytes().any(|b| b == 0) {
+        return Err(anyhow!("APPX/MSIX ZIP contains an empty or NUL part name"));
+    }
+    let slash_name = name.replace('\\', "/");
+    if slash_name.starts_with('/') || slash_name.ends_with('/') {
+        return Err(anyhow!(
+            "APPX/MSIX part `{name}` has leading or trailing `/`"
+        ));
+    }
+    let mut decoded_segments = Vec::new();
+    for raw_seg in slash_name.split('/') {
+        if raw_seg.is_empty() {
+            return Err(anyhow!("APPX/MSIX part `{name}` has an empty path segment"));
+        }
+        let bytes = raw_seg.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+            {
+                let decoded_byte = (hi << 4) | lo;
+                if matches!(decoded_byte, 0 | b'/' | b'\\' | b':') {
+                    return Err(anyhow!(
+                        "APPX/MSIX part `{name}` percent-encodes a forbidden path separator or NUL"
+                    ));
+                }
+                out.push(decoded_byte);
+                i += 3;
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        let seg_str = std::str::from_utf8(&out)
+            .map_err(|_| anyhow!("APPX/MSIX part `{name}` percent-decodes to invalid UTF-8"))?;
+        if seg_str == "." || seg_str == ".." || seg_str.contains(':') {
+            return Err(anyhow!(
+                "APPX/MSIX part `{name}` decodes to an invalid path segment `{seg_str}`"
+            ));
+        }
+        decoded_segments.push(seg_str.to_owned());
+    }
+    Ok(decoded_segments.join("/"))
+}
+
+/// Encode a logical forward-slash package path into the OPC Part URI form emitted by
+/// `AppxPackaging.dll` (`FileNameHelper::SpecialCharsEncoding` + `OpcServices.DLL` UTF-8
+/// percent-encoding), preserving `[Content_Types].xml` verbatim.
+#[must_use]
+pub fn encode_opc_part_name(logical_name: &str) -> String {
+    if logical_name == "[Content_Types].xml" {
+        return logical_name.to_owned();
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(logical_name.len());
+    for (seg_idx, segment) in logical_name.split('/').enumerate() {
+        if seg_idx > 0 {
+            out.push('/');
+        }
+        for &byte in segment.as_bytes() {
+            if matches!(
+                byte,
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'!'
+            ) {
+                out.push(byte as char);
+            } else {
+                out.push('%');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0F) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn normalize_appx_part_name(name: &str) -> Result<String> {
     if name.is_empty() || name.bytes().any(|b| b == 0) {
         return Err(anyhow!(
@@ -516,7 +613,8 @@ fn validate_content_types_xml(xml: &[u8]) -> Result<AppxContentTypes> {
                         "[Content_Types].xml Override `{part_name}` has empty ContentType"
                     ));
                 }
-                let normalized = normalize_appx_part_name(&part_name[1..])?;
+                let decoded_part = decode_opc_zip_part_name(&part_name[1..])?;
+                let normalized = normalize_appx_part_name(&decoded_part)?;
                 let key = normalized.to_ascii_lowercase();
                 if content_types.overrides.insert(key, content_type).is_some() {
                     return Err(anyhow!(
@@ -1395,7 +1493,8 @@ fn validate_package_part_inventory(
                 "APPX/MSIX ZIP entry `{name}` uses backslashes; package part names must use `/`"
             ));
         }
-        let normalized = normalize_appx_part_name(name)?;
+        let decoded = decode_opc_zip_part_name(name)?;
+        let normalized = normalize_appx_part_name(&decoded)?;
         if !seen.insert(normalized.clone()) {
             return Err(anyhow!("duplicate APPX/MSIX ZIP part `{normalized}`"));
         }
@@ -1482,7 +1581,16 @@ fn hash_bytes(kind: PeAuthenticodeHashKind, bytes: &[u8]) -> Vec<u8> {
     h.finalize()
 }
 
-fn data_descriptor_len_and_validate(buf: &[u8], off: usize, zf: &ZipFile<'_>) -> Result<u64> {
+/// Validate a ZIP data descriptor using `AppxSip.dll`'s `ZipFileItem::ParseLocalFileItem` rule:
+/// `version_needed_to_extract >= 45` (`ZIP64_VERSION`) selects 8-byte ZIP64 sizes; lower versions
+/// select 4-byte classic sizes. Relying on value heuristics alone misparses 0-byte deflated entries
+/// (`compressed_size = 2, uncompressed_size = 0`) where the high 32 bits of `2u64` equal `0u32`.
+fn data_descriptor_len_and_validate(
+    buf: &[u8],
+    off: usize,
+    is_zip64: bool,
+    zf: &ZipFile<'_>,
+) -> Result<u64> {
     let has_sig = buf
         .get(off..off + 4)
         .map(|b| u32::from_le_bytes(b.try_into().unwrap()) == DD_SIG)
@@ -1494,31 +1602,24 @@ fn data_descriptor_len_and_validate(buf: &[u8], off: usize, zf: &ZipFile<'_>) ->
             "ZIP data descriptor CRC does not match central directory"
         ));
     }
-    let classic_matches = read_u32_le(buf, cursor + 4)
-        .ok()
-        .zip(read_u32_le(buf, cursor + 8).ok())
-        .is_some_and(|(compressed_size, uncompressed_size)| {
-            u64::from(compressed_size) == zf.compressed_size()
-                && u64::from(uncompressed_size) == zf.size()
-        });
-    if classic_matches {
-        return Ok(if has_sig { 16 } else { 12 });
-    }
-
-    let zip64_matches = read_u64_le(buf, cursor + 4)
-        .ok()
-        .zip(read_u64_le(buf, cursor + 12).ok())
-        .is_some_and(|(compressed_size, uncompressed_size)| {
-            compressed_size == zf.compressed_size() && uncompressed_size == zf.size()
-        });
-    if zip64_matches {
-        Ok(if has_sig { 24 } else { 20 })
-    } else {
+    if is_zip64 {
         let compressed_size = read_u64_le(buf, cursor + 4)?;
         let uncompressed_size = read_u64_le(buf, cursor + 12)?;
-        Err(anyhow!(
-            "ZIP data descriptor sizes do not match central directory (compressed={compressed_size}, uncompressed={uncompressed_size})"
-        ))
+        if compressed_size != zf.compressed_size() || uncompressed_size != zf.size() {
+            return Err(anyhow!(
+                "ZIP data descriptor sizes do not match central directory (compressed={compressed_size}, uncompressed={uncompressed_size})"
+            ));
+        }
+        Ok(if has_sig { 24 } else { 20 })
+    } else {
+        let compressed_size = u64::from(read_u32_le(buf, cursor + 4)?);
+        let uncompressed_size = u64::from(read_u32_le(buf, cursor + 8)?);
+        if compressed_size != zf.compressed_size() || uncompressed_size != zf.size() {
+            return Err(anyhow!(
+                "ZIP data descriptor sizes do not match central directory (compressed={compressed_size}, uncompressed={uncompressed_size})"
+            ));
+        }
+        Ok(if has_sig { 16 } else { 12 })
     }
 }
 
@@ -1528,6 +1629,7 @@ fn local_file_record_extent(buf: &[u8], zf: &ZipFile<'_>) -> Result<(u64, u64)> 
     if read_u32_le(buf, hs)? != LH_SIG {
         return Err(anyhow!("bad local file header signature"));
     }
+    let version_needed = read_u16_le(buf, hs + 4)?;
     let flags = read_u16_le(buf, hs + 6)?;
     if flags & 0x2041 != 0 {
         return Err(anyhow!(
@@ -1609,6 +1711,7 @@ fn local_file_record_extent(buf: &[u8], zf: &ZipFile<'_>) -> Result<(u64, u64)> 
         data_descriptor_len_and_validate(
             buf,
             usize::try_from(compressed_end).map_err(|_| anyhow!("compressed end"))?,
+            version_needed >= ZIP64_VERSION,
             zf,
         )?
     } else {
@@ -1752,7 +1855,8 @@ fn archive_file_index_by_normalized_name(
         if zf.name().ends_with('/') || zf.name().ends_with('\\') {
             continue;
         }
-        let normalized = normalize_appx_part_name(zf.name())?;
+        let decoded = decode_opc_zip_part_name(zf.name())?;
+        let normalized = normalize_appx_part_name(&decoded)?;
         if files.insert(normalized.clone(), i).is_some() {
             return Err(anyhow!(
                 "duplicate ZIP entry after APPX path normalization: `{normalized}`"
@@ -1897,7 +2001,8 @@ fn verify_bundle_child_packages(buf: &[u8]) -> Result<()> {
         if zf.name().ends_with('/') || zf.name().ends_with('\\') {
             continue;
         }
-        let normalized = normalize_appx_part_name(zf.name())?;
+        let decoded = decode_opc_zip_part_name(zf.name())?;
+        let normalized = normalize_appx_part_name(&decoded)?;
         let Some(ext) = cleartext_msix_extension_for_name(&normalized) else {
             continue;
         };
@@ -2041,6 +2146,27 @@ pub fn normalize_zip_for_appx_signing(zip: Vec<u8>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Package topology when generating `[Content_Types].xml` for an unsigned AppX/MSIX archive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppxPackageLayout {
+    /// Flat `.msix` or `.appx` package carrying root `AppxManifest.xml`.
+    Flat,
+    /// Bundle `.msixbundle` or `.appxbundle` carrying `AppxMetadata/AppxBundleManifest.xml`.
+    Bundle,
+}
+
+/// Fixed 64-byte `AXPC` sentinel emitted by Windows `AppxSip.dll` (`0x180052750` in
+/// `VerifyAppxIndirectData` / `UpdateSignatureEditorAndCreateIndirectData`) when signing
+/// via `.pkgSignConfig` with `<SkipPackageContentHash>true</SkipPackageContentHash>`.
+///
+/// Even when `AXPC` carries this prefix (32 bytes for SHA-256, 48 for SHA-384, 64 for SHA-512),
+/// `AXCD`, `AXCT`, `AXBM`, optional `AXCI`, and all `AppxBlockMap.xml` block hashes are verified.
+pub const SKIP_PACKAGE_CONTENT_HASH_SENTINEL: [u8; 64] = [
+    0x43, 0xda, 0x04, 0xfa, 0xfe, 0xa9, 0x5d, 0xf4, 0x29, 0xd0, 0xf9, 0xfe, 0x86, 0x59, 0x75, 0xd8,
+    0x37, 0x51, 0xe4, 0x93, 0x03, 0x25, 0x4a, 0xe9, 0x99, 0x9d, 0x89, 0x5b, 0xe2, 0x6f, 0xf4, 0x18,
+    0x43, 0xda, 0x04, 0xfa, 0xfe, 0xa9, 0x5d, 0xf4, 0x29, 0xd0, 0xf9, 0xfe, 0x86, 0x59, 0x75, 0xd8,
+    0x37, 0x51, 0xe4, 0x93, 0x03, 0x25, 0x4a, 0xe9, 0x99, 0x9d, 0x89, 0x5b, 0xe2, 0x6f, 0xf4, 0x18,
+];
 const CONTENT_TYPE_MANIFEST: &str = "application/vnd.ms-appx.manifest+xml";
 const CONTENT_TYPE_BUNDLE_MANIFEST: &str = "application/vnd.ms-appx.bundlemanifest+xml";
 const CONTENT_TYPE_BLOCK_MAP: &str = "application/vnd.ms-appx.blockmap+xml";
@@ -2085,6 +2211,48 @@ pub fn appx_content_types_for_signing(
     payload_parts: &[&str],
     bundle: bool,
 ) -> Result<String> {
+    let layout = if bundle {
+        AppxPackageLayout::Bundle
+    } else {
+        AppxPackageLayout::Flat
+    };
+    build_appx_content_types_xml(existing, payload_parts, layout, true)
+}
+
+/// Build `[Content_Types].xml` for an unsigned AppX/MSIX archive without an `AppxSignature.p7x` override.
+///
+/// # Errors
+///
+/// Returns an error if `existing` is malformed `[Content_Types].xml` or if any part name is invalid.
+pub fn appx_content_types_for_unsigned_package(
+    existing: Option<&[u8]>,
+    payload_parts: &[&str],
+    layout: AppxPackageLayout,
+) -> Result<String> {
+    build_appx_content_types_xml(existing, payload_parts, layout, false)
+}
+
+/// Inspect `AppxBlockMap.xml` inside `package` and return its declared hash kind, if present.
+///
+/// # Errors
+///
+/// Returns an error if `package` is not a readable ZIP or its `AppxBlockMap.xml` is invalid.
+pub fn detect_block_map_hash_kind(package: &[u8]) -> Result<Option<PeAuthenticodeHashKind>> {
+    let mut archive = ZipArchive::new(Cursor::new(package))?;
+    if archive.by_name("AppxBlockMap.xml").is_err() {
+        return Ok(None);
+    }
+    let block_map_bytes = read_zip_entry_raw(&mut archive, "AppxBlockMap.xml")?;
+    let (kind, _) = parse_block_map_xml(&block_map_bytes)?;
+    Ok(Some(kind))
+}
+
+fn build_appx_content_types_xml(
+    existing: Option<&[u8]>,
+    payload_parts: &[&str],
+    layout: AppxPackageLayout,
+    include_signature_override: bool,
+) -> Result<String> {
     let AppxContentTypes {
         defaults: input_defaults,
         overrides: input_overrides,
@@ -2095,14 +2263,14 @@ pub fn appx_content_types_for_signing(
     let mut defaults: std::collections::BTreeMap<String, String> =
         input_defaults.into_iter().collect();
     let mut overrides: Vec<(String, String)> = Vec::new();
-    let (manifest_part, manifest_type) = if bundle {
-        (ascii_part(BUNDLE_MANIFEST), CONTENT_TYPE_BUNDLE_MANIFEST)
-    } else {
-        (ascii_part(APP_MANIFEST), CONTENT_TYPE_MANIFEST)
+    let (manifest_part, manifest_type) = match layout {
+        AppxPackageLayout::Bundle => (ascii_part(BUNDLE_MANIFEST), CONTENT_TYPE_BUNDLE_MANIFEST),
+        AppxPackageLayout::Flat => (ascii_part(APP_MANIFEST), CONTENT_TYPE_MANIFEST),
     };
 
     for &part in payload_parts {
-        let normalized = normalize_appx_part_name(part)?;
+        let decoded = decode_opc_zip_part_name(part)?;
+        let normalized = normalize_appx_part_name(&decoded)?;
         let extension = normalized
             .rsplit('/')
             .next()
@@ -2135,10 +2303,12 @@ pub fn appx_content_types_for_signing(
         ascii_part(BLOCK_MAP).to_owned(),
         CONTENT_TYPE_BLOCK_MAP.to_owned(),
     ));
-    overrides.push((
-        ascii_part(APP_SIGNATURE).to_owned(),
-        CONTENT_TYPE_SIGNATURE.to_owned(),
-    ));
+    if include_signature_override {
+        overrides.push((
+            ascii_part(APP_SIGNATURE).to_owned(),
+            CONTENT_TYPE_SIGNATURE.to_owned(),
+        ));
+    }
 
     let escape = |value: &str| {
         value
@@ -2159,9 +2329,10 @@ pub fn appx_content_types_for_signing(
         ));
     }
     for (part, content_type) in &overrides {
+        let encoded_part = encode_opc_part_name(part);
         xml.push_str(&format!(
             r#"<Override PartName="/{}" ContentType="{}"/>"#,
-            escape(part),
+            escape(&encoded_part),
             escape(content_type)
         ));
     }
@@ -2318,7 +2489,12 @@ fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<(Vec<u8
         Ok(())
     };
 
-    check("AXPC (payload)", &data_hash, &parts.axpc)?;
+    let axpc_sentinel = SKIP_PACKAGE_CONTENT_HASH_SENTINEL
+        .get(..expected_piece)
+        .is_some_and(|sentinel| parts.axpc.as_slice() == sentinel);
+    if !axpc_sentinel {
+        check("AXPC (payload)", &data_hash, &parts.axpc)?;
+    }
     check("AXCD (central directory)", &cd_hash, &parts.axcd)?;
     check("AXCT ([Content_Types].xml)", &ct_hash, &parts.axct)?;
     check("AXBM (AppxBlockMap.xml)", &bm_hash, &parts.axbm)?;
@@ -3265,5 +3441,109 @@ mod tests {
             content_type_for_part(&parsed, "app.msix"),
             Some("application/msix")
         );
+    }
+
+    #[test]
+    fn data_descriptor_variants_and_corruption_are_validated() {
+        let payload = b"descriptor payload";
+        let crc = {
+            let mut hasher = flate2::Crc::new();
+            hasher.update(payload);
+            hasher.sum()
+        };
+        let len_u32 = u32::try_from(payload.len()).unwrap();
+        let len_u64 = payload.len() as u64;
+
+        // Build a reference ZIP entry so we have a real `ZipFile` with known CRC and sizes.
+        let reference_zip = zip_with_entries(&[("item.bin", payload)]);
+        let mut archive = ZipArchive::new(Cursor::new(reference_zip.as_slice())).unwrap();
+        let zf = archive.by_index(0).unwrap();
+
+        // 1) Classic 12-byte descriptor (no signature).
+        let mut dd_classic_nosig = Vec::new();
+        dd_classic_nosig.extend_from_slice(&crc.to_le_bytes());
+        dd_classic_nosig.extend_from_slice(&len_u32.to_le_bytes());
+        dd_classic_nosig.extend_from_slice(&len_u32.to_le_bytes());
+        assert_eq!(
+            data_descriptor_len_and_validate(&dd_classic_nosig, 0, false, &zf).unwrap(),
+            12
+        );
+
+        // 2) Classic 16-byte descriptor (with 0x08074b50 signature).
+        let mut dd_classic_sig = DD_SIG.to_le_bytes().to_vec();
+        dd_classic_sig.extend_from_slice(&dd_classic_nosig);
+        assert_eq!(
+            data_descriptor_len_and_validate(&dd_classic_sig, 0, false, &zf).unwrap(),
+            16
+        );
+
+        // 3) ZIP64 20-byte descriptor (no signature).
+        let mut dd_zip64_nosig = Vec::new();
+        dd_zip64_nosig.extend_from_slice(&crc.to_le_bytes());
+        dd_zip64_nosig.extend_from_slice(&len_u64.to_le_bytes());
+        dd_zip64_nosig.extend_from_slice(&len_u64.to_le_bytes());
+        assert_eq!(
+            data_descriptor_len_and_validate(&dd_zip64_nosig, 0, true, &zf).unwrap(),
+            20
+        );
+
+        // 4) ZIP64 24-byte descriptor (with 0x08074b50 signature, as MakeAppx writes).
+        let mut dd_zip64_sig = DD_SIG.to_le_bytes().to_vec();
+        dd_zip64_sig.extend_from_slice(&dd_zip64_nosig);
+        assert_eq!(
+            data_descriptor_len_and_validate(&dd_zip64_sig, 0, true, &zf).unwrap(),
+            24
+        );
+
+        // 5) Corrupted CRC must fail.
+        let mut bad_crc = dd_zip64_sig.clone();
+        bad_crc[4] ^= 0x01;
+        assert!(
+            data_descriptor_len_and_validate(&bad_crc, 0, true, &zf)
+                .unwrap_err()
+                .to_string()
+                .contains("CRC does not match")
+        );
+
+        // 6) Corrupted compressed/uncompressed sizes must fail.
+        let mut bad_sizes = dd_zip64_sig;
+        bad_sizes[8] ^= 0x01;
+        assert!(
+            data_descriptor_len_and_validate(&bad_sizes, 0, true, &zf)
+                .unwrap_err()
+                .to_string()
+                .contains("sizes do not match")
+        );
+
+        // 7) 0-byte entry with ZIP64 24-byte descriptor (regression for high-half 0 == size 0).
+        let empty_zip = zip_with_entries(&[("empty.bin", b"")]);
+        let mut empty_archive = ZipArchive::new(Cursor::new(empty_zip.as_slice())).unwrap();
+        let empty_zf = empty_archive.by_index(0).unwrap();
+        let mut empty_dd_zip64 = DD_SIG.to_le_bytes().to_vec();
+        empty_dd_zip64.extend_from_slice(&0u32.to_le_bytes());
+        empty_dd_zip64.extend_from_slice(&empty_zf.compressed_size().to_le_bytes());
+        empty_dd_zip64.extend_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            data_descriptor_len_and_validate(&empty_dd_zip64, 0, true, &empty_zf).unwrap(),
+            24
+        );
+    }
+
+    #[test]
+    fn native_skip_package_content_hash_fixture_uses_axpc_sentinel_and_verifies() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../tests/fixtures/msix-edge-cases/signed/flat-skip-pcontent-hash.signed.msix",
+        );
+        let bytes = std::fs::read(&path).expect("read SkipPackageContentHash fixture");
+        let (_pkcs7, embedded_blob) =
+            msix_verified_signature(&bytes, "msix").expect("verify SkipPackageContentHash MSIX");
+        let (piece_len, parts) = parse_signed_appx_blob(&embedded_blob).unwrap();
+        assert_eq!(piece_len, 32);
+        assert_eq!(
+            parts.axpc.as_slice(),
+            &SKIP_PACKAGE_CONTENT_HASH_SENTINEL[..32],
+            "Windows AppxSip .pkgSignConfig SkipPackageContentHash must emit the 43da04fa... sentinel"
+        );
+        assert!(parts.axci.is_some(), "PE package must still carry AXCI");
     }
 }

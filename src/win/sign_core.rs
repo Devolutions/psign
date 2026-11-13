@@ -18,13 +18,13 @@ use windows::Win32::Security::Cryptography::{
     CERT_OPEN_STORE_FLAGS, CERT_QUERY_ENCODING_TYPE, CERT_SIGN_HASH_CNG_ALG_PROP_ID,
     CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_MEMORY, CERT_STORE_PROV_SYSTEM_W,
     CERT_SYSTEM_STORE_CURRENT_USER, CERT_SYSTEM_STORE_LOCAL_MACHINE, CRYPT_ATTRIBUTES,
-    CRYPT_INTEGER_BLOB, CertAddCertificateContextToStore, CertCloseStore,
-    CertCreateCertificateContext, CertDuplicateCertificateContext, CertEnumCertificatesInStore,
-    CertFindCertificateInStore, CertFreeCertificateContext, CertGetCertificateContextProperty,
-    CertGetNameStringW, CertOpenStore, HCERTSTORE, HCRYPTPROV_LEGACY, PFN_AUTHENTICODE_DIGEST_SIGN,
-    PFN_AUTHENTICODE_DIGEST_SIGN_EX, PFN_AUTHENTICODE_DIGEST_SIGN_EX_WITHFILEHANDLE,
-    PFN_AUTHENTICODE_DIGEST_SIGN_WITHFILEHANDLE, PFXImportCertStore, PKCS12_ALLOW_OVERWRITE_KEY,
-    PKCS12_ALWAYS_CNG_KSP, PKCS12_INCLUDE_EXTENDED_PROPERTIES, SIG_APPEND, SIGNER_ATTR_AUTHCODE,
+    CRYPT_DELETEKEYSET, CRYPT_INTEGER_BLOB, CRYPT_USER_KEYSET, CertAddCertificateContextToStore,
+    CertCloseStore, CertCreateCertificateContext, CertDuplicateCertificateContext,
+    CertEnumCertificatesInStore, CertFindCertificateInStore, CertFreeCertificateContext,
+    CertGetCertificateContextProperty, CertGetNameStringW, CertOpenStore, CryptAcquireContextW,
+    HCERTSTORE, HCRYPTPROV_LEGACY, PFN_AUTHENTICODE_DIGEST_SIGN, PFN_AUTHENTICODE_DIGEST_SIGN_EX,
+    PFN_AUTHENTICODE_DIGEST_SIGN_EX_WITHFILEHANDLE, PFN_AUTHENTICODE_DIGEST_SIGN_WITHFILEHANDLE,
+    PFXImportCertStore, PKCS12_ALWAYS_CNG_KSP, SIG_APPEND, SIGNER_ATTR_AUTHCODE,
     SIGNER_AUTHCODE_ATTR, SIGNER_CERT, SIGNER_CERT_0, SIGNER_CERT_POLICY_CHAIN, SIGNER_CERT_STORE,
     SIGNER_CERT_STORE_INFO, SIGNER_CONTEXT, SIGNER_DIGEST_SIGN_INFO, SIGNER_DIGEST_SIGN_INFO_0,
     SIGNER_FILE_INFO, SIGNER_NO_ATTR, SIGNER_PROVIDER_INFO, SIGNER_PROVIDER_INFO_0,
@@ -109,10 +109,15 @@ impl Drop for SubjectPackageFileHandle {
     }
 }
 
-/// Aggregates flat signing inputs for [`AppxSipClientData`] — same layout as SDK **`SIGNER_SIGN_EX2_PARAMS`**
-/// ([Programmatically sign an app package](https://learn.microsoft.com/en-us/windows/win32/appxpkg/how-to-programmatically-sign-a-package)).
+/// Aggregates flat signing inputs for [`AppxSipClientData`] — matches the **`SIGNER_SIGN_EX3_PARAMS`**
+/// layout inspected by `AppxSip.dll` (`Appx::Packaging::SipFunctionHelper::SignFile` and
+/// `CreateSignedPEFilesCatalog`) and populated by SDK `signtool.exe`.
+///
+/// Offset `+72` (`QWORD[9]`) is `p_digest_sign_info` (`SIGNER_DIGEST_SIGN_INFO*` when `/dlib` is
+/// active, null for standard embedded signing). `AppxSip.dll` forwards `APPX_SIP_CLIENT_DATA*`
+/// directly as the `pSipData` argument when signing nested `CodeIntegrity.cat` or bundle children.
 #[repr(C)]
-struct SignerSignEx2Params {
+struct SignerSignEx3Params {
     dw_flags: u32,
     p_subject_info: *const SIGNER_SUBJECT_INFO,
     p_signing_cert: *const SIGNER_CERT,
@@ -122,7 +127,7 @@ struct SignerSignEx2Params {
     psz_algorithm_oid: PCSTR,
     pwsz_timestamp_url: PCWSTR,
     p_crypt_attrs: *const CRYPT_ATTRIBUTES,
-    p_sip_data: *mut core::ffi::c_void,
+    p_digest_sign_info: *const core::ffi::c_void,
     p_signer_context: *mut *mut SIGNER_CONTEXT,
     p_crypto_policy: *const core::ffi::c_void,
     p_reserved: *const core::ffi::c_void,
@@ -132,7 +137,7 @@ struct SignerSignEx2Params {
 /// **`AppxSip.dll`** leaves **`SIP_SUBJECTINFO.pClientData`** unset and fails with **`0x80080209`**.
 #[repr(C)]
 struct AppxSipClientData {
-    p_signer_params: *const SignerSignEx2Params,
+    p_signer_params: *const SignerSignEx3Params,
     p_appx_sip_state: *mut core::ffi::c_void,
 }
 
@@ -149,7 +154,19 @@ unsafe fn release_appx_sip_com_object(p: *mut core::ffi::c_void) {
     }
 }
 
-pub(crate) struct CertStore(pub(crate) HCERTSTORE);
+struct TempCapiKeyContainer {
+    container_name: Vec<u16>,
+    prov_name: Vec<u16>,
+    prov_type: u32,
+}
+
+pub(crate) struct CertStore(pub(crate) HCERTSTORE, Vec<TempCapiKeyContainer>);
+
+impl CertStore {
+    fn plain(store: HCERTSTORE) -> Self {
+        Self(store, Vec::new())
+    }
+}
 
 impl Drop for CertStore {
     fn drop(&mut self) {
@@ -157,6 +174,20 @@ impl Drop for CertStore {
             // SAFETY: valid HCERTSTORE closed once.
             unsafe {
                 let _ = CertCloseStore(Some(self.0), 0);
+            }
+        }
+        for container in &self.1 {
+            let mut hprov = 0usize;
+            // SAFETY: deletes only the ephemeral random-GUID CAPI container created by
+            // `PFXImportCertStore(CRYPT_USER_KEYSET)` during this command.
+            unsafe {
+                let _ = CryptAcquireContextW(
+                    &mut hprov,
+                    PCWSTR(container.container_name.as_ptr()),
+                    PCWSTR(container.prov_name.as_ptr()),
+                    container.prov_type,
+                    CRYPT_DELETEKEYSET,
+                );
             }
         }
     }
@@ -437,6 +468,58 @@ If using Azure Artifact Signing: install .NET 8, deploy the full NuGet `bin\\{ar
     Ok((module, digest, blob, metadata_owned, export_name))
 }
 
+fn collect_temp_capi_containers(store: HCERTSTORE) -> Vec<TempCapiKeyContainer> {
+    let mut containers = Vec::new();
+    let mut prev: Option<*const CERT_CONTEXT> = None;
+    loop {
+        // SAFETY: `CertEnumCertificatesInStore` frees `prev` and returns the next context or null.
+        let ctx = unsafe { CertEnumCertificatesInStore(store, prev) };
+        if ctx.is_null() {
+            break;
+        }
+        prev = Some(ctx);
+        let mut cb: u32 = 0;
+        // SAFETY: size query on valid `CERT_CONTEXT`.
+        unsafe {
+            let _ =
+                CertGetCertificateContextProperty(ctx, CERT_KEY_PROV_INFO_PROP_ID, None, &mut cb);
+        }
+        if (cb as usize) < size_of::<CryptKeyProvInfoBlob>() {
+            continue;
+        }
+        let mut buf = vec![0u8; cb as usize];
+        // SAFETY: `buf` has `cb` bytes allocated.
+        if unsafe {
+            CertGetCertificateContextProperty(
+                ctx,
+                CERT_KEY_PROV_INFO_PROP_ID,
+                Some(buf.as_mut_ptr().cast()),
+                &mut cb,
+            )
+        }
+        .is_err()
+        {
+            continue;
+        }
+        // SAFETY: Crypt32 wrote a `CRYPT_KEY_PROV_INFO` header + wide strings into `buf`.
+        let info = unsafe { &*(buf.as_ptr() as *const CryptKeyProvInfoBlob) };
+        if info.dw_prov_type == 0 {
+            continue;
+        }
+        if let (Some(container_name), Some(prov_name)) = (
+            clone_wstr_with_nul(info.pwsz_container_name.cast_const()),
+            clone_wstr_with_nul(info.pwsz_prov_name.cast_const()),
+        ) {
+            containers.push(TempCapiKeyContainer {
+                container_name,
+                prov_name,
+                prov_type: info.dw_prov_type,
+            });
+        }
+    }
+    containers
+}
+
 fn load_store_from_pfx(args: &SignArgs, pfx_path: &std::path::Path) -> Result<CertStore> {
     let pfx = std::fs::read(pfx_path)
         .with_context(|| format!("failed to read PFX '{}'", pfx_path.display()))?;
@@ -445,13 +528,24 @@ fn load_store_from_pfx(args: &SignArgs, pfx_path: &std::path::Path) -> Result<Ce
         cbData: pfx.len() as u32,
         pbData: pfx.as_ptr() as *mut u8,
     };
-    // SAFETY: blob/password buffers valid during call.
-    // Include extended properties + CNG KSP so PKCS#12 keys work with SignerSignEx3 (esp. MSIX SIP).
-    let import_flags =
-        PKCS12_ALLOW_OVERWRITE_KEY | PKCS12_INCLUDE_EXTENDED_PROPERTIES | PKCS12_ALWAYS_CNG_KSP;
-    let store = unsafe { PFXImportCertStore(&blob, PCWSTR(password.as_ptr()), import_flags) }
-        .map_err(|e| anyhow!("PFXImportCertStore failed: {e}"))?;
-    Ok(CertStore(store))
+    // Match native `signtool.exe` (`0x140043686`): import RSA keys into a fresh CAPI user keyset
+    // (`CRYPT_USER_KEYSET = 0x1000`) rather than forcing `PKCS12_ALWAYS_CNG_KSP` (`0x200`),
+    // because `mssign32`'s `SignerSignEx2`/`SignerSignEx3` (and `AppxSip.dll`'s nested `SignFile`
+    // on `CodeIntegrity.cat` and bundle children) require a CAPI provider (`dwProvType != 0`)
+    // and fail with `CRYPT_E_NO_PROVIDER` (`0x80092006`) on CNG-only imports. Fall back to CNG
+    // only for PFX algorithms CAPI cannot import, and delete temporary CAPI containers on Drop.
+    let capi_flags = CRYPT_USER_KEYSET;
+    // SAFETY: `blob` and `password` outlive `PFXImportCertStore`.
+    let store = match unsafe { PFXImportCertStore(&blob, PCWSTR(password.as_ptr()), capi_flags) } {
+        Ok(s) => s,
+        Err(first_err) => {
+            let cng_flags = capi_flags | PKCS12_ALWAYS_CNG_KSP;
+            unsafe { PFXImportCertStore(&blob, PCWSTR(password.as_ptr()), cng_flags) }
+                .map_err(|_| anyhow!("PFXImportCertStore failed: {first_err}"))?
+        }
+    };
+    let temp_containers = collect_temp_capi_containers(store);
+    Ok(CertStore(store, temp_containers))
 }
 
 fn load_store_from_system(args: &SignArgs) -> Result<CertStore> {
@@ -472,7 +566,7 @@ fn load_store_from_system(args: &SignArgs) -> Result<CertStore> {
         )
     }
     .map_err(|e| anyhow!("CertOpenStore('{}') failed: {e}", args.store_name))?;
-    Ok(CertStore(store))
+    Ok(CertStore::plain(store))
 }
 
 fn load_store(args: &SignArgs) -> Result<CertStore> {
@@ -495,7 +589,7 @@ pub(crate) fn open_memory_cert_store() -> Result<CertStore> {
         )
     }
     .map_err(|e| anyhow!("CertOpenStore(MEMORY) failed: {e}"))?;
-    Ok(CertStore(store))
+    Ok(CertStore::plain(store))
 }
 
 pub(crate) fn adopt_cert(ctx: *mut CERT_CONTEXT) -> Result<CertContext> {
@@ -777,6 +871,7 @@ fn find_cert(store: HCERTSTORE, args: &SignArgs) -> Result<CertContext> {
     }
     let mut best_ctx: Option<CertContext> = None;
     let mut best_not_after: u64 = 0;
+    let mut best_has_key = false;
     let mut prev: Option<*const CERT_CONTEXT> = None;
     loop {
         // SAFETY: enumeration uses previous context pointer from this loop only.
@@ -794,12 +889,15 @@ fn find_cert(store: HCERTSTORE, args: &SignArgs) -> Result<CertContext> {
         };
         if has_private_key(current.cast_const()) {
             if cert_matches_signing_eku_prefix(current.cast_const(), args)?
-                && (best_ctx.is_none() || not_after > best_not_after)
+                && (!best_has_key || best_ctx.is_none() || not_after > best_not_after)
             {
                 best_ctx = Some(adopt_cert(current)?);
                 best_not_after = not_after;
+                best_has_key = true;
             }
-        } else if best_ctx.is_none() && cert_matches_signing_eku_prefix(current.cast_const(), args)?
+        } else if !best_has_key
+            && best_ctx.is_none()
+            && cert_matches_signing_eku_prefix(current.cast_const(), args)?
         {
             best_ctx = Some(adopt_cert(current)?);
             best_not_after = not_after;
@@ -912,6 +1010,14 @@ fn auto_signer_provider_scratch(
     }
     // SAFETY: Crypt32 returns a packed `CRYPT_KEY_PROV_INFO`; string pointers reference `buf`.
     let info = unsafe { &*(buf.as_ptr() as *const CryptKeyProvInfoBlob) };
+    // CNG KSP certificates (such as `PFXImportCertStore` with `PKCS12_ALWAYS_CNG_KSP`) report
+    // `dwProvType == 0`. Passing a CAPI `SIGNER_PROVIDER_INFO` with `dwProviderType == 0` into
+    // `SignerSignEx3` / `AppxSip.dll`'s nested `SignFile` fails with `CRYPT_E_NO_PROVIDER`
+    // (`0x80092006`); leaving `pProviderInfo` null lets `mssign32` acquire the CNG key directly
+    // from `pSigningCert` (matching native `signtool.exe`).
+    if info.dw_prov_type == 0 {
+        return Ok(None);
+    }
     let Some(container_name) = clone_wstr_with_nul(info.pwsz_container_name.cast_const()) else {
         return Ok(None);
     };
@@ -1038,6 +1144,12 @@ pub(crate) fn authenticode_sign_embedded(
     if args.append_signature {
         flags |= SIG_APPEND;
     }
+    if msix_family {
+        // Match native `signtool.exe` (`0x140047160`): `/ph` sets `SPC_INC_PE_PAGE_HASHES_FLAG`
+        // (`0x100`) so `AppxSip.dll` builds page-hashed `CodeIntegrity.cat`; otherwise set
+        // `SPC_EXC_PE_PAGE_HASHES_FLAG` (`0x10`).
+        flags |= SIGNER_SIGN_FLAGS(if args.page_hashes { 0x100 } else { 0x10 });
+    }
     let digest_ptr = digest_info.map(|d| {
         flags |= d.flags;
         d.ptr
@@ -1119,7 +1231,7 @@ pub(crate) fn authenticode_sign_embedded(
             p_appx_sip_state: std::ptr::null_mut(),
         };
         let appx_raw = std::ptr::addr_of_mut!(appx_sip_data);
-        let ex2_params = SignerSignEx2Params {
+        let ex3_params = SignerSignEx3Params {
             dw_flags: flags.0,
             p_subject_info: std::ptr::addr_of!(subject),
             p_signing_cert: std::ptr::addr_of!(signer_cert),
@@ -1129,15 +1241,17 @@ pub(crate) fn authenticode_sign_embedded(
             psz_algorithm_oid: oid_pcstr,
             pwsz_timestamp_url: url_pcwstr,
             p_crypt_attrs: std::ptr::null(),
-            p_sip_data: appx_raw.cast(),
+            p_digest_sign_info: digest_ptr
+                .map(|ptr| ptr.cast::<core::ffi::c_void>())
+                .unwrap_or(std::ptr::null()),
             p_signer_context: std::ptr::addr_of_mut!(signer_context),
             p_crypto_policy: std::ptr::null(),
             p_reserved: std::ptr::null(),
         };
-        // SAFETY: `AppxSipClientData` / `SignerSignEx2Params` match the MSVC layout Microsoft documents for
-        // package signing; circular `p_sip_data` ↔ `p_signer_params` pointers match the official sample.
+        // SAFETY: `AppxSipClientData` / `SignerSignEx3Params` match the MSVC layout `AppxSip.dll`
+        // and SDK `signtool.exe` use; `ex3_params` outlives the `SignerSignEx3` call.
         unsafe {
-            (*appx_raw).p_signer_params = &ex2_params;
+            (*appx_raw).p_signer_params = &ex3_params;
             let r = SignerSignEx3(
                 flags,
                 &subject,
@@ -1246,7 +1360,11 @@ pub fn sign_with_mssign32(
     log_sign_format(target, global);
     crate::win::sealing::validate_sign_constraints_paths(args, std::iter::once(target))?;
     let decoupled = resolved_decoupled_dlib_path(args).is_some() && args.dmdf.is_some();
-    if args.page_hashes && !decoupled {
+    let is_msix_family = matches!(
+        code_sign_format::detect(target),
+        code_sign_format::CodeSignFormat::MsixFamily
+    );
+    if args.page_hashes && !decoupled && !is_msix_family {
         return Err(anyhow!(
             "--page-hashes requires --dlib or --trusted-signing-dlib-root and --dmdf in this implementation"
         ));

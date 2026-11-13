@@ -102,6 +102,8 @@ fn unsigned_corpus_freshly_signed_with_native_signtool_verifies_with_psign() {
             .unwrap_or_else(|e| panic!("copy {}: {e}", entry.source_path));
 
         let sign = Command::new(&signtool)
+            .env("TEMP", temp.path())
+            .env("TMP", temp.path())
             .args(["sign", "/fd", "SHA256", "/f"])
             .arg(test_pfx_path(&repo))
             .args(["/p", TEST_PFX_PASSWORD])
@@ -170,9 +172,9 @@ fn unsigned_corpus_freshly_signed_with_psign_verifies_with_psign() {
     let signable: Vec<_> = manifest
         .signed
         .iter()
-        .filter(|entry| entry.state == "signed" && entry.family != "msix")
+        .filter(|entry| entry.state == "signed")
         .collect();
-    assert_eq!(signable.len(), 94, "psign fresh-sign coverage changed");
+    assert_eq!(signable.len(), 98, "psign fresh-sign coverage changed");
 
     for entry in signable {
         let dest = temp.path().join(format!("{}{}", entry.id, entry.extension));
@@ -180,6 +182,8 @@ fn unsigned_corpus_freshly_signed_with_psign_verifies_with_psign() {
             .unwrap_or_else(|e| panic!("copy {}: {e}", entry.source_path));
 
         let sign = psign()
+            .env("TEMP", temp.path())
+            .env("TMP", temp.path())
             .args(["sign", "--cert-sha1", &thumbprint, "--digest", "sha256"])
             .arg(&dest)
             .output()
@@ -188,32 +192,35 @@ fn unsigned_corpus_freshly_signed_with_psign_verifies_with_psign() {
         verify_embedded_with_psign(&dest, &entry.id);
     }
 
-    for entry in manifest
-        .signed
-        .iter()
-        .filter(|entry| entry.state == "signed" && entry.family == "msix")
-    {
-        let dest = temp.path().join(format!("{}{}", entry.id, entry.extension));
-        std::fs::copy(repo_path(&repo, &entry.source_path), &dest)
-            .unwrap_or_else(|e| panic!("copy {}: {e}", entry.source_path));
-        let sign = psign()
-            .args(["sign", "--cert-sha1", &thumbprint, "--digest", "sha256"])
-            .arg(&dest)
-            .output()
-            .unwrap_or_else(|e| panic!("run psign sign for {}: {e}", entry.id));
-        assert!(
-            !sign.status.success(),
-            "MSIX corpus row unexpectedly signed without timestamp: {}\n{}",
-            entry.id,
-            output_text(&sign)
-        );
-        assert!(
-            output_text(&sign).contains("must be timestamped"),
-            "MSIX timestamp requirement missing for {}\n{}",
-            entry.id,
-            output_text(&sign)
-        );
-    }
+    // Native `signtool timestamp` forbids post-sign timestamping on AppX/MSIX (both /t and /tr),
+    // requiring timestamps to be attached during `sign --timestamp-url` instead.
+    let signed_msix = temp.path().join("post-ts-check.msix");
+    std::fs::copy(
+        repo.join("tests\\fixtures\\generated-signed\\msix\\sample.msix"),
+        &signed_msix,
+    )
+    .expect("copy signed MSIX");
+    let ts_attempt = psign()
+        .args([
+            "timestamp",
+            "--rfc3161-url",
+            "http://127.0.0.1:9",
+            "--digest",
+            "sha256",
+        ])
+        .arg(&signed_msix)
+        .output()
+        .expect("run psign timestamp on MSIX");
+    assert!(
+        !ts_attempt.status.success(),
+        "post-sign timestamp on MSIX should be rejected\n{}",
+        output_text(&ts_attempt)
+    );
+    assert!(
+        output_text(&ts_attempt).contains("must be timestamped during signing"),
+        "expected sign-time timestamp diagnostic on MSIX\n{}",
+        output_text(&ts_attempt)
+    );
 }
 
 #[test]
@@ -435,7 +442,10 @@ struct TempDir {
 
 impl TempDir {
     fn new(prefix: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
+        let base = option_env!("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = base.join(format!(
             "{prefix}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()

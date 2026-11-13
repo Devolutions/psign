@@ -3,6 +3,7 @@
 //! This crate has **no `windows` dependency** — it is intended to build on Linux/macOS for unit tests
 //! and tooling. Signing and default verification still use Win32 in the main binary.
 
+pub mod appx_package;
 pub mod cab_digest;
 pub mod catalog_digest;
 pub mod esd_digest;

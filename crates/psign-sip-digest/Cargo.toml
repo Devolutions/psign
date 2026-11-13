@@ -19,6 +19,7 @@ der = { version = "0.7", features = ["derive"] }
 base64 = "0.22"
 cfb = "0.14"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 quick-xml = "0.38"
 # PKCS#1 v1.5 **RS256** prehash verification (Azure KV `keys/sign` / `signtool` parity) + CMS trust fallback.
 rsa = { version = "0.9.10", default-features = true, features = ["sha2"] }

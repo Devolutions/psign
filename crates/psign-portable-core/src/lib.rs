@@ -1,7 +1,5 @@
 //! Reusable portable Authenticode operations for CLI adapters and foreign-function callers.
 
-mod appx_zip;
-
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -27,8 +25,8 @@ use psign_sip_digest::verify_pe::{
     verify_pe_authenticode_digest_consistency_if_signed,
 };
 use psign_sip_digest::{
-    cab_digest, catalog_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7, ps_script,
-    rdp, timestamp, verify_script_digest_consistency, zip_authenticode,
+    appx_package, cab_digest, catalog_digest, msi_digest, msix_digest, pe_digest, pe_embed, pkcs7,
+    ps_script, rdp, timestamp, verify_script_digest_consistency, zip_authenticode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
@@ -1978,11 +1976,33 @@ fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<bool> 
         }
         return Ok(true);
     }
-    let staged = stage_msix_family_for_signature(&package, &ext, request.hash_algorithm)
-        .with_context(|| format!("stage {} for MSIX signing", request.path.display()))?;
     let provider = load_signing_provider(request)?;
+    let signed = sign_msix_bytes_with_provider(&package, &ext, request, &provider)
+        .with_context(|| format!("sign MSIX/AppX {}", request.path.display()))?;
+    std::fs::write(output_path, signed)
+        .with_context(|| format!("write {}", output_path.display()))?;
+    Ok(false)
+}
+
+fn sign_msix_bytes_with_provider(
+    package: &[u8],
+    ext: &str,
+    request: &PortableSignRequest,
+    provider: &SigningProvider,
+) -> Result<Vec<u8>> {
+    let prepared_bundle;
+    let source_bytes: &[u8] =
+        if is_msix_bundle_extension(ext) && bundle_has_unsigned_embedded_children(package)? {
+            prepared_bundle = sign_unsigned_bundle_children(package, request, provider)?;
+            &prepared_bundle
+        } else {
+            package
+        };
+
+    let staged = stage_msix_family_for_signature(source_bytes, ext, request.hash_algorithm)
+        .with_context(|| format!("stage {} for MSIX signing", request.path.display()))?;
     let digest_algorithm = request.hash_algorithm.into();
-    let indirect = pkcs7::msix_spc_indirect_data(&staged, &ext, digest_algorithm)?;
+    let indirect = pkcs7::msix_spc_indirect_data(&staged, ext, digest_algorithm)?;
     let pkcs7 = provider
         .create_authenticode_pkcs7(indirect, digest_algorithm)
         .with_context(|| {
@@ -1995,11 +2015,67 @@ fn sign_msix(request: &PortableSignRequest, output_path: &Path) -> Result<bool> 
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut p7x = b"PKCX".to_vec();
     p7x.extend_from_slice(&pkcs7);
-    let signed = replace_msix_signature_part(&staged, &p7x)
-        .with_context(|| format!("embed AppxSignature.p7x in {}", request.path.display()))?;
-    std::fs::write(output_path, signed)
-        .with_context(|| format!("write {}", output_path.display()))?;
+    replace_msix_signature_part(&staged, &p7x)
+        .with_context(|| format!("embed AppxSignature.p7x in {}", request.path.display()))
+}
+
+fn bundle_has_unsigned_embedded_children(package: &[u8]) -> Result<bool> {
+    let mut archive = ZipArchive::new(Cursor::new(package)).context("open MSIX bundle ZIP")?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).context("read MSIX bundle ZIP entry")?;
+        if entry.name().ends_with('/') || entry.name().ends_with('\\') {
+            continue;
+        }
+        let child_ext = entry
+            .name()
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(child_ext.as_str(), "msix" | "appx") {
+            let mut child_bytes = Vec::new();
+            entry.read_to_end(&mut child_bytes)?;
+            if !msix_digest::msix_signature_part_present(&child_bytes)? {
+                return Ok(true);
+            }
+        }
+    }
     Ok(false)
+}
+
+fn sign_unsigned_bundle_children(
+    package: &[u8],
+    request: &PortableSignRequest,
+    provider: &SigningProvider,
+) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+
+    let mut source = ZipArchive::new(Cursor::new(package)).context("open MSIX bundle ZIP")?;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = zip::write::FileOptions::default().compression_method(CompressionMethod::Stored);
+    for i in 0..source.len() {
+        let mut entry = source.by_index(i).context("read MSIX bundle ZIP entry")?;
+        let name = entry.name().replace('\\', "/");
+        if name.ends_with('/') {
+            continue;
+        }
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data)?;
+        let child_ext = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        let data = if matches!(child_ext.as_str(), "msix" | "appx")
+            && !msix_digest::msix_signature_part_present(&data)?
+        {
+            sign_msix_bytes_with_provider(&data, &child_ext, request, provider)
+                .with_context(|| format!("sign unsigned bundle child `{name}`"))?
+        } else {
+            data
+        };
+        writer.start_file(name, stored)?;
+        writer.write_all(&data)?;
+    }
+    Ok(writer.finish()?.into_inner())
 }
 
 fn sign_zip(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
@@ -3298,229 +3374,50 @@ fn looks_unsigned(message: &str) -> bool {
         || lower.contains("signature block")
 }
 
+fn hash_kind_from_portable_digest(
+    digest_algorithm: PortableDigestAlgorithm,
+) -> pe_digest::PeAuthenticodeHashKind {
+    match digest_algorithm {
+        PortableDigestAlgorithm::Sha256 => pe_digest::PeAuthenticodeHashKind::Sha256,
+        PortableDigestAlgorithm::Sha384 => pe_digest::PeAuthenticodeHashKind::Sha384,
+        PortableDigestAlgorithm::Sha512 => pe_digest::PeAuthenticodeHashKind::Sha512,
+    }
+}
+
 fn stage_msix_family_for_signature(
     package: &[u8],
     ext: &str,
     digest_algorithm: PortableDigestAlgorithm,
 ) -> Result<Vec<u8>> {
-    if is_msix_bundle_extension(ext) {
-        stage_msix_bundle_for_signature(package, digest_algorithm)
-    } else {
-        stage_flat_msix_for_signature(package, digest_algorithm)
-    }
+    appx_package::stage_msix_family_for_signature(
+        package,
+        ext,
+        hash_kind_from_portable_digest(digest_algorithm),
+    )
 }
 
-fn stage_flat_msix_for_signature(
-    package: &[u8],
-    digest_algorithm: PortableDigestAlgorithm,
-) -> Result<Vec<u8>> {
-    let mut source = ZipArchive::new(Cursor::new(package)).context("open MSIX ZIP")?;
-    let mut payloads = Vec::new();
-    let mut content_types = None;
-
-    for i in 0..source.len() {
-        let mut entry = source.by_index(i).context("read MSIX ZIP entry")?;
-        let name = entry.name().replace('\\', "/");
-        if name.ends_with('/') {
-            continue;
-        }
-        match name.as_str() {
-            "[Content_Types].xml" => {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                content_types = Some(data);
-            }
-            "AppxBlockMap.xml" | "AppxSignature.p7x" | "AppxMetadata/CodeIntegrity.cat" => {}
-            _ => {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                payloads.push((name, data));
-            }
-        }
-    }
-
-    if !payloads.iter().any(|(name, _)| name == "AppxManifest.xml") {
-        bail!("flat MSIX package is missing AppxManifest.xml");
-    }
-    let part_names: Vec<&str> = payloads.iter().map(|(name, _)| name.as_str()).collect();
-    let content_types =
-        msix_digest::appx_content_types_for_signing(content_types.as_deref(), &part_names, false)?;
-    let mut entries = payloads
-        .iter()
-        .map(|(name, data)| appx_zip::AppxZipEntry::payload(name.as_str(), data))
-        .collect::<Result<Vec<_>>>()?;
-    let block_map = build_flat_msix_block_map(&payloads, &entries, digest_algorithm)?;
-
-    entries.push(appx_zip::AppxZipEntry::payload(
-        "AppxBlockMap.xml",
-        block_map.as_bytes(),
-    )?);
-    entries.push(appx_zip::AppxZipEntry::payload(
-        "[Content_Types].xml",
-        content_types.as_bytes(),
-    )?);
-    entries.push(appx_zip::AppxZipEntry::stored(
-        "AppxSignature.p7x",
-        b"PKCX".to_vec(),
-    ));
-    appx_zip::write_appx_zip(&entries)
-}
-
-/// Stage a `.msixbundle` / `.appxbundle` for final AppX SIP signing.
-///
-/// Native `AppxBundleSip` semantics: the block map covers **only** the bundle manifest
-/// (`AppxMetadata/AppxBundleManifest.xml`, listed with backslash separators and a per-block
-/// `Size`), child packages stay byte-identical ZIP payload entries, and the signature part is
-/// excluded from all AXPC/AXCD digest pieces. Staged output: child payloads + bundle manifest,
-/// then `AppxBlockMap.xml`, `[Content_Types].xml`, and a `PKCX` placeholder signature part.
+#[cfg(test)]
 fn stage_msix_bundle_for_signature(
     package: &[u8],
     digest_algorithm: PortableDigestAlgorithm,
 ) -> Result<Vec<u8>> {
-    let mut source = ZipArchive::new(Cursor::new(package)).context("open MSIX bundle ZIP")?;
-    let mut child_payloads: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut bundle_manifest: Option<Vec<u8>> = None;
-    let mut bundle_content_types: Option<Vec<u8>> = None;
-
-    for i in 0..source.len() {
-        let mut entry = source.by_index(i).context("read MSIX bundle ZIP entry")?;
-        let name = entry.name().replace('\\', "/");
-        if name.ends_with('/') {
-            continue;
-        }
-        match name.as_str() {
-            "AppxMetadata/AppxBundleManifest.xml" => {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                bundle_manifest = Some(data);
-            }
-            "[Content_Types].xml" => {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                bundle_content_types = Some(data);
-            }
-            "AppxBlockMap.xml"
-            | "AppxSignature.p7x"
-            | "AppxManifest.xml"
-            | "AppxMetadata/CodeIntegrity.cat" => {}
-            _ => {
-                let mut data = Vec::new();
-                entry.read_to_end(&mut data)?;
-                child_payloads.push((name, data));
-            }
-        }
-    }
-
-    let manifest = bundle_manifest.ok_or_else(|| {
-        anyhow::anyhow!("MSIX bundle is missing AppxMetadata/AppxBundleManifest.xml")
-    })?;
-    let mut part_names: Vec<&str> = child_payloads
-        .iter()
-        .map(|(name, _)| name.as_str())
-        .collect();
-    part_names.push("AppxMetadata/AppxBundleManifest.xml");
-    let content_types = msix_digest::appx_content_types_for_signing(
-        bundle_content_types.as_deref(),
-        &part_names,
-        true,
-    )?;
-    for (name, _data) in &child_payloads {
-        let child_ext = name
-            .rsplit_once('.')
-            .map(|(_, ext)| ext.to_ascii_lowercase())
-            .unwrap_or_default();
-        if msix_digest::is_encrypted_msix_extension(&child_ext) {
-            bail!(
-                "cleartext MSIX bundle contains encrypted child package `{name}`; encrypted children require Windows AppxSip OS delegation"
-            );
-        }
-    }
-    let block_map = build_msix_bundle_block_map(&manifest, digest_algorithm)?;
-
-    // Child packages and the bundle manifest stay stored: children must remain
-    // byte-identical, and the bundle block map lists the manifest's stored block sizes.
-    let mut entries: Vec<appx_zip::AppxZipEntry> = child_payloads
-        .into_iter()
-        .map(|(name, data)| appx_zip::AppxZipEntry::stored(name, data))
-        .collect();
-    entries.push(appx_zip::AppxZipEntry::stored(
-        "AppxMetadata/AppxBundleManifest.xml",
-        manifest,
-    ));
-    entries.push(appx_zip::AppxZipEntry::payload(
-        "AppxBlockMap.xml",
-        block_map.as_bytes(),
-    )?);
-    entries.push(appx_zip::AppxZipEntry::payload(
-        "[Content_Types].xml",
-        content_types.as_bytes(),
-    )?);
-    entries.push(appx_zip::AppxZipEntry::stored(
-        "AppxSignature.p7x",
-        b"PKCX".to_vec(),
-    ));
-    appx_zip::write_appx_zip(&entries)
+    appx_package::stage_msix_family_for_signature(
+        package,
+        "msixbundle",
+        hash_kind_from_portable_digest(digest_algorithm),
+    )
 }
 
-/// Native bundle block maps list exactly one `File` — the bundle manifest — using
-/// backslash separators, the manifest's uncompressed size, and a per-block `Size`.
-fn build_msix_bundle_block_map(
+#[cfg(test)]
+fn bundle_manifest_for_stored_children(
     manifest: &[u8],
-    digest_algorithm: PortableDigestAlgorithm,
-) -> Result<String> {
-    let hash_method = match digest_algorithm {
-        PortableDigestAlgorithm::Sha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
-        PortableDigestAlgorithm::Sha384 => "http://www.w3.org/2004/xmldsig-more#sha384",
-        PortableDigestAlgorithm::Sha512 => "http://www.w3.org/2001/04/xmlenc#sha512",
-    };
-    let mut xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="{hash_method}"><File Name="AppxMetadata\AppxBundleManifest.xml" Size="{}" LfhSize="65">"#,
-        manifest.len()
-    );
-    for chunk in manifest.chunks(64 * 1024) {
-        let digest = match digest_algorithm {
-            PortableDigestAlgorithm::Sha256 => sha2::Sha256::digest(chunk).to_vec(),
-            PortableDigestAlgorithm::Sha384 => sha2::Sha384::digest(chunk).to_vec(),
-            PortableDigestAlgorithm::Sha512 => sha2::Sha512::digest(chunk).to_vec(),
-        };
-        let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
-        xml.push_str(&format!(
-            r#"<Block Hash="{encoded}" Size="{}"/>"#,
-            chunk.len()
-        ));
-    }
-    xml.push_str("</File></BlockMap>");
-    Ok(xml)
+    children: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>> {
+    appx_package::bundle_manifest_for_stored_children(manifest, children)
 }
 
-/// Rewrite the staged package with the real `AppxSignature.p7x`, copying every other entry's
-/// compressed bytes verbatim so the AXPC / AXCD digests signed over the staged package hold.
 fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
-    let mut source = ZipArchive::new(Cursor::new(package)).context("open staged MSIX ZIP")?;
-    let mut entries = Vec::with_capacity(source.len());
-    for i in 0..source.len() {
-        let mut entry = source
-            .by_index_raw(i)
-            .context("read staged MSIX ZIP entry")?;
-        let name = entry.name().to_owned();
-        if name == "AppxSignature.p7x" {
-            entries.push(appx_zip::AppxZipEntry::stored(name, p7x.to_vec()));
-            continue;
-        }
-        let method = match entry.compression() {
-            CompressionMethod::Stored => 0,
-            CompressionMethod::Deflated => 8,
-            other => bail!("unsupported compression {other:?} in staged MSIX entry `{name}`"),
-        };
-        let crc32 = entry.crc32();
-        let size = entry.size();
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data)?;
-        entries.push(appx_zip::AppxZipEntry::raw(
-            name, method, crc32, size, data,
-        )?);
-    }
-    appx_zip::write_appx_zip(&entries)
+    appx_package::replace_msix_signature_part(package, p7x)
 }
 
 fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
@@ -3534,59 +3431,6 @@ fn msix_signature_pkcs7_der(package: &[u8]) -> Result<Vec<u8>> {
         .strip_prefix(b"PKCX")
         .ok_or_else(|| anyhow::anyhow!("AppxSignature.p7x missing PKCX prefix"))?;
     Ok(pkcs7.to_vec())
-}
-
-fn build_flat_msix_block_map(
-    payloads: &[(String, Vec<u8>)],
-    entries: &[appx_zip::AppxZipEntry],
-    digest_algorithm: PortableDigestAlgorithm,
-) -> Result<String> {
-    let hash_method = match digest_algorithm {
-        PortableDigestAlgorithm::Sha256 => "http://www.w3.org/2001/04/xmlenc#sha256",
-        PortableDigestAlgorithm::Sha384 => "http://www.w3.org/2001/04/xmldsig-more#sha384",
-        PortableDigestAlgorithm::Sha512 => "http://www.w3.org/2001/04/xmlenc#sha512",
-    };
-    let mut xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?><BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap" HashMethod="{hash_method}">"#
-    );
-    for ((name, data), entry) in payloads.iter().zip(entries) {
-        // `AppxBlockMap.xml` `File/@Name` uses Windows-style backslash separators
-        // (matching native `AppxSip`/`makeappx` output), even though the physical
-        // ZIP entry name uses forward slashes. Getting this wrong makes real Windows
-        // AppX package validation fail with 0x80080205 ("block map is not valid").
-        let block_map_name = name.replace('/', "\\");
-        let escaped_name = xml_escape_attr(&block_map_name);
-        xml.push_str(&format!(
-            r#"<File Name="{escaped_name}" Size="{}" LfhSize="{}">"#,
-            data.len(),
-            entry.local_header_size()
-        ));
-        // Deflated entries list each block's compressed size, as makeappx does.
-        let block_sizes = entry.block_sizes.as_deref().unwrap_or_default();
-        for (index, chunk) in data.chunks(appx_zip::APPX_BLOCK_SIZE).enumerate() {
-            let digest = match digest_algorithm {
-                PortableDigestAlgorithm::Sha256 => sha2::Sha256::digest(chunk).to_vec(),
-                PortableDigestAlgorithm::Sha384 => sha2::Sha384::digest(chunk).to_vec(),
-                PortableDigestAlgorithm::Sha512 => sha2::Sha512::digest(chunk).to_vec(),
-            };
-            let encoded = base64::engine::general_purpose::STANDARD.encode(digest);
-            match block_sizes.get(index) {
-                Some(size) => xml.push_str(&format!(r#"<Block Hash="{encoded}" Size="{size}"/>"#)),
-                None => xml.push_str(&format!(r#"<Block Hash="{encoded}"/>"#)),
-            }
-        }
-        xml.push_str("</File>");
-    }
-    xml.push_str("</BlockMap>");
-    Ok(xml)
-}
-
-fn xml_escape_attr(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn der_encode_octet_string(data: &[u8]) -> Result<Vec<u8>> {
@@ -3937,6 +3781,72 @@ mod tests {
     }
 
     #[test]
+    fn staged_bundle_manifest_offsets_match_child_payloads() {
+        use std::io::Write as _;
+
+        let children = [
+            ("x64 & test.msix", b"first child".as_slice()),
+            ("arm64-\u{e9}.msix", b"second child".as_slice()),
+        ];
+        let manifest = concat!(
+            r#"<Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle"><Packages>"#,
+            r#"<Package FileName="arm64-&#233;.msix" Offset="9999" Size="1"/>"#,
+            r#"<Package FileName="x64 &amp; test.msix" Offset="8888" Size="2"><Resources/></Package>"#,
+            "</Packages></Bundle>"
+        );
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in children
+            .into_iter()
+            .chain([("AppxMetadata/AppxBundleManifest.xml", manifest.as_bytes())])
+        {
+            writer
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(data).unwrap();
+        }
+        let source = writer.finish().unwrap().into_inner();
+        let staged =
+            stage_msix_bundle_for_signature(&source, PortableDigestAlgorithm::Sha256).unwrap();
+        let signed_layout = replace_msix_signature_part(&staged, b"PKCX replacement").unwrap();
+        for package in [&staged, &signed_layout] {
+            let mut archive = ZipArchive::new(Cursor::new(package)).unwrap();
+            let mut xml = String::new();
+            archive
+                .by_name("AppxMetadata/AppxBundleManifest.xml")
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            let mut expected_offset = 0u64;
+            for ((name, data), (opc_name, escaped_name)) in children.into_iter().zip([
+                ("x64%20%26%20test.msix", "x64 &amp; test.msix"),
+                ("arm64-%C3%A9.msix", "arm64-&#233;.msix"),
+            ]) {
+                let mut entry = archive.by_name(opc_name).unwrap();
+                expected_offset += 30 + opc_name.len() as u64;
+                assert_eq!(entry.data_start(), expected_offset, "{name}");
+                assert!(
+                    xml.contains(&format!(
+                        r#"FileName="{escaped_name}" Offset="{expected_offset}" Size="{}""#,
+                        data.len()
+                    )),
+                    "manifest must locate {name} in the rewritten ZIP: {xml}"
+                );
+                let mut actual = Vec::new();
+                entry.read_to_end(&mut actual).unwrap();
+                assert_eq!(actual, data, "{name} bytes must not change");
+                expected_offset += data.len() as u64;
+            }
+        }
+        assert!(
+            bundle_manifest_for_stored_children(manifest.as_bytes(), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("missing from ZIP"),
+            "missing child references must fail before signing"
+        );
+    }
+
+    #[test]
     fn staged_and_signed_msix_use_appx_zip64_layout() {
         let fixture_dir = PathBuf::from("../../tests/fixtures/devolutions-authenticode");
         let temp_dir = std::env::temp_dir().join(format!(
@@ -3949,7 +3859,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&temp_dir).expect("create temp dir");
 
-        for name in ["sample.msix", "sample.appx", "sample.msixbundle"] {
+        for name in [
+            "sample.msix",
+            "sample.appx",
+            "sample.msixbundle",
+            "sample.appxbundle",
+        ] {
             let source = PathBuf::from("../../tests/fixtures/generated-unsigned/msix").join(name);
             let ext = name.rsplit_once('.').unwrap().1;
             let package = std::fs::read(&source).expect("read fixture");
@@ -3957,11 +3872,6 @@ mod tests {
                 stage_msix_family_for_signature(&package, ext, PortableDigestAlgorithm::Sha256)
                     .expect("stage package");
             assert_appx_zip_layout(&staged, &format!("staged {name}"));
-            if is_msix_bundle_extension(ext) {
-                // Bundle signing requires signed children, which this unsigned fixture
-                // lacks; the final embed uses the same `replace_msix_signature_part`.
-                continue;
-            }
 
             let output = temp_dir.join(name);
             portable_sign(PortableSignRequest {
@@ -4084,7 +3994,7 @@ mod tests {
         let blocks: Vec<&str> = index_file.split("<Block ").skip(1).collect();
         assert_eq!(
             blocks.len(),
-            index_db.len().div_ceil(appx_zip::APPX_BLOCK_SIZE)
+            index_db.len().div_ceil(appx_package::APPX_BLOCK_SIZE)
         );
         assert!(
             blocks.iter().all(|block| block.contains(" Size=\"")),

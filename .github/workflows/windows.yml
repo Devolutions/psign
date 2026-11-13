@@ -41,6 +41,8 @@ jobs:
         run: cargo test -p psign --test cli_pe_digest --locked
 
       - name: Portable MSIX/AppX native makeappx.exe validation
+        env:
+          PSIGN_REQUIRE_MAKEAPPX: "1"
         run: cargo test -p psign --test msix_native_makeappx --locked
 
       - name: Cross-CLI parity (portable verify-pe vs Windows rust-sip PE digest routine)

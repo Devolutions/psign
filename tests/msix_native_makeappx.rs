@@ -11,6 +11,8 @@
 //! shells out to the real Windows SDK `makeappx.exe unpack` tool — the same
 //! validator behind `Add-AppxPackage`'s block-map check — against a package
 //! freshly signed by `psign-tool --mode portable sign`.
+//! Multi-package bundles are also checked with `makeappx unbundle`: their signed
+//! manifest offsets must track any change to the ZIP layout during signing.
 //!
 //! The test is skipped (not failed) when `makeappx.exe` cannot be located,
 //! since not every Windows host is guaranteed to have the Windows SDK
@@ -59,8 +61,52 @@ fn which_in_path(exe: &str) -> Result<PathBuf, ()> {
     Err(())
 }
 
+fn require_or_find_makeappx() -> Option<PathBuf> {
+    let found = find_makeappx();
+    if found.is_none()
+        && std::env::var("PSIGN_REQUIRE_MAKEAPPX")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        panic!("makeappx.exe not found while PSIGN_REQUIRE_MAKEAPPX is set");
+    }
+    found
+}
+
+fn find_signtool() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("SIGNTOOL_EXE") {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(path) = which_in_path("signtool.exe") {
+        return Some(path);
+    }
+    for program_files in ["C:\\Program Files (x86)", "C:\\Program Files"] {
+        let bin_root = Path::new(program_files).join("Windows Kits\\10\\bin");
+        let Ok(entries) = std::fs::read_dir(&bin_root) else {
+            continue;
+        };
+        let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        versions.sort();
+        for version_dir in versions.into_iter().rev() {
+            for arch in ["x64", "x86", "arm64"] {
+                let candidate = version_dir.join(arch).join("signtool.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn unique_temp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let base = option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!(
         "psign-makeappx-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -74,7 +120,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 
 #[test]
 fn portable_signed_flat_msix_unpacks_cleanly_with_real_makeappx() {
-    let Some(makeappx) = find_makeappx() else {
+    let Some(makeappx) = require_or_find_makeappx() else {
         eprintln!(
             "skipping: makeappx.exe not found (Windows SDK not installed); \
              this test only runs where the real Windows AppX validator is available"
@@ -161,8 +207,8 @@ fn run_powershell(script: &str) -> String {
 /// fail only on chain trust (CERT_E_UNTRUSTEDROOT, **0x800B0109**), never on the digest,
 /// and `makeappx unpack` must accept the block map.
 #[test]
-fn portable_signed_makeappx_msix_fails_windows_verify_only_on_untrusted_root() {
-    let Some(makeappx) = find_makeappx() else {
+fn portable_signed_makeappx_packages_and_bundle_fail_windows_verify_only_on_untrusted_root() {
+    let Some(makeappx) = require_or_find_makeappx() else {
         eprintln!("skipping: makeappx.exe not found (Windows SDK not installed)");
         return;
     };
@@ -242,6 +288,7 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
     for (input, digest) in [
         (&unsigned, "SHA256"),
         (&unsigned, "SHA384"),
+        (&unsigned, "SHA512"),
         (&plain_zip, "SHA256"),
     ] {
         let label = format!(
@@ -314,6 +361,651 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
             .assert()
             .success();
     }
+
+    // makeappx bundle uses ZIP64 data descriptors between child packages. Dropping
+    // those without updating the manifest offsets corrupts every child after the first.
+    let children = temp_dir.join("children");
+    std::fs::create_dir(&children).expect("create bundle input");
+    std::fs::copy(
+        temp_dir.join("signed-unsigned-SHA256.msix"),
+        children.join("x64.msix"),
+    )
+    .expect("copy signed x64 package");
+    let manifest = std::fs::read_to_string(layout.join("AppxManifest.xml")).unwrap();
+    std::fs::write(
+        layout.join("AppxManifest.xml"),
+        manifest.replace(
+            "ProcessorArchitecture=\"x64\"",
+            "ProcessorArchitecture=\"arm64\"",
+        ),
+    )
+    .unwrap();
+    let arm64 = children.join("arm64.msix");
+    let pack = StdCommand::new(&makeappx)
+        .args(["pack", "/h", "sha256", "/o", "/d"])
+        .arg(&layout)
+        .arg("/p")
+        .arg(&arm64)
+        .output()
+        .expect("pack arm64 package");
+    assert!(
+        pack.status.success(),
+        "pack arm64: {}{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .args(["--mode", "portable", "sign", "--pfx"])
+        .arg(&pfx)
+        .args(["--password", "throwaway"])
+        .arg(&arm64)
+        .assert()
+        .success();
+
+    let bundle = temp_dir.join("multi.msixbundle");
+    let pack = StdCommand::new(&makeappx)
+        .args(["bundle", "/o", "/d"])
+        .arg(&children)
+        .arg("/p")
+        .arg(&bundle)
+        .output()
+        .expect("makeappx bundle");
+    assert!(
+        pack.status.success(),
+        "bundle: {}{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+
+    // Build a genuine .appxbundle from real .appx children (not a renamed .msixbundle).
+    let appx_children = temp_dir.join("appx-children");
+    std::fs::create_dir(&appx_children).expect("create appx bundle input");
+    for arch in ["x86", "x64"] {
+        std::fs::write(
+            layout.join("AppxManifest.xml"),
+            manifest.replace(
+                "ProcessorArchitecture=\"x64\"",
+                &format!("ProcessorArchitecture=\"{arch}\""),
+            ),
+        )
+        .unwrap();
+        let child_appx = appx_children.join(format!("{arch}.appx"));
+        let pack = StdCommand::new(&makeappx)
+            .args(["pack", "/h", "sha256", "/o", "/d"])
+            .arg(&layout)
+            .arg("/p")
+            .arg(&child_appx)
+            .output()
+            .expect("pack child .appx");
+        assert!(
+            pack.status.success(),
+            "pack {arch}.appx: {}{}",
+            String::from_utf8_lossy(&pack.stdout),
+            String::from_utf8_lossy(&pack.stderr)
+        );
+        Command::cargo_bin("psign-tool")
+            .unwrap()
+            .args(["--mode", "portable", "sign", "--pfx"])
+            .arg(&pfx)
+            .args(["--password", "throwaway"])
+            .arg(&child_appx)
+            .assert()
+            .success();
+    }
+    let appx_bundle = temp_dir.join("multi.appxbundle");
+    let pack = StdCommand::new(&makeappx)
+        .args(["bundle", "/o", "/d"])
+        .arg(&appx_children)
+        .arg("/p")
+        .arg(&appx_bundle)
+        .output()
+        .expect("makeappx bundle .appxbundle");
+    assert!(
+        pack.status.success(),
+        "bundle .appxbundle: {}{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+
+    for (extension, src_bundle, src_children_dir, expected_names) in [
+        ("msixbundle", &bundle, &children, ["x64.msix", "arm64.msix"]),
+        (
+            "appxbundle",
+            &appx_bundle,
+            &appx_children,
+            ["x86.appx", "x64.appx"],
+        ),
+    ] {
+        let signed = temp_dir.join(format!("signed.{extension}"));
+        std::fs::copy(src_bundle, &signed).unwrap();
+        // Verify BOTH pass 1 (first sign from MakeAppx descriptor layout) AND pass 2 (re-sign).
+        for pass in 1..=2 {
+            Command::cargo_bin("psign-tool")
+                .unwrap()
+                .args(["--mode", "portable", "sign", "--pfx"])
+                .arg(&pfx)
+                .args(["--password", "throwaway"])
+                .arg(&signed)
+                .assert()
+                .success();
+
+            let extracted = temp_dir.join(format!("unbundled-{extension}-pass-{pass}"));
+            let unpack = StdCommand::new(&makeappx)
+                .args(["unbundle", "/o", "/p"])
+                .arg(&signed)
+                .arg("/d")
+                .arg(&extracted)
+                .output()
+                .expect("makeappx unbundle");
+            assert!(
+                unpack.status.success(),
+                "signed {extension} (pass {pass}) has invalid child offsets: {}{}",
+                String::from_utf8_lossy(&unpack.stdout),
+                String::from_utf8_lossy(&unpack.stderr)
+            );
+            for child in expected_names {
+                assert_eq!(
+                    std::fs::read(extracted.join(child)).unwrap(),
+                    std::fs::read(src_children_dir.join(child)).unwrap(),
+                    "{extension} (pass {pass}): extracted {child} must stay byte-identical"
+                );
+            }
+            let verify = Command::cargo_bin("psign-tool")
+                .unwrap()
+                .args(["verify", "/pa"])
+                .arg(&signed)
+                .output()
+                .expect("Windows bundle verification");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&verify.stdout),
+                String::from_utf8_lossy(&verify.stderr)
+            );
+            assert!(
+                text.contains("0x800B0109") && !text.contains("0x80096010"),
+                "{extension} (pass {pass}): Windows must accept the digest and reject only the untrusted test root: {text}"
+            );
+            Command::cargo_bin("psign-tool")
+                .unwrap()
+                .args(["portable", "trust-verify-msix", "--trusted-ca"])
+                .arg(&cer)
+                .arg(&signed)
+                .assert()
+                .success();
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(temp_dir);
+}
+
+#[derive(serde::Deserialize)]
+struct EdgeManifest {
+    entries: Vec<EdgeFixture>,
+}
+
+#[derive(serde::Deserialize)]
+struct EdgeFixture {
+    id: String,
+    extension: String,
+    digest: String,
+    is_sparse_bundle: bool,
+    is_encrypted: bool,
+    is_upload_container: bool,
+    expected_windows_verify: String,
+    expected_windows_sign: String,
+    unsigned_path: Option<String>,
+    signed_path: Option<String>,
+}
+
+fn devolutions_test_ca_trusted() -> bool {
+    const CA_THUMBPRINT: &str = "247E24EE83DC1A29110A2C1A2A5D4DFEFAC369B7";
+    for args in [
+        &["-store", "Root", CA_THUMBPRINT][..],
+        &["-user", "-store", "Root", CA_THUMBPRINT][..],
+    ] {
+        if StdCommand::new("certutil")
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn assert_windows_verify_ok_or_untrusted_root(
+    path: &Path,
+    ca_trusted: bool,
+    extra: &[&str],
+    label: &str,
+) {
+    let mut cmd = Command::cargo_bin("psign-tool").expect("psign-tool");
+    cmd.args(["verify", "--policy", "pa", "--allow-test-root"]);
+    cmd.args(extra);
+    cmd.arg(path);
+    let out = cmd.output().expect("run psign verify");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if ca_trusted {
+        assert!(
+            out.status.success(),
+            "{label}: Windows psign verify failed:\n{text}"
+        );
+    } else {
+        assert!(
+            text.contains("0x800B0109") && !text.contains("0x80096010"),
+            "{label}: expected CERT_E_UNTRUSTEDROOT (not bad digest):\n{text}"
+        );
+    }
+}
+
+#[test]
+fn msix_edge_case_corpus_verifies_and_roundtrips_across_windows_and_portable_modes() {
+    let Some(makeappx) = require_or_find_makeappx() else {
+        eprintln!("skipping: makeappx.exe not found");
+        return;
+    };
+    let signtool = find_signtool();
+    let ca_trusted = devolutions_test_ca_trusted();
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pfx =
+        manifest_dir.join("tests/fixtures/devolutions-authenticode/authenticode-test-cert.pfx");
+    let ca = manifest_dir.join("tests/fixtures/devolutions-authenticode/authenticode-test-ca.crt");
+    let edge_manifest: EdgeManifest = serde_json::from_str(include_str!(
+        "fixtures/msix-edge-cases/msix-edge-case-fixtures.json"
+    ))
+    .expect("parse msix-edge-case-fixtures.json");
+
+    let temp_dir = unique_temp_dir("edge-cross-mode");
+
+    // 1. Validate every committed signed fixture in Windows mode (WinVerifyTrust + MakeAppx).
+    for entry in &edge_manifest.entries {
+        match entry.expected_windows_verify.as_str() {
+            "valid" => {
+                let signed = manifest_dir.join(entry.signed_path.as_deref().unwrap());
+                let extra: &[&str] = if !entry.is_encrypted
+                    && matches!(
+                        entry.extension.as_str(),
+                        ".msix" | ".appx" | ".msixbundle" | ".appxbundle"
+                    ) {
+                    &["--rust-sip-msix-digest-check"]
+                } else {
+                    &[]
+                };
+                assert_windows_verify_ok_or_untrusted_root(&signed, ca_trusted, extra, &entry.id);
+
+                if entry.is_encrypted {
+                    // Forcing the cleartext Rust SIP digest check on real /kt encrypted packages
+                    // must fail explicitly rather than silently passing.
+                    Command::cargo_bin("psign-tool")
+                        .unwrap()
+                        .args([
+                            "verify",
+                            "--policy",
+                            "pa",
+                            "--allow-test-root",
+                            "--rust-sip-msix-digest-check",
+                        ])
+                        .arg(&signed)
+                        .assert()
+                        .failure();
+                } else if !entry.is_sparse_bundle
+                    && matches!(
+                        entry.extension.as_str(),
+                        ".msix" | ".appx" | ".msixbundle" | ".appxbundle"
+                    )
+                {
+                    let subcmd = if entry.extension.ends_with("bundle") {
+                        "unbundle"
+                    } else {
+                        "unpack"
+                    };
+                    let out_dir = temp_dir.join(format!("committed-{subcmd}-{}", entry.id));
+                    let res = StdCommand::new(&makeappx)
+                        .args([subcmd, "/o", "/p"])
+                        .arg(&signed)
+                        .arg("/d")
+                        .arg(&out_dir)
+                        .output()
+                        .expect("run makeappx on committed signed fixture");
+                    assert!(
+                        res.status.success(),
+                        "{}: makeappx {subcmd} failed:\n{}{}",
+                        entry.id,
+                        String::from_utf8_lossy(&res.stdout),
+                        String::from_utf8_lossy(&res.stderr)
+                    );
+                }
+            }
+            "detached-valid" => {
+                let content = manifest_dir.join(entry.unsigned_path.as_deref().unwrap());
+                let sig = manifest_dir.join(entry.signed_path.as_deref().unwrap());
+                let out = Command::cargo_bin("psign-tool")
+                    .unwrap()
+                    .args(["verify", "--policy", "pa", "--allow-test-root"])
+                    .arg(&content)
+                    .arg("--detached-pkcs7")
+                    .arg(&sig)
+                    .output()
+                    .unwrap();
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if ca_trusted {
+                    assert!(
+                        out.status.success(),
+                        "{}: detached verify failed:\n{text}",
+                        entry.id
+                    );
+                } else {
+                    assert!(text.contains("0x800B0109"), "{}: {text}", entry.id);
+                }
+            }
+            "reject-upload-container" => {
+                let target = manifest_dir.join(entry.unsigned_path.as_deref().unwrap());
+                Command::cargo_bin("psign-tool")
+                    .unwrap()
+                    .args(["verify", "--policy", "pa"])
+                    .arg(&target)
+                    .assert()
+                    .failure();
+            }
+            other => panic!("unexpected expected_windows_verify `{other}`"),
+        }
+    }
+
+    // 2. Portable sign -> Windows MakeAppx + WinVerifyTrust + signtool cross-mode validation.
+    for entry in &edge_manifest.entries {
+        if entry.is_encrypted || entry.is_upload_container {
+            continue;
+        }
+        let Some(unsigned_rel) = &entry.unsigned_path else {
+            continue;
+        };
+        if !matches!(
+            entry.extension.as_str(),
+            ".msix" | ".appx" | ".msixbundle" | ".appxbundle"
+        ) {
+            continue;
+        }
+        let target = temp_dir.join(format!("portable-to-win-{}{}", entry.id, entry.extension));
+        std::fs::copy(manifest_dir.join(unsigned_rel), &target).unwrap();
+        Command::cargo_bin("psign-tool")
+            .unwrap()
+            .env("TEMP", &temp_dir)
+            .env("TMP", &temp_dir)
+            .args([
+                "--mode",
+                "portable",
+                "sign",
+                "--pfx",
+                pfx.to_str().unwrap(),
+                "--password",
+                "CodeSign123!",
+                "--digest",
+                &entry.digest.to_ascii_lowercase(),
+            ])
+            .arg(&target)
+            .assert()
+            .success();
+
+        assert_windows_verify_ok_or_untrusted_root(
+            &target,
+            ca_trusted,
+            &["--rust-sip-msix-digest-check"],
+            &format!("portable->win {}", entry.id),
+        );
+        if ca_trusted && let Some(st) = &signtool {
+            let st_out = StdCommand::new(st)
+                .args(["verify", "/pa"])
+                .arg(&target)
+                .output()
+                .unwrap();
+            assert!(
+                st_out.status.success(),
+                "signtool verify /pa failed on portable-signed {}: {}{}",
+                entry.id,
+                String::from_utf8_lossy(&st_out.stdout),
+                String::from_utf8_lossy(&st_out.stderr)
+            );
+        }
+        if !entry.is_sparse_bundle {
+            let subcmd = if entry.extension.ends_with("bundle") {
+                "unbundle"
+            } else {
+                "unpack"
+            };
+            let out_dir = temp_dir.join(format!("p2w-{subcmd}-{}", entry.id));
+            let res = StdCommand::new(&makeappx)
+                .args([subcmd, "/o", "/p"])
+                .arg(&target)
+                .arg("/d")
+                .arg(&out_dir)
+                .output()
+                .unwrap();
+            assert!(
+                res.status.success(),
+                "makeappx {subcmd} rejected portable-signed {}: {}{}",
+                entry.id,
+                String::from_utf8_lossy(&res.stdout),
+                String::from_utf8_lossy(&res.stderr)
+            );
+        }
+    }
+
+    // 3. Windows-mode `psign sign` (SignerSignEx3 + AppxSip/AppxBundleSip/EappxSip) ->
+    //    MakeAppx + signtool + portable trust-verify-msix cross-mode validation.
+    for entry in &edge_manifest.entries {
+        if entry.expected_windows_sign != "supported" {
+            continue;
+        }
+        let Some(unsigned_rel) = &entry.unsigned_path else {
+            continue;
+        };
+        let target = temp_dir.join(format!("win-sign-{}{}", entry.id, entry.extension));
+        std::fs::copy(manifest_dir.join(unsigned_rel), &target).unwrap();
+
+        let mut cmd = Command::cargo_bin("psign-tool").unwrap();
+        cmd.env("TEMP", &temp_dir).env("TMP", &temp_dir).args([
+            "sign",
+            "--pfx",
+            pfx.to_str().unwrap(),
+            "--password",
+            "CodeSign123!",
+            "--digest",
+            &entry.digest.to_ascii_lowercase(),
+        ]);
+        if !entry.is_encrypted {
+            cmd.args(["--rust-sip", "msix"]);
+        }
+        cmd.arg(&target).assert().success();
+
+        assert_windows_verify_ok_or_untrusted_root(
+            &target,
+            ca_trusted,
+            if entry.is_encrypted {
+                &[]
+            } else {
+                &["--rust-sip-msix-digest-check"]
+            },
+            &format!("win-sign {}", entry.id),
+        );
+        if !entry.is_encrypted {
+            Command::cargo_bin("psign-tool")
+                .unwrap()
+                .args([
+                    "portable",
+                    "trust-verify-msix",
+                    "--trusted-ca",
+                    ca.to_str().unwrap(),
+                    "--as-of",
+                    "2026-06-01",
+                ])
+                .arg(&target)
+                .assert()
+                .success();
+        }
+    }
+
+    // Also test Windows-mode `psign sign --page-hashes` (/ph without /dlib) on flat MSIX,
+    // and `portable msix-set-publisher` + `psign-tool code` (.msixupload) -> Windows `psign sign`!
+    let win_ph = temp_dir.join("win-ph.msix");
+    std::fs::copy(
+        manifest_dir.join("tests/fixtures/generated-unsigned/msix/sample.msix"),
+        &win_ph,
+    )
+    .unwrap();
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
+        .args([
+            "sign",
+            "--pfx",
+            pfx.to_str().unwrap(),
+            "--password",
+            "CodeSign123!",
+            "--digest",
+            "sha256",
+            "--page-hashes",
+            "--rust-sip",
+            "msix",
+        ])
+        .arg(&win_ph)
+        .assert()
+        .success();
+    assert_windows_verify_ok_or_untrusted_root(
+        &win_ph,
+        ca_trusted,
+        &["--rust-sip-msix-digest-check"],
+        "win-sign --page-hashes",
+    );
+
+    // `portable msix-set-publisher` -> Windows `psign sign` -> `makeappx unbundle`!
+    let pub_bundle = temp_dir.join("set-pub-then-win-sign.msixbundle");
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .args(["portable", "msix-set-publisher"])
+        .arg(manifest_dir.join("tests/fixtures/msix-edge-cases/unsigned/bundle-multi.msixbundle"))
+        .args([
+            "--publisher",
+            "CN=Test Code Signing Certificate",
+            "--output",
+        ])
+        .arg(&pub_bundle)
+        .assert()
+        .success();
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
+        .args([
+            "sign",
+            "--pfx",
+            pfx.to_str().unwrap(),
+            "--password",
+            "CodeSign123!",
+            "--digest",
+            "sha256",
+            "--rust-sip",
+            "msix",
+        ])
+        .arg(&pub_bundle)
+        .assert()
+        .success();
+    let pub_unbundle_dir = temp_dir.join("pub-unbundled");
+    let unb = StdCommand::new(&makeappx)
+        .args(["unbundle", "/o", "/p"])
+        .arg(&pub_bundle)
+        .arg("/d")
+        .arg(&pub_unbundle_dir)
+        .output()
+        .unwrap();
+    assert!(
+        unb.status.success(),
+        "makeappx unbundle after msix-set-publisher + Windows psign sign failed:\n{}{}",
+        String::from_utf8_lossy(&unb.stdout),
+        String::from_utf8_lossy(&unb.stderr)
+    );
+
+    // `psign-tool code` on .msixupload -> extract inner .msixbundle -> Windows `psign sign` -> `makeappx unbundle`!
+    let upload_src = temp_dir.join("sample.msixupload");
+    std::fs::copy(
+        manifest_dir.join("tests/fixtures/msix-edge-cases/unsigned/sample.msixupload"),
+        &upload_src,
+    )
+    .unwrap();
+    let upload_prepared = temp_dir.join("prepared.msixupload");
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .args([
+            "code",
+            "--base-directory",
+            temp_dir.to_str().unwrap(),
+            "--publisher-name",
+            "CN=Test Code Signing Certificate",
+            "--pfx",
+            pfx.to_str().unwrap(),
+            "--password",
+            "CodeSign123!",
+            "--output",
+            upload_prepared.to_str().unwrap(),
+            "sample.msixupload",
+        ])
+        .assert()
+        .success();
+    let inner_bundle = temp_dir.join("from-upload.msixbundle");
+    {
+        use std::io::Read as _;
+        let f = std::fs::File::open(&upload_prepared).unwrap();
+        let mut z = zip::ZipArchive::new(f).unwrap();
+        let mut buf = Vec::new();
+        z.by_name("Psign.EdgeTest_1.0.0.0.msixbundle")
+            .unwrap()
+            .read_to_end(&mut buf)
+            .unwrap();
+        std::fs::write(&inner_bundle, buf).unwrap();
+    }
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .env("TEMP", &temp_dir)
+        .env("TMP", &temp_dir)
+        .args([
+            "sign",
+            "--pfx",
+            pfx.to_str().unwrap(),
+            "--password",
+            "CodeSign123!",
+            "--digest",
+            "sha256",
+            "--rust-sip",
+            "msix",
+        ])
+        .arg(&inner_bundle)
+        .assert()
+        .success();
+    let upload_unbundle_dir = temp_dir.join("upload-unbundled");
+    let unb2 = StdCommand::new(&makeappx)
+        .args(["unbundle", "/o", "/p"])
+        .arg(&inner_bundle)
+        .arg("/d")
+        .arg(&upload_unbundle_dir)
+        .output()
+        .unwrap();
+    assert!(
+        unb2.status.success(),
+        "makeappx unbundle after psign-tool code (.msixupload) + Windows psign sign failed:\n{}{}",
+        String::from_utf8_lossy(&unb2.stdout),
+        String::from_utf8_lossy(&unb2.stderr)
+    );
 
     let _ = std::fs::remove_dir_all(temp_dir);
 }
