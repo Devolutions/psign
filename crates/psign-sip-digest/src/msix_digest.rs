@@ -2115,7 +2115,9 @@ pub fn appx_content_types_for_signing(
                 defaults.insert(extension.clone(), manifest_type.to_owned());
             }
             let resolved = explicit.or_else(|| defaults.get(&extension));
-            if !resolved.is_some_and(|ct| ct.eq_ignore_ascii_case(manifest_type)) {
+            if explicit.is_some()
+                || !resolved.is_some_and(|ct| ct.eq_ignore_ascii_case(manifest_type))
+            {
                 overrides.push((normalized, manifest_type.to_owned()));
             }
         } else if let Some(content_type) = explicit {
@@ -3227,6 +3229,27 @@ mod tests {
         assert_eq!(
             content_type_for_part(&parsed, "Public/index.db"),
             Some("application/x-sqlite3")
+        );
+        validate_reserved_content_types(&parsed, inventory, "msix").unwrap();
+
+        // MakeAppx emits an `xml` Default for payload XML alongside an explicit
+        // manifest Override. The Override must survive staging because it takes
+        // precedence over the generic Default.
+        let makeappx_types = br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="text/xml"/><Override PartName="/AppxManifest.xml" ContentType="application/vnd.ms-appx.manifest+xml"/></Types>"#;
+        let merged = appx_content_types_for_signing(
+            Some(makeappx_types),
+            &["AppxManifest.xml", "Assets/License.xml"],
+            false,
+        )
+        .unwrap();
+        let parsed = validate_content_types_xml(merged.as_bytes()).unwrap();
+        assert_eq!(
+            content_type_for_part(&parsed, "AppxManifest.xml"),
+            Some(CONTENT_TYPE_MANIFEST)
+        );
+        assert_eq!(
+            content_type_for_part(&parsed, "Assets/License.xml"),
+            Some("text/xml")
         );
         validate_reserved_content_types(&parsed, inventory, "msix").unwrap();
 
