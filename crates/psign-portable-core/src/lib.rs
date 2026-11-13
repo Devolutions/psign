@@ -3373,6 +3373,7 @@ fn stage_flat_msix_for_signature(
 /// `Size`), child packages stay byte-identical ZIP payload entries, and the signature part is
 /// excluded from all AXPC/AXCD digest pieces. Staged output: child payloads + bundle manifest,
 /// then `AppxBlockMap.xml`, `[Content_Types].xml`, and a `PKCX` placeholder signature part.
+/// Manifest offsets are recalculated before hashing to match the staged local headers.
 fn stage_msix_bundle_for_signature(
     package: &[u8],
     digest_algorithm: PortableDigestAlgorithm,
@@ -3435,6 +3436,7 @@ fn stage_msix_bundle_for_signature(
             );
         }
     }
+    let manifest = bundle_manifest_for_stored_children(&manifest, &child_payloads)?;
     let block_map = build_msix_bundle_block_map(&manifest, digest_algorithm)?;
 
     // Child packages and the bundle manifest stay stored: children must remain
@@ -3460,6 +3462,77 @@ fn stage_msix_bundle_for_signature(
         b"PKCX".to_vec(),
     ));
     appx_zip::write_appx_zip(&entries)
+}
+
+/// Bundle offsets address child ZIP data, not local headers. Staging removes makeappx's
+/// data descriptors and extra fields, so update these signed attributes before hashing.
+fn bundle_manifest_for_stored_children(
+    manifest: &[u8],
+    children: &[(String, Vec<u8>)],
+) -> Result<Vec<u8>> {
+    use quick_xml::events::Event;
+    use quick_xml::{Reader, Writer};
+    use std::collections::HashMap;
+
+    let mut locations = HashMap::with_capacity(children.len());
+    let mut offset = 0u64;
+    for (name, data) in children {
+        let entry = appx_zip::AppxZipEntry::stored(name, Vec::new());
+        offset = offset
+            .checked_add(entry.local_header_size() as u64)
+            .context("bundle child header offset overflow")?;
+        locations.insert(name.as_str(), (offset, data.len() as u64));
+        offset = offset
+            .checked_add(data.len() as u64)
+            .context("bundle child data offset overflow")?;
+    }
+
+    let mut reader = Reader::from_reader(manifest);
+    let mut writer = Writer::new(Vec::with_capacity(manifest.len()));
+    loop {
+        let event = reader.read_event().context("read MSIX bundle manifest")?;
+        let updated = match &event {
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"Package" =>
+            {
+                let mut file_name = None;
+                let mut replacement = element.to_owned();
+                replacement.clear_attributes();
+                for attribute in element.attributes() {
+                    let attribute = attribute.context("read bundle Package attribute")?;
+                    match attribute.key.as_ref() {
+                        b"FileName" => {
+                            file_name = Some(
+                                attribute
+                                    .decode_and_unescape_value(reader.decoder())?
+                                    .replace('\\', "/"),
+                            );
+                            replacement.push_attribute(attribute);
+                        }
+                        b"Offset" | b"Size" => {}
+                        _ => replacement.push_attribute(attribute),
+                    }
+                }
+                let file_name = file_name.context("bundle Package is missing FileName")?;
+                let (offset, size) = locations
+                    .get(file_name.as_str())
+                    .with_context(|| format!("bundle child `{file_name}` is missing from ZIP"))?;
+                let offset = offset.to_string();
+                let size = size.to_string();
+                replacement.push_attribute(("Offset", offset.as_str()));
+                replacement.push_attribute(("Size", size.as_str()));
+                Some(if matches!(event, Event::Start(_)) {
+                    Event::Start(replacement)
+                } else {
+                    Event::Empty(replacement)
+                })
+            }
+            Event::Eof => break,
+            _ => None,
+        };
+        writer.write_event(updated.unwrap_or(event))?;
+    }
+    Ok(writer.into_inner())
 }
 
 /// Native bundle block maps list exactly one `File` — the bundle manifest — using
@@ -3934,6 +4007,72 @@ mod tests {
         }
         assert_eq!(seen, entries, "{label}: ZIP64 EOCD entry count");
         ZipArchive::new(Cursor::new(zip)).unwrap_or_else(|e| panic!("{label}: reopen ZIP: {e}"));
+    }
+
+    #[test]
+    fn staged_bundle_manifest_offsets_match_child_payloads() {
+        use std::io::Write as _;
+
+        let children = [
+            ("x64 & test.msix", b"first child".as_slice()),
+            ("arm64-\u{e9}.msix", b"second child".as_slice()),
+        ];
+        let manifest = concat!(
+            r#"<Bundle xmlns="http://schemas.microsoft.com/appx/2013/bundle"><Packages>"#,
+            r#"<Package FileName="arm64-&#233;.msix" Offset="9999" Size="1"/>"#,
+            r#"<Package FileName="x64 &amp; test.msix" Offset="8888" Size="2"><Resources/></Package>"#,
+            "</Packages></Bundle>"
+        );
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in children
+            .into_iter()
+            .chain([("AppxMetadata/AppxBundleManifest.xml", manifest.as_bytes())])
+        {
+            writer
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(data).unwrap();
+        }
+        let source = writer.finish().unwrap().into_inner();
+        let staged =
+            stage_msix_bundle_for_signature(&source, PortableDigestAlgorithm::Sha256).unwrap();
+        let signed_layout = replace_msix_signature_part(&staged, b"PKCX replacement").unwrap();
+        for package in [&staged, &signed_layout] {
+            let mut archive = ZipArchive::new(Cursor::new(package)).unwrap();
+            let mut xml = String::new();
+            archive
+                .by_name("AppxMetadata/AppxBundleManifest.xml")
+                .unwrap()
+                .read_to_string(&mut xml)
+                .unwrap();
+            let mut expected_offset = 0u64;
+            for ((name, data), escaped_name) in children
+                .into_iter()
+                .zip(["x64 &amp; test.msix", "arm64-&#233;.msix"])
+            {
+                let mut entry = archive.by_name(name).unwrap();
+                expected_offset += 30 + name.len() as u64;
+                assert_eq!(entry.data_start(), expected_offset, "{name}");
+                assert!(
+                    xml.contains(&format!(
+                        r#"FileName="{escaped_name}" Offset="{expected_offset}" Size="{}""#,
+                        data.len()
+                    )),
+                    "manifest must locate {name} in the rewritten ZIP: {xml}"
+                );
+                let mut actual = Vec::new();
+                entry.read_to_end(&mut actual).unwrap();
+                assert_eq!(actual, data, "{name} bytes must not change");
+                expected_offset += data.len() as u64;
+            }
+        }
+        assert!(
+            bundle_manifest_for_stored_children(manifest.as_bytes(), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("missing from ZIP"),
+            "missing child references must fail before signing"
+        );
     }
 
     #[test]

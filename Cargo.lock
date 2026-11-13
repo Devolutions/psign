@@ -2156,6 +2156,7 @@ dependencies = [
  "psign-codesigning-rest",
  "psign-opc-sign",
  "psign-sip-digest",
+ "quick-xml",
  "reqwest",
  "rsa 0.9.10",
  "serde",

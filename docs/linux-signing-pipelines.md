@@ -44,6 +44,8 @@ psign-tool portable trust-verify-msix --trusted-ca signer.cer source2.msix
 
 The manifest `Identity/@Publisher` must still match the signing certificate subject for Windows to install the package. When signing with `--pfx`, any CA certificates bundled inside the PFX are automatically embedded in `AppxSignature.p7x` (and other CMS signatures).
 
+For `.msixbundle` / `.appxbundle`, sign the child packages first. Portable signing keeps their bytes unchanged and recalculates `AppxBundleManifest.xml` package `Offset` and `Size` attributes for the staged ZIP layout before rebuilding the bundle block map and signature. This accounts for makeappx data descriptors and extra fields removed during staging; keeping the old offsets would make `makeappx unbundle` fail with `0x80080203`. Flat packages also have their layout rewritten, but their regenerated block map describes the new local headers and compression blocks.
+
 ### Test PKI generation (isolated dev/test environments)
 
 For local or test-VM workflows that need both package signing and HTTPS trust from a single private Root CA without touching host certificate stores during generation:

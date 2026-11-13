@@ -22,6 +22,7 @@ psign-codesigning-rest = { path = "../psign-codesigning-rest", optional = true }
 psign-opc-sign = { path = "../psign-opc-sign" }
 psign-sip-digest = { path = "../psign-sip-digest" }
 picky = { version = "7.0.0-rc.23", default-features = false, features = ["pkcs12"] }
+quick-xml = "0.38"
 rsa = "0.9.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

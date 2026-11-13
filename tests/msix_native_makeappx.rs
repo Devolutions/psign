@@ -11,6 +11,8 @@
 //! shells out to the real Windows SDK `makeappx.exe unpack` tool — the same
 //! validator behind `Add-AppxPackage`'s block-map check — against a package
 //! freshly signed by `psign-tool --mode portable sign`.
+//! Multi-package bundles are also checked with `makeappx unbundle`: their signed
+//! manifest offsets must track any change to the ZIP layout during signing.
 //!
 //! The test is skipped (not failed) when `makeappx.exe` cannot be located,
 //! since not every Windows host is guaranteed to have the Windows SDK
@@ -161,7 +163,7 @@ fn run_powershell(script: &str) -> String {
 /// fail only on chain trust (CERT_E_UNTRUSTEDROOT, **0x800B0109**), never on the digest,
 /// and `makeappx unpack` must accept the block map.
 #[test]
-fn portable_signed_makeappx_msix_fails_windows_verify_only_on_untrusted_root() {
+fn portable_signed_makeappx_packages_and_bundle_fail_windows_verify_only_on_untrusted_root() {
     let Some(makeappx) = find_makeappx() else {
         eprintln!("skipping: makeappx.exe not found (Windows SDK not installed)");
         return;
@@ -308,6 +310,121 @@ $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOff
         // The portable verifier must agree with Windows on the digest.
         Command::cargo_bin("psign-tool")
             .expect("psign-tool binary")
+            .args(["portable", "trust-verify-msix", "--trusted-ca"])
+            .arg(&cer)
+            .arg(&signed)
+            .assert()
+            .success();
+    }
+
+    // makeappx bundle uses ZIP64 data descriptors between child packages. Dropping
+    // those without updating the manifest offsets corrupts every child after the first.
+    let children = temp_dir.join("children");
+    std::fs::create_dir(&children).expect("create bundle input");
+    std::fs::copy(
+        temp_dir.join("signed-unsigned-SHA256.msix"),
+        children.join("x64.msix"),
+    )
+    .expect("copy signed x64 package");
+    let manifest = std::fs::read_to_string(layout.join("AppxManifest.xml")).unwrap();
+    std::fs::write(
+        layout.join("AppxManifest.xml"),
+        manifest.replace(
+            "ProcessorArchitecture=\"x64\"",
+            "ProcessorArchitecture=\"arm64\"",
+        ),
+    )
+    .unwrap();
+    let arm64 = children.join("arm64.msix");
+    let pack = StdCommand::new(&makeappx)
+        .args(["pack", "/h", "sha256", "/o", "/d"])
+        .arg(&layout)
+        .arg("/p")
+        .arg(&arm64)
+        .output()
+        .expect("pack arm64 package");
+    assert!(
+        pack.status.success(),
+        "pack arm64: {}{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+    Command::cargo_bin("psign-tool")
+        .unwrap()
+        .args(["--mode", "portable", "sign", "--pfx"])
+        .arg(&pfx)
+        .args(["--password", "throwaway"])
+        .arg(&arm64)
+        .assert()
+        .success();
+
+    let bundle = temp_dir.join("multi.msixbundle");
+    let pack = StdCommand::new(&makeappx)
+        .args(["bundle", "/o", "/d"])
+        .arg(&children)
+        .arg("/p")
+        .arg(&bundle)
+        .output()
+        .expect("makeappx bundle");
+    assert!(
+        pack.status.success(),
+        "bundle: {}{}",
+        String::from_utf8_lossy(&pack.stdout),
+        String::from_utf8_lossy(&pack.stderr)
+    );
+
+    for extension in ["msixbundle", "appxbundle"] {
+        let signed = temp_dir.join(format!("signed.{extension}"));
+        std::fs::copy(&bundle, &signed).unwrap();
+        // Also cover replacing a signature on an already staged layout.
+        for _ in 0..2 {
+            Command::cargo_bin("psign-tool")
+                .unwrap()
+                .args(["--mode", "portable", "sign", "--pfx"])
+                .arg(&pfx)
+                .args(["--password", "throwaway"])
+                .arg(&signed)
+                .assert()
+                .success();
+        }
+        let extracted = temp_dir.join(format!("unbundled-{extension}"));
+        let unpack = StdCommand::new(&makeappx)
+            .args(["unbundle", "/o", "/p"])
+            .arg(&signed)
+            .arg("/d")
+            .arg(&extracted)
+            .output()
+            .expect("makeappx unbundle");
+        assert!(
+            unpack.status.success(),
+            "signed {extension} has invalid child offsets: {}{}",
+            String::from_utf8_lossy(&unpack.stdout),
+            String::from_utf8_lossy(&unpack.stderr)
+        );
+        for child in ["x64.msix", "arm64.msix"] {
+            assert_eq!(
+                std::fs::read(extracted.join(child)).unwrap(),
+                std::fs::read(children.join(child)).unwrap(),
+                "{extension}: extracted {child} must stay byte-identical"
+            );
+        }
+        let verify = Command::cargo_bin("psign-tool")
+            .unwrap()
+            .args(["verify", "/pa"])
+            .arg(&signed)
+            .output()
+            .expect("Windows bundle verification");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verify.stdout),
+            String::from_utf8_lossy(&verify.stderr)
+        );
+        assert!(
+            text.contains("0x800B0109") && !text.contains("0x80096010"),
+            "{extension}: Windows must accept the digest and reject only the untrusted test root: {text}"
+        );
+        Command::cargo_bin("psign-tool")
+            .unwrap()
             .args(["portable", "trust-verify-msix", "--trusted-ca"])
             .arg(&cer)
             .arg(&signed)
