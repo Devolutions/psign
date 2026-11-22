@@ -106,6 +106,16 @@ public sealed class CmsSignedData
         throw new PsignException("no embedded certificate matches SignerIdentifier");
     }
 
+    /// <summary>
+    /// <c>CertificateSet</c> element order used by the Rust <c>cms</c> 0.2 crate (which re-sorts the set on both encode and
+    /// decode). <c>der</c>'s blanket <c>DerOrd</c> first compares each element's TLV header (identifier octet, then encoded
+    /// length); on a tie, <c>CertificateChoices::value_cmp</c> compares the <c>to_der()</c> results as <c>Vec&lt;u8&gt;</c>,
+    /// which <c>der</c> orders as a <c>SEQUENCE OF INTEGER</c>: by that sequence's encoded length (3 octets per byte below
+    /// 0x80, 4 octets per byte at or above 0x80), then byte by byte, then by element count. This differs from plain X.690
+    /// byte order (<see cref="Der.CompareDer"/>) whenever a set holds two certificates of the same encoded length.
+    /// </summary>
+    public static int CompareCertificateChoices(byte[] a, byte[] b) => Der.CompareRustCmsChoice(a, b);
+
     /// <summary>Encode the <c>SignedData</c> SEQUENCE.</summary>
     public byte[] EncodeSignedData()
     {

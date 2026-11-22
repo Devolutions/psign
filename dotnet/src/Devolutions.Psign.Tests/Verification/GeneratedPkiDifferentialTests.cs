@@ -134,9 +134,13 @@ public class GeneratedPkiDifferentialTests
         else
         {
             Assert.False(csOk, $"Rust failed, C# ok ({string.Join(' ', trustArgs)}): {rust.Stderr}");
-            Assert.Equal(rust.Stderr.Trim(), csText);
+            // "now: <instant>" depends on when each verifier ran; normalize it.
+            Assert.Equal(NormalizeNow(rust.Stderr.Trim()), NormalizeNow(csText));
         }
     }
+
+    private static string NormalizeNow(string s) =>
+        System.Text.RegularExpressions.Regex.Replace(s, @"now: [^)]*\)", "now: <now>)");
 
     private static TrustVerifySharedArgs ParseArgs(string[] a)
     {

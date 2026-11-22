@@ -20,8 +20,4 @@
     <InternalsVisibleTo Include="Devolutions.Psign.Tests" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="OpenMcdf" Version="3.4.0" />
-  </ItemGroup>
-
 </Project>

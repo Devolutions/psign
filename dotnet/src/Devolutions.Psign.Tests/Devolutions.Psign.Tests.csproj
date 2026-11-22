@@ -14,6 +14,8 @@
     <PackageReference Include="xunit" Version="2.*" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
     <PackageReference Include="Xunit.SkippableFact" Version="1.*" />
+    <!-- Independent MS-CFB reader used to cross-check Core/Msi/CfbFile output. -->
+    <PackageReference Include="OpenMcdf" Version="3.4.0" />
   </ItemGroup>
 
   <ItemGroup>
