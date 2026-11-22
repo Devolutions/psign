@@ -612,7 +612,7 @@ public partial class TopLevelSignParityTests : IClassFixture<SigningCliPki>
             using var ws = new Workspace(UnsignedPeDll, UnsignedCab, UnsignedPsd1, UnsignedMsix, UnsignedMsi, SignedEfi);
             string[] kv = ["--kvu", server.BaseUrl + "/", "--kvc", " signer ", "--kva", "kv-token"];
             var (kvBatch, _) = Same(ws, d => ["sign", .. kv, "--fd", "sha384", "--ac", _pki.CaCert, "--coe", "--exit-codes", "azure", In(d, "tiny64-pe-alias.dll"), In(d, "sample.cab"), In(d, "unsigned-sample.psd1"), In(d, "sample.msix"), In(d, "tiny.msi"), In(d, "missing.txt")]);
-            Assert.Equal(Devolutions.Psign.Cli.Framework.ResponseArgv.AzureSignExitPartialSuccess, kvBatch.ExitCode);
+            Assert.Equal(OperatingSystem.IsWindows() ? Devolutions.Psign.Cli.Framework.ResponseArgv.AzureSignExitPartialSuccess : 0x01, kvBatch.ExitCode);
             Assert.Equal(5, Regex.Count(kvBatch.Stdout, "^Signed: ", RegexOptions.Multiline));
             Same(ws, d => ["sign", .. kv, "--skip-signed", "--tr", tsa.BaseUrl + "/tsa", "--td", "sha256", In(d, "tiny32.signed.efi"), In(d, "tiny64-pe-alias.dll")]);
             Same(ws, d => ["sign", "--kvu", server.BaseUrl, "--kvc", "signer", "--kva", "wrong", In(d, "sample.cab")]);

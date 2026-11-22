@@ -317,7 +317,7 @@ public class TopLevelSignTests : IClassFixture<SigningCliPki>
         var txt = dir.File("unsupported.txt");
         File.WriteAllText(txt, "x");
         var r = CliHarness.RunManaged("sign", "--pfx", _pki.LeafPfx, "--password", SigningCliPki.PfxPassword, "--continue-on-error", "--exit-codes", "azure", txt, cab);
-        Assert.Equal(0x20000001, r.ExitCode);
+        Assert.Equal(OperatingSystem.IsWindows() ? 0x20000001 : 0x01, r.ExitCode);
         Assert.StartsWith($"Failed: {txt}: portable native-shaped signing supports", r.Stdout, StringComparison.Ordinal);
         Assert.EndsWith($"\n\nSigned: {cab}\npfx={_pki.LeafPfx}\n", r.Stdout, StringComparison.Ordinal);
 

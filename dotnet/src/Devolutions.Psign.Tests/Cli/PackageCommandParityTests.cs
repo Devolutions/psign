@@ -290,11 +290,17 @@ public class PackageCommandParityTests
         using var dir = new TempDir();
         var manifest = WriteClickOnceTree(dir);
         CliHarness.AssertSameOutput("portable", "clickonce-manifest-hashes", manifest);
-        // Missing referenced file: the I/O error text comes from Core (BCL message), so compare stdout / exit code only.
-        CliHarness.AssertSameStdout("portable", "clickonce-manifest-hashes", manifest, "--base-directory", dir.File("bin"));
+        CliHarness.AssertSameOutput("portable", "clickonce-manifest-hashes", manifest, "--base-directory", dir.File("bin"));
         foreach (var alg in new[] { "sha1", "sha256", "sha512" })
         {
             var updated = SameWithOutput(dir, alg + ".manifest", "portable", "clickonce-update-manifest-hashes", manifest, "--algorithm", alg, "--output", "{out}");
+            if (!File.Exists(updated.Rust))
+            {
+                // Both tools failed identically (e.g. `bin\App.dll` is a literal backslash name outside Windows).
+                Assert.False(File.Exists(updated.Managed));
+                continue;
+            }
+
             SameFiles(updated);
             CliHarness.AssertSameOutput("portable", "clickonce-manifest-hashes", updated.Rust, "--base-directory", dir.DirPath);
         }
