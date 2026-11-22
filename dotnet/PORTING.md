@@ -7,7 +7,7 @@ the port consistent across contributors.
 
 | Project | Contents | May reference |
 |---------|----------|---------------|
-| `Devolutions.Psign.Core` | Format parsing, SIP digest recomputation, signature *extraction*, layout helpers that embed an already-built signature blob, ASN.1 / CMS read model, X.509 structural view, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. **No** private keys, **no** CMS production, **no** network. | BCL, `OpenMcdf` |
+| `Devolutions.Psign.Core` | Format parsing, SIP digest recomputation, signature *extraction*, layout helpers that embed an already-built signature blob, ASN.1 / CMS read model, X.509 structural view, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. **No** private keys, **no** CMS production, **no** network. | BCL |
 | `Devolutions.Psign.Verification` | Portable trust (anchors, chain building, AuthRoot CTL / CAB cache, RFC 3161 validation, revocation / online fetch, Artifact Signing identity checks) and the `trust-verify-*` style verifiers for every format. **No** signing. | Core |
 | `Devolutions.Psign.Signing` | CMS / PKCS#7 producers (`Cms/Pkcs7Builder.cs`), format signers, timestamp clients, remote signers (Azure Key Vault, Azure Artifact Signing), key / PFX / cert-store loading, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
 | `Devolutions.Psign.Cli` | `psign-tool` (managed) — argv-compatible with the Rust `psign-tool` portable surface. | all |
@@ -22,7 +22,7 @@ name in the file / class name so reviewers can map files 1:1 (for example `msi_d
 - `AuthenticodeHashKind` + extensions (`DigestLength`, `Oid`, `Hash`, `CreateHasher`, `Name`) and `AuthenticodeHashKinds` (`FromDigestLength`, `FromOid`, `Parse`).
 - `Oids` — add constants here rather than scattering string literals.
 - `Asn1/Der` — minimal TLV reader/writer (`First`, `TlvAt`, `Children`, `EncodeTlv`, `EncodeSequence`, `EncodeSetOf` (DER-sorted), `EncodeOid`, `DecodeOid`). `System.Formats.Asn1.AsnReader/AsnWriter` are fine for higher-level structures. `Asn1/Asn1Time`.
-- `Cms/CmsSignedData`, `Cms/CmsSignerInfo`, `Cms/CmsAttribute`, `Cms/AlgorithmIdentifier`, `Cms/Pkcs7Wire` — raw-preserving CMS model. `Encode()` reproduces DER byte-for-byte for DER input and sorts SET OF like the Rust `der` crate.
+- `Cms/CmsSignedData`, `Cms/CmsSignerInfo`, `Cms/CmsAttribute`, `Cms/AlgorithmIdentifier`, `Cms/Pkcs7Wire` — raw-preserving CMS model. `Encode()` reproduces DER byte-for-byte for DER input and sorts SET OF like the Rust `der` crate (the `certificates` set uses `CmsSignedData.CompareCertificateChoices`, the Rust `cms` crate's quirky order, not plain byte order).
 - `Authenticode/SpcIndirectDataContent` (`ForPe/ForCab/ForMsi/ForScript/ForMsix`, `Parse`, `Encode`), `Authenticode/AuthenticodeSignature` (authenticode-crate validation rules).
 - `X509/CertificateInfo` (raw issuer/subject/serial/SPKI/extensions; `SameIssuerAndSerial`, `IsIssuerOf`, `VerifySignatureBy`), `X509/SignatureVerifier`, `X509/X509CertificateLoaderCompat`.
 - `Pe/PeFile` (offsets, sections, cert table, Authenticode digest ranges), `Pe/PeAuthenticode` (digest, consistency, nth PKCS#7), `Pe/PeEmbed` (checksum, `WIN_CERTIFICATE`, prepare/append/replace/remove).
@@ -32,6 +32,12 @@ name in the file / class name so reviewers can map files 1:1 (for example `msi_d
   `Finish`, `WriteStored`), `MinizDeflater` (one-shot `Compress` or streaming with `DeflateFlush`), `ZipCrc32`,
   `ZipDateTime`. `Core/Msix/QuickXml` is the quick-xml event reader/writer used by MSIX manifest rewriting (not a DOM;
   `Core/Xml/XmlC14n` / `XmlTextScan` serve XMLDSig and text scanning).
+- OLE compound files (Rust `cfb` 0.14.0 emulation): `Core/Msi/CfbFile` (`Open` permissive like `CompoundFile::open`,
+  `Create`, `CreateStorage`, `CreateStream` create-or-overwrite + write, `ReadStream`, `Children`, `FindChild`,
+  `CompareNames`). It edits the image in place exactly like the crate (free-sector reuse order, appended sectors, FAT /
+  DIFAT / MiniFAT growth, unbalanced directory inserts, individual header field writes), so MSI / MSP / MST outputs are
+  byte-identical to Rust. Do not reintroduce a third-party CFB library in `src/`; tests use OpenMcdf only as an
+  independent reader.
 - Text / encoding: `Text/RustText` (strict UTF-8, Rust string helpers), `Text/Base64Standard` (Rust `base64` `STANDARD`
   decode with its error texts, plus the lenient ClickOnce `DecodeXmlDsig`), `Json/RustJson` (the only serde_json-compatible
   writer: `Pretty` / `Compact` with optional `sortKeys`, `ToStringPretty<T>` for System.Text.Json models, `String`,

@@ -3,7 +3,6 @@ using System.Security.Cryptography;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cab;
 using Devolutions.Psign.Core.Cms;
-using OpenMcdf;
 
 namespace Devolutions.Psign.Core.Msi;
 
@@ -128,17 +127,17 @@ public static class MsiDigest
     private static bool IsRootSignatureEntry(CfbDirEntry storage, CfbDirEntry e) =>
         storage.IsRoot && (e.Name == DigitalSignatureEntry || e.Name == ExtendedSignatureEntry);
 
-    private static List<CfbDirEntry> SortedChildren(CfbDirectory dir, CfbDirEntry storage)
+    private static List<CfbDirEntry> SortedChildren(CfbFile cfb, CfbDirEntry storage)
     {
-        var entries = dir.Children(storage);
+        var entries = cfb.Children(storage);
         entries.Sort((x, y) => CompareUtf16Name(x.Name, y.Name));
         return entries;
     }
 
-    private static void PrehashStorageRecursive(CfbDirectory dir, CfbDirEntry storage, IncrementalHash h)
+    private static void PrehashStorageRecursive(CfbFile cfb, CfbDirEntry storage, IncrementalHash h)
     {
         PrehashEntry(storage, h);
-        foreach (var e in SortedChildren(dir, storage))
+        foreach (var e in SortedChildren(cfb, storage))
         {
             if (IsRootSignatureEntry(storage, e))
             {
@@ -147,7 +146,7 @@ public static class MsiDigest
 
             if (e.IsStorage)
             {
-                PrehashStorageRecursive(dir, e, h);
+                PrehashStorageRecursive(cfb, e, h);
             }
             else
             {
@@ -156,9 +155,9 @@ public static class MsiDigest
         }
     }
 
-    private static void HashStorageContentRecursive(CfbDirectory dir, CfbDirEntry storage, Storage mcdf, IncrementalHash h)
+    private static void HashStorageContentRecursive(CfbFile cfb, CfbDirEntry storage, IncrementalHash h)
     {
-        foreach (var e in SortedChildren(dir, storage))
+        foreach (var e in SortedChildren(cfb, storage))
         {
             if (IsRootSignatureEntry(storage, e))
             {
@@ -167,69 +166,51 @@ public static class MsiDigest
 
             if (e.IsStorage)
             {
-                HashStorageContentRecursive(dir, e, mcdf.OpenStorage(e.Name), h);
+                HashStorageContentRecursive(cfb, e, h);
             }
             else if (e.IsStream)
             {
-                using var s = mcdf.OpenStream(e.Name);
-                var buf = new byte[81920];
-                int n;
-                while ((n = s.Read(buf, 0, buf.Length)) > 0)
-                {
-                    h.AppendData(buf, 0, n);
-                }
+                h.AppendData(cfb.ReadStream(e));
             }
         }
 
         h.AppendData(storage.ClsidLe);
     }
 
-    /// <summary>Opened compound file: OpenMcdf root (stream contents, writes) plus the parsed directory (metadata).</summary>
-    private sealed class Package : IDisposable
+    /// <summary>Opened compound file (Rust <c>CompoundFile</c> over a cursor), ported from the <c>cfb</c> crate.</summary>
+    private sealed class Package
     {
-        private Package(RootStorage root, CfbDirectory directory)
+        private Package(CfbFile cfb) => Cfb = cfb;
+
+        public CfbFile Cfb { get; }
+
+        public CfbDirEntry Root => Cfb.Root;
+
+        /// <summary>Open <paramref name="data"/>; <paramref name="writable"/> works on a private copy of the bytes.</summary>
+        public static Package Open(byte[] data, bool writable = false, string errorPrefix = "open as OLE compound file")
         {
-            Root = root;
-            Directory = directory;
-        }
-
-        public RootStorage Root { get; }
-
-        public CfbDirectory Directory { get; }
-
-        public static Package Open(byte[] data)
-        {
-            RootStorage? root = null;
             try
             {
-                var directory = CfbDirectory.Parse(data);
-                root = RootStorage.Open(new MemoryStream(data, writable: false));
-                return new Package(root, directory);
+                return new Package(CfbFile.Open(writable ? (byte[])data.Clone() : data));
             }
-            catch (Exception e)
+            catch (Exception e) when (e is PsignException or ArgumentException or IndexOutOfRangeException or OverflowException)
             {
-                root?.Dispose();
-                throw new PsignException("open as OLE compound file", e is PsignException ? e : new PsignException(e.Message));
+                throw new PsignException(errorPrefix, e is PsignException ? e : new PsignException(e.Message));
             }
         }
 
-        public bool HasExtended => Directory.FindChild(Directory.Root, ExtendedSignatureEntry) is not null;
+        public CfbDirEntry? FindRootChild(string name) => Cfb.FindChild(Cfb.Root, name);
 
-        public byte[] ReadRootStream(string name)
-        {
-            using var s = Root.OpenStream(name);
-            using var ms = new MemoryStream();
-            s.CopyTo(ms);
-            return ms.ToArray();
-        }
+        public bool HasExtended => FindRootChild(ExtendedSignatureEntry) is not null;
 
-        public void Dispose() => Root.Dispose();
+        public byte[] ReadRootStream(string name) =>
+            Cfb.ReadStream(FindRootChild(name) ?? throw new PsignException($"No such stream: \"/{name}\""));
     }
 
     private static byte[] ComputePrehash(Package pkg, AuthenticodeHashKind kind)
     {
         using var h = kind.CreateHasher();
-        PrehashStorageRecursive(pkg.Directory, pkg.Directory.Root, h);
+        PrehashStorageRecursive(pkg.Cfb, pkg.Root, h);
         return h.GetHashAndReset();
     }
 
@@ -241,7 +222,7 @@ public static class MsiDigest
             h.AppendData(ComputePrehash(pkg, kind));
         }
 
-        HashStorageContentRecursive(pkg.Directory, pkg.Directory.Root, pkg.Root, h);
+        HashStorageContentRecursive(pkg.Cfb, pkg.Root, h);
         return h.GetHashAndReset();
     }
 
@@ -251,14 +232,14 @@ public static class MsiDigest
     /// </summary>
     public static byte[] ComputeMetadataDigest(byte[] data, AuthenticodeHashKind kind)
     {
-        using var pkg = Package.Open(data);
+        var pkg = Package.Open(data);
         return ComputePrehash(pkg, kind);
     }
 
     /// <summary>Compute the Windows Installer Authenticode SIP fingerprint for MSI-like OLE packages (Rust <c>compute_msi_authenticode_digest</c>).</summary>
     public static byte[] ComputeAuthenticodeDigest(byte[] data, AuthenticodeHashKind kind)
     {
-        using var pkg = Package.Open(data);
+        var pkg = Package.Open(data);
         return ComputeFingerprint(pkg, kind);
     }
 
@@ -268,7 +249,7 @@ public static class MsiDigest
     /// </summary>
     public static byte[] ComputePreparedAuthenticodeDigest(byte[] data, AuthenticodeHashKind kind)
     {
-        using var pkg = Package.Open(data);
+        var pkg = Package.Open(data);
         if (!pkg.HasExtended)
         {
             throw new PsignException(
@@ -285,44 +266,15 @@ public static class MsiDigest
         return ComputeFingerprint(pkg, kind);
     }
 
-    /// <summary>Create or replace a root stream and return the updated compound-file bytes.</summary>
+    /// <summary>
+    /// Create or replace a root stream and return the updated compound-file bytes (Rust <c>cfb</c>
+    /// <c>create_stream</c> + <c>write_all</c>; the file is edited in place exactly like the crate does).
+    /// </summary>
     internal static byte[] WriteRootStream(byte[] data, string name, ReadOnlySpan<byte> content, string openErrorPrefix = "open as OLE compound file")
     {
-        var ms = new MemoryStream();
-        ms.Write(data);
-        ms.Position = 0;
-        RootStorage root;
-        try
-        {
-            root = RootStorage.Open(ms, StorageModeFlags.LeaveOpen);
-        }
-        catch (Exception e) when (e is not PsignException)
-        {
-            throw new PsignException(openErrorPrefix, new PsignException(e.Message));
-        }
-
-        using (root)
-        {
-            CfbStream stream;
-            if (root.TryOpenStream(name, out var existing))
-            {
-                stream = existing;
-                stream.SetLength(0);
-            }
-            else
-            {
-                stream = root.CreateStream(name);
-            }
-
-            using (stream)
-            {
-                stream.Write(content);
-            }
-
-            root.Flush(true);
-        }
-
-        return ms.ToArray();
+        var pkg = Package.Open(data, writable: true, openErrorPrefix);
+        pkg.Cfb.CreateStream(name, content);
+        return pkg.Cfb.ToArray();
     }
 
     /// <summary>
@@ -332,10 +284,11 @@ public static class MsiDigest
     /// </summary>
     public static PreparedMsiAuthenticode PrepareForAuthenticodeSigning(byte[] data, AuthenticodeHashKind kind)
     {
-        var metadataDigest = ComputeMetadataDigest(data, kind);
-        var image = WriteRootStream(data, ExtendedSignatureEntry, metadataDigest);
-        var digest = ComputeAuthenticodeDigest(image, kind);
-        return new PreparedMsiAuthenticode(image, digest);
+        var pkg = Package.Open(data, writable: true);
+        var metadataDigest = ComputePrehash(pkg, kind);
+        pkg.Cfb.CreateStream(ExtendedSignatureEntry, metadataDigest);
+        var digest = ComputeFingerprint(pkg, kind);
+        return new PreparedMsiAuthenticode(pkg.Cfb.ToArray(), digest);
     }
 
     /// <summary>
@@ -344,8 +297,8 @@ public static class MsiDigest
     /// </summary>
     public static byte[] DigitalSignaturePkcs7Der(byte[] data)
     {
-        using var pkg = Package.Open(data);
-        if (pkg.Directory.FindChild(pkg.Directory.Root, DigitalSignatureEntry) is null)
+        var pkg = Package.Open(data);
+        if (pkg.FindRootChild(DigitalSignatureEntry) is null)
         {
             throw new PsignException($"MSI is missing {DigitalSignatureEntryDebug} stream");
         }
@@ -408,8 +361,8 @@ public static class MsiDigest
     /// </summary>
     public static void VerifyDigestConsistency(byte[] data)
     {
-        using var pkg = Package.Open(data);
-        if (pkg.Directory.FindChild(pkg.Directory.Root, DigitalSignatureEntry) is null)
+        var pkg = Package.Open(data);
+        if (pkg.FindRootChild(DigitalSignatureEntry) is null)
         {
             throw new PsignException($"MSI is missing {DigitalSignatureEntryDebug} stream");
         }

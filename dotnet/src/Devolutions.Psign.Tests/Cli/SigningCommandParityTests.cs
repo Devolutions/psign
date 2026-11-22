@@ -260,9 +260,14 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
 
     [SkippableTheory]
     [InlineData("generated-unsigned/installer/tiny.msi", "sha256")]
+    [InlineData("generated-unsigned/installer/tiny.msi", "sha384")]
     [InlineData("generated-unsigned/installer/tiny-patch.msp", "sha384")]
+    [InlineData("generated-unsigned/installer/tiny-transform.mst", "sha512")]
     [InlineData("generated-signed/installer/tiny.msi", "sha512")]
-    public void SignMsiSignatureStreamsMatchRust(string fixture, string digest)
+    [InlineData("generated-signed/installer/tiny-patch.msp", "sha256")]
+    [InlineData("generated-signed/installer/tiny-transform.mst", "sha384")]
+    [InlineData("msi-authenticode-upstream/tiny-pkcs7-stub.msi", "sha256")]
+    public void SignMsiMatchesRust(string fixture, string digest)
     {
         RustTool.Require();
         using var dir = new TempDir();
@@ -272,6 +277,12 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         var managedSigned = File.ReadAllBytes(managed);
         Assert.Equal(MsiDigest.DigitalSignaturePkcs7Der(rustSigned), MsiDigest.DigitalSignaturePkcs7Der(managedSigned));
         Assert.Equal(ReadRootStream(rustSigned, MsiDigest.ExtendedSignatureEntry), ReadRootStream(managedSigned, MsiDigest.ExtendedSignatureEntry));
+        AssertSameFile(rust, managed);
+
+        // Re-signing an already signed package (in place over the previous output) also matches.
+        var (rust2, managed2) = RunBothToFiles(dir, ".msi", o =>
+            ["portable", "sign-msi", rust, .. LocalSigner("--digest", "sha512"), "--output", o], "resign");
+        AssertSameFile(rust2, managed2);
         Assert.Equal(0, RunRust("portable", "verify-msi", managed).ExitCode);
         MsiDigest.VerifyDigestConsistency(rustSigned);
         MsiDigest.VerifyDigestConsistency(managedSigned);
@@ -380,6 +391,7 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         AssertSameFile(r3, m3);
         var (r4, m4) = RunBothToFiles(dir, ".msi", o => ["portable", "sign-msi", Fixtures.Path(UnsignedMsi), .. LocalSigner(), "--tr", tsa, "--td", "sha256", "--output", o], "msi");
         Assert.Equal(MsiDigest.DigitalSignaturePkcs7Der(File.ReadAllBytes(r4)), MsiDigest.DigitalSignaturePkcs7Der(File.ReadAllBytes(m4)));
+        AssertSameFile(r4, m4);
 
         var unstamped = dir.File("unstamped.efi");
         Assert.Equal(0, CliHarness.RunManaged(["portable", "sign-pe", Fixtures.Path(UnsignedPe), .. LocalSigner(), "--output", unstamped]).ExitCode);
@@ -621,6 +633,7 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         AssertSameFile(r2, m2);
         var (r3, m3) = RunBothToFiles(dir, ".msi", o => ["portable", "sign-msi", Fixtures.Path(UnsignedMsi), .. asOptions, .. chain, "--output", o], "msi");
         Assert.Equal(MsiDigest.DigitalSignaturePkcs7Der(File.ReadAllBytes(r3)), MsiDigest.DigitalSignaturePkcs7Der(File.ReadAllBytes(m3)));
+        AssertSameFile(r3, m3);
         var (r4, m4) = RunBothToFiles(dir, ".cat", o => ["portable", "sign-catalog", .. asOptions, .. chain, "--digest", "sha512", "--output", o, .. CatalogSubjects.Select(Fixtures.Path)], "cat");
         AssertSameFile(r4, m4);
 

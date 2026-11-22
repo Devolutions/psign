@@ -122,8 +122,8 @@ public sealed class PortableCoreDifferentialTests
     }
 
     /// <summary>
-    /// MSI / MSP: the embedded PKCS#7 (and therefore the signed digest) is byte-identical, but the compound-file sector
-    /// layout written by the C# OLE writer differs from the Rust <c>cfb</c> crate, so the files are compared semantically.
+    /// Signed outputs are byte-identical; for MSI / MSP / MST the compound file is edited like the Rust <c>cfb</c> crate
+    /// does (<c>Core/Msi/CfbFile</c>), and the embedded signature is additionally checked on both sides.
     /// </summary>
     private static void AssertSameSignedFile(byte[] rust, byte[] cs, string fixture)
     {
@@ -132,7 +132,6 @@ public sealed class PortableCoreDifferentialTests
             Assert.Equal(Devolutions.Psign.Core.Msi.MsiDigest.DigitalSignaturePkcs7Der(rust), Devolutions.Psign.Core.Msi.MsiDigest.DigitalSignaturePkcs7Der(cs));
             Devolutions.Psign.Core.Msi.MsiDigest.VerifyDigestConsistency(cs);
             Devolutions.Psign.Core.Msi.MsiDigest.VerifyDigestConsistency(rust);
-            return;
         }
 
         Assert.Equal(rust, cs);
@@ -143,6 +142,8 @@ public sealed class PortableCoreDifferentialTests
     [InlineData("generated-unsigned/installer/tiny.msi", "sha384")]
     [InlineData("generated-unsigned/installer/tiny-patch.msp", "sha512")]
     [InlineData("generated-signed/installer/tiny.msi", "sha256")]
+    [InlineData("generated-signed/installer/tiny-patch.msp", "sha384")]
+    [InlineData("msi-authenticode-upstream/tiny-pkcs7-stub.msi", "sha256")]
     public void MsiSignatureMatchesRustCliAndCrossVerifies(string fixture, string digest)
     {
         RustTool.Require();

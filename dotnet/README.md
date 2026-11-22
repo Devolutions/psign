@@ -11,7 +11,7 @@ The Rust implementation remains the reference: the C# port is tested differentia
 
 | Package | Use it for | Depends on |
 |---------|------------|------------|
-| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation (PE/WinMD, CAB, MSI/MSP, MSIX/APPX and bundles, catalogs, PowerShell and WSH scripts, custom ZIP Authenticode, WIM/ESD, RDP), PKCS#7/CMS read model, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. | `OpenMcdf` |
+| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation (PE/WinMD, CAB, MSI/MSP, MSIX/APPX and bundles, catalogs, PowerShell and WSH scripts, custom ZIP Authenticode, WIM/ESD, RDP), PKCS#7/CMS read model, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. | BCL only |
 | `Devolutions.Psign.Verification` | **Signature validation only**: CMS signature checks, chain building to explicit anchors or the Microsoft AuthRoot CTL (downloaded and cached like the Rust tool), RFC 3161 timestamps, revocation helpers, Azure Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code. | Core |
 | `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
 | `Devolutions.Psign.Cli` | The managed `psign-tool` dotnet tool (portable backend only). | all |
