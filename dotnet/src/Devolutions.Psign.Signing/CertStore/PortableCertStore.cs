@@ -268,7 +268,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"resolve private key for SHA1 {thumbprint} in {loc.Scope}\\{loc.StoreName}", e);
+            throw new PsignException($"resolve private key for SHA1 {thumbprint} in {loc.Scope}\\{loc.StoreName}", IoErrorText.Inner(e));
         }
 
         PrivateKeyMaterial key;
@@ -318,7 +318,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"read PFX '{pfxPath}'", e);
+            throw new PsignException($"read PFX '{pfxPath}'", IoErrorText.Inner(e));
         }
 
         ParsedPfxIdentity parsed;
@@ -355,7 +355,7 @@ public sealed class PortableCertStore
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                throw new PsignException($"read cert store '{loc.StoreDir}'", e);
+                throw new PsignException($"read cert store '{loc.StoreDir}'", IoErrorText.Inner(e));
             }
 
             foreach (var path in entries)
@@ -372,7 +372,7 @@ public sealed class PortableCertStore
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException)
                 {
-                    throw new PsignException($"read certificate '{path}'", e);
+                    throw new PsignException($"read certificate '{path}'", IoErrorText.Inner(e));
                 }
 
                 certificates.Add(DetailsFromDerPath(loc, der, path));
@@ -495,7 +495,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"read certificate '{path}'", e);
+            throw new PsignException($"read certificate '{path}'", IoErrorText.Inner(e));
         }
 
         byte[] der;
@@ -525,7 +525,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"read certificate '{path}'", e);
+            throw new PsignException($"read certificate '{path}'", IoErrorText.Inner(e));
         }
     }
 
@@ -542,7 +542,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"read private key '{path}'", e);
+            throw new PsignException($"read private key '{path}'", IoErrorText.Inner(e));
         }
     }
 
@@ -554,7 +554,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"create cert store '{loc.StoreDir}'", e);
+            throw new PsignException($"create cert store '{loc.StoreDir}'", IoErrorText.Inner(e));
         }
     }
 
@@ -595,7 +595,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"write private key '{path}'", e);
+            throw new PsignException($"write private key '{path}'", IoErrorText.Inner(e));
         }
     }
 
@@ -607,7 +607,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException(context, e);
+            throw new PsignException(context, IoErrorText.Inner(e));
         }
     }
 
@@ -619,7 +619,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException(context, e);
+            throw new PsignException(context, IoErrorText.Inner(e));
         }
     }
 

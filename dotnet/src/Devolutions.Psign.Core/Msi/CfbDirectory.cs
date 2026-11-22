@@ -61,9 +61,21 @@ internal sealed class CfbDirectory
     /// <summary>Parse the header, FAT and directory chain of <paramref name="data"/>.</summary>
     public static CfbDirectory Parse(ReadOnlySpan<byte> data)
     {
-        if (data.Length < 512 || !data[..8].SequenceEqual(Signature))
+        // Messages follow the Rust `cfb` crate (`{} bytes is too small`, `wrong magic number: {:x?}`).
+        if (data.Length < 512)
         {
-            throw new PsignException("invalid CFB file (wrong magic number)");
+            throw new PsignException($"Invalid CFB file ({data.Length} bytes is too small)");
+        }
+
+        if (!data[..8].SequenceEqual(Signature))
+        {
+            var magic = new string[8];
+            for (int i = 0; i < 8; i++)
+            {
+                magic[i] = data[i].ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            throw new PsignException($"Invalid CFB file (wrong magic number): [{string.Join(", ", magic)}]");
         }
 
         ushort major = BinaryPrimitives.ReadUInt16LittleEndian(data[0x1A..]);

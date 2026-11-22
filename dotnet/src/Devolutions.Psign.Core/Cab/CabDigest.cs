@@ -389,7 +389,7 @@ public static class CabDigest
     {
         var pkcs7 = SignaturePkcs7Der(data);
         var sd = CmsSignedData.Parse(pkcs7);
-        return Rs256SignerPrehash.Compute(sd, signerIndex);
+        return SignerPrehash.Rs256(sd, signerIndex);
     }
 
     /// <summary>PKCS#7 <c>SignedData</c> bytes embedded at the tail of a signed CAB (Rust <c>cab_signature_pkcs7_der</c>).</summary>

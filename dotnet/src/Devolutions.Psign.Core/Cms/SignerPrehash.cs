@@ -1,16 +1,18 @@
 using System.Security.Cryptography;
-using Devolutions.Psign.Core.Cms;
 
-namespace Devolutions.Psign.Core.Cab;
+namespace Devolutions.Psign.Core.Cms;
 
 /// <summary>
-/// Local copy of Rust <c>pkcs7::signed_data_rsa_sha256_signer_prehash_digest</c> used by the CAB / MSI / catalog
-/// <c>*_rsa_sha256_signer_prehash_digest</c> helpers (SHA-256 over the DER <c>SET OF</c> signed attributes).
+/// Signer-attribute prehash helpers (Rust <c>pkcs7::signed_data_rsa_sha256_signer_prehash_digest</c>): the digest a remote
+/// RSA signer (Azure Key Vault <c>RS256</c>, Artifact Signing) signs when re-signing a CMS <c>SignerInfo</c>.
 /// </summary>
-internal static class Rs256SignerPrehash
+public static class SignerPrehash
 {
-    /// <summary>SHA-256 over the authenticated attributes of <paramref name="sd"/>'s signer at <paramref name="signerIndex"/>.</summary>
-    public static byte[] Compute(CmsSignedData sd, int signerIndex)
+    /// <summary>
+    /// SHA-256 over the DER <c>SET OF Attribute</c> authenticated attributes of <paramref name="sd"/>'s signer at
+    /// <paramref name="signerIndex"/> (RFC 5652 §5.4). Requires a SHA-256 <c>digestAlgorithm</c> and <c>signedAttrs</c>.
+    /// </summary>
+    public static byte[] Rs256(CmsSignedData sd, int signerIndex)
     {
         if (signerIndex < 0 || signerIndex >= sd.SignerInfos.Count)
         {

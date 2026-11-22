@@ -12,6 +12,7 @@ internal static class PortableCli
         FormatCommands.Register(portable);
         ScriptCommands.Register(portable);
         MsixCommands.Register(portable);
+        SigningCommands.Register(portable);
         return portable;
     }
 }

@@ -1,7 +1,7 @@
 using System.Net.Http.Headers;
 using Devolutions.Psign.Core;
-using Devolutions.Psign.Core.Asn1;
 using Devolutions.Psign.Core.Cms;
+using Devolutions.Psign.Core.Timestamp;
 using Devolutions.Psign.Signing.Cms;
 using Devolutions.Psign.Signing.Internal;
 
@@ -15,13 +15,6 @@ public enum Rfc3161TimestampAttribute
 
     /// <summary>CMS / PKCS#9 <c>id-aa-timeStampToken</c> (<c>1.2.840.113549.1.9.16.2.14</c>).</summary>
     CmsTimeStampToken,
-}
-
-/// <summary>Parsed <c>TimeStampResp</c> (status, optional token TLV, status strings, optional failInfo TLV).</summary>
-public sealed record TimestampResponse(int Status, byte[]? TimeStampToken, IReadOnlyList<string> StatusStrings, byte[]? FailInfoTlv)
-{
-    /// <summary><c>granted</c> (0) or <c>grantedWithMods</c> (1).</summary>
-    public bool Granted => Status is 0 or 1;
 }
 
 /// <summary>
@@ -78,7 +71,7 @@ public sealed class TimestampClient : IDisposable
             throw new PsignException($"timestamp message imprint must be exactly {algorithm.DigestLength()} bytes for {DebugName(algorithm)}, got {messageImprint.Length}");
         }
 
-        var der = TimestampRequestBuilder.Build(algorithm.Oid(), messageImprint, nonce: null, certReq: true)
+        var der = BuildRequest(algorithm, messageImprint)
             ?? throw new PsignException("unsupported digest OID / preimage length for RFC3161 TimeStampReq");
         return PostTimestampRequest(url, der);
     }
@@ -94,7 +87,7 @@ public sealed class TimestampClient : IDisposable
     public async Task<byte[]> RequestTokenAsync(string timestampServer, AuthenticodeHashKind algorithm, byte[] stamped, CancellationToken cancellationToken = default)
     {
         var imprint = algorithm.Hash(stamped);
-        var requestDer = TimestampRequestBuilder.Build(algorithm.Oid(), imprint, nonce: null, certReq: true)
+        var requestDer = BuildRequest(algorithm, imprint)
             ?? throw new PsignException("build RFC3161 TimeStampReq");
         using var request = new HttpRequestMessage(HttpMethod.Post, timestampServer) { Content = new ByteArrayContent(requestDer) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/timestamp-query");
@@ -153,11 +146,11 @@ public sealed class TimestampClient : IDisposable
     /// <summary>Parse a <c>TimeStampResp</c> and return its token when the status is granted.</summary>
     public static byte[] ExtractGrantedToken(byte[] timeStampResp)
     {
-        var parsed = TimestampResponseParser.Parse(timeStampResp)
+        var parsed = Rfc3161.ParseTimeStampRespDer(timeStampResp)
             ?? throw new PsignException("could not parse TimeStampResp DER from TSA response");
-        if (!parsed.Granted)
+        if (!parsed.PkiStatus.Granted)
         {
-            throw new PsignException($"TimeStampResp status is not granted (status={parsed.Status})");
+            throw new PsignException($"TimeStampResp status is not granted (status={parsed.PkiStatus.AsRawInteger()})");
         }
 
         return parsed.TimeStampToken ?? throw new PsignException("TimeStampResp has no timeStampToken");
@@ -165,157 +158,9 @@ public sealed class TimestampClient : IDisposable
 
     private static string DebugName(AuthenticodeHashKind kind) => kind.ToString();
 
+    /// <summary><c>TimeStampReq</c> with <c>certReq</c> true and no nonce (Rust <c>build_timestamp_request_bytes</c>).</summary>
+    private static byte[]? BuildRequest(AuthenticodeHashKind algorithm, byte[] imprint) =>
+        Rfc3161.BuildTimestampRequestBytes(new Rfc3161TimestampRequestPlan { DigestAlgOid = algorithm.Oid(), CertReq = true }, imprint);
+
     public void Dispose() => _http.Dispose();
-}
-
-/// <summary>
-/// Minimal RFC 3161 <c>TimeStampReq</c> encoder (Rust <c>timestamp::build_timestamp_request_bytes</c>).
-/// TODO: switch to <c>Devolutions.Psign.Core.Timestamp</c> once the Core timestamp port is merged.
-/// </summary>
-internal static class TimestampRequestBuilder
-{
-    public static byte[]? Build(string digestOid, byte[] imprint, ulong? nonce, bool certReq)
-    {
-        var expected = digestOid switch
-        {
-            "1.3.14.3.2.26" => 20,
-            "2.16.840.1.101.3.4.2.1" => 32,
-            "2.16.840.1.101.3.4.2.2" => 48,
-            "2.16.840.1.101.3.4.2.3" => 64,
-            _ => -1,
-        };
-        if (expected < 0 || imprint.Length != expected)
-        {
-            return null;
-        }
-
-        var parts = new List<byte[]>
-        {
-            new byte[] { 0x02, 0x01, 0x01 },
-            Der.EncodeSequence(Der.EncodeSequence(Der.EncodeOid(digestOid), Der.Null), Der.EncodeTlv(0x04, imprint)),
-        };
-        if (nonce is { } n)
-        {
-            parts.Add(EncodeUInt64(n));
-        }
-
-        if (certReq)
-        {
-            parts.Add([0x01, 0x01, 0xFF]);
-        }
-
-        return Der.EncodeSequence(parts.ToArray());
-    }
-
-    private static byte[] EncodeUInt64(ulong n)
-    {
-        if (n == 0)
-        {
-            return [0x02, 0x01, 0x00];
-        }
-
-        var digits = new List<byte>();
-        for (var x = n; x > 0; x >>= 8)
-        {
-            digits.Insert(0, (byte)(x & 0xFF));
-        }
-
-        if ((digits[0] & 0x80) != 0)
-        {
-            digits.Insert(0, 0);
-        }
-
-        return Der.EncodeTlv(0x02, digits.ToArray());
-    }
-}
-
-/// <summary>
-/// Minimal strict RFC 3161 <c>TimeStampResp</c> parser (Rust <c>timestamp::parse_time_stamp_resp_der</c>).
-/// TODO: switch to <c>Devolutions.Psign.Core.Timestamp</c> once the Core timestamp port is merged.
-/// </summary>
-internal static class TimestampResponseParser
-{
-    public static TimestampResponse? Parse(byte[] input)
-    {
-        var outer = Der.First(input);
-        if (outer is null || outer.Value.Tag != 0x30 || outer.Value.End != input.Length)
-        {
-            return null;
-        }
-
-        var children = Der.Children(input, outer.Value);
-        if (children is null || children.Count is 0 or > 2)
-        {
-            return null;
-        }
-
-        var statusInfo = children[0];
-        if (statusInfo.Tag != 0x30)
-        {
-            return null;
-        }
-
-        var si = Der.Children(input, statusInfo);
-        if (si is null || si.Count == 0 || si[0].Tag != 0x02)
-        {
-            return null;
-        }
-
-        var intBody = si[0].Value(input);
-        if (intBody.Length is 0 or > 5 || (intBody[0] & 0x80) != 0)
-        {
-            return null;
-        }
-
-        long status = 0;
-        foreach (var b in intBody)
-        {
-            status = (status << 8) | b;
-        }
-
-        if (status > uint.MaxValue)
-        {
-            return null;
-        }
-
-        var strings = new List<string>();
-        byte[]? failInfo = null;
-        var phase = 0;
-        for (var i = 1; i < si.Count; i++)
-        {
-            var tlv = si[i];
-            if (tlv.Tag == 0x30 && phase == 0)
-            {
-                var texts = Der.Children(input, tlv);
-                if (texts is null)
-                {
-                    return null;
-                }
-
-                foreach (var t in texts)
-                {
-                    if (t.Tag != 0x0C)
-                    {
-                        return null;
-                    }
-
-                    strings.Add(HttpText.Lossy(t.Value(input).ToArray()));
-                }
-
-                phase = 1;
-            }
-            else if (tlv.Tag == 0x03 && phase <= 1)
-            {
-                failInfo = tlv.Encoded(input).ToArray();
-                phase = 2;
-            }
-            else
-            {
-                return null;
-            }
-        }
-
-        var token = children.Count == 2 ? children[1].Encoded(input).ToArray() : null;
-        return new TimestampResponse((int)Math.Min(status, int.MaxValue), token, strings, failInfo);
-    }
 }

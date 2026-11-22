@@ -55,7 +55,7 @@ public sealed record ArtifactSigningMetadata(
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"read {path}", e);
+            throw new PsignException($"read {path}", IoErrorText.Inner(e));
         }
 
         return Parse(raw);
