@@ -10,13 +10,13 @@ using Xunit;
 namespace Devolutions.Psign.Tests.Signing;
 
 /// <summary>PFX-backed signing identity shared with the Rust tool (<c>tests/fixtures/devolutions-authenticode</c>).</summary>
-internal sealed class PfxIdentity : IDisposable
+internal sealed class MsixPfxIdentity : IDisposable
 {
     public const string Password = "CodeSign123!";
 
     private readonly X509Certificate2Collection _collection;
 
-    public PfxIdentity(string pfxPath, string password = Password)
+    public MsixPfxIdentity(string pfxPath, string password = Password)
     {
         PfxPath = pfxPath;
         PfxPasswordText = password;
@@ -30,7 +30,7 @@ internal sealed class PfxIdentity : IDisposable
         Chain = _collection.Where(c => !c.HasPrivateKey).Select(c => CertificateInfo.Parse(c.RawData)).ToList();
     }
 
-    public static PfxIdentity Default() => new(Fixtures.Path("devolutions-authenticode/authenticode-test-cert.pfx"));
+    public static MsixPfxIdentity Default() => new(Fixtures.Path("devolutions-authenticode/authenticode-test-cert.pfx"));
 
     public string PfxPath { get; }
 
@@ -83,7 +83,7 @@ public class MsixSignerParityTests
     {
         RustTool.Require();
         using var dir = new TempDir();
-        using var id = PfxIdentity.Default();
+        using var id = MsixPfxIdentity.Default();
         var ext = Path.GetExtension(fixture);
         var rustTarget = dir.File("rust" + ext);
         File.Copy(Fixtures.Path(fixture), rustTarget);
@@ -154,7 +154,7 @@ public class MsixSignerParityTests
     {
         RustTool.Require();
         using var dir = new TempDir();
-        using var id = PfxIdentity.Default();
+        using var id = MsixPfxIdentity.Default();
         var package = SyntheticPayloadPackage(seed);
         var rustTarget = dir.File("synthetic.msix");
         File.WriteAllBytes(rustTarget, package);
@@ -311,7 +311,7 @@ public class MsixSignerParityTests
         var csInput = File.ReadAllBytes(source);
         RustTool.RunOk("--mode", "portable", "sign", "--pfx", pfxPath, "--password", "SignPass123!", "--digest", "sha256", source);
 
-        using var id = new PfxIdentity(pfxPath, "SignPass123!");
+        using var id = new MsixPfxIdentity(pfxPath, "SignPass123!");
         Assert.Single(id.Chain);
         var signed = MsixSigner.SignBytes(csInput, "msix", AuthenticodeHashKind.Sha256, id.Signer, id.Chain, new RsaDigestSigner(id.Key));
         Assert.True(File.ReadAllBytes(source).AsSpan().SequenceEqual(signed), "chain-signed package differs from Rust");
@@ -332,7 +332,7 @@ public class MsixSignerParityTests
     public void SignFileHonorsSkipSignedAndRejectsEncryptedTargets()
     {
         using var dir = new TempDir();
-        using var id = PfxIdentity.Default();
+        using var id = MsixPfxIdentity.Default();
         var signer = new RsaDigestSigner(id.Key);
         var signedInput = dir.File("signed.msix");
         File.Copy(Fixtures.Path("generated-signed/msix/sample.msix"), signedInput);
