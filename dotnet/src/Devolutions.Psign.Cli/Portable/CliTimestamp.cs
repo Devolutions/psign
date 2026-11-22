@@ -8,9 +8,9 @@ namespace Devolutions.Psign.Cli.Portable;
 /// RFC 3161 timestamping for the portable package signing commands (<c>--timestamp-url</c> / <c>--timestamp-digest</c>),
 /// mirroring <c>timestamp_pkcs7_if_requested</c> / <c>vsix_timestamp_if_requested</c> in the Rust CLI.
 /// <para>
-/// All TSA traffic goes through <see cref="Fetch"/>. <b>Placeholder:</b> the managed RFC 3161 HTTP client
-/// (<c>Signing/Timestamp/TimestampClient.cs</c>) is being ported separately; until it is merged <see cref="Fetch"/> throws.
-/// Replace its body with the client call after merge.
+/// All TSA traffic goes through <see cref="Fetch"/>, which uses the managed RFC 3161 HTTP client
+/// (<c>Signing/Timestamp/TimestampClient.cs</c>).
+///
 /// </para>
 /// </summary>
 internal static class CliTimestamp
@@ -29,10 +29,12 @@ internal static class CliTimestamp
                 $"timestamp message imprint must be exactly {digestKind.DigestLength()} bytes for {DebugName(digestKind)}, got {imprint.Length}");
         }
 
-        _ = url;
-        throw new PsignException(
-            "RFC3161 timestamp client not available in this build (managed Signing/Timestamp/TimestampClient is not merged yet)");
+        using var client = new Devolutions.Psign.Signing.Timestamp.TimestampClient(HandlerOverride);
+        return client.PostRfc3161TimestampRequest(url, digestKind, imprint);
     }
+
+    /// <summary>Test hook: HTTP handler used for TSA requests (null = default transport).</summary>
+    internal static HttpMessageHandler? HandlerOverride { get; set; }
 
     /// <summary>Granted <c>timeStampToken</c> from a TSA response (Rust <c>parse_time_stamp_resp_der</c> + status checks).</summary>
     public static byte[] TokenFromResponse(byte[] response)
