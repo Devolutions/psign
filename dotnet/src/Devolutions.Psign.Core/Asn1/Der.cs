@@ -278,6 +278,102 @@ public static class Der
     public static byte[] EncodeSetOf(byte tag, IEnumerable<byte[]> elements) =>
         EncodeTlv(tag, SortSetOf(elements).ToArray());
 
+    /// <summary>
+    /// Ordering the Rust <c>cms</c> 0.2 crate uses for CHOICE types in a SET OF (<c>CertificateChoices</c>,
+    /// <c>RevocationInfoChoice</c>, <c>SignerIdentifier</c>): it calls <c>der_cmp</c> on the <c>Vec&lt;u8&gt;</c> DER
+    /// encodings, which the <c>der</c> crate treats as <c>SEQUENCE OF INTEGER</c>. The comparison therefore orders
+    /// first by the encoded length of that sequence (each octet is an INTEGER TLV of 3 bytes, or 4 when it is ≥ 0x80),
+    /// then octet by octet numerically, then by octet count. This is <b>not</b> X.690 byte order; psign must reproduce it
+    /// to stay byte-identical with the Rust encoder.
+    /// </summary>
+    public static int CompareRustCmsChoice(byte[] a, byte[] b)
+    {
+        static long SeqLen(byte[] x)
+        {
+            long n = 0;
+            foreach (var octet in x)
+            {
+                n += octet < 0x80 ? 3 : 4;
+            }
+
+            return n;
+        }
+
+        int byLen = SeqLen(a).CompareTo(SeqLen(b));
+        if (byLen != 0)
+        {
+            return byLen;
+        }
+
+        int common = Math.Min(a.Length, b.Length);
+        for (int i = 0; i < common; i++)
+        {
+            if (a[i] != b[i])
+            {
+                return a[i].CompareTo(b[i]);
+            }
+        }
+
+        return a.Length.CompareTo(b.Length);
+    }
+
+    /// <summary>Sort SET OF elements with <see cref="CompareRustCmsChoice"/> (stable).</summary>
+    public static List<byte[]> SortRustCmsChoiceSet(IEnumerable<byte[]> elements)
+    {
+        var list = elements.ToList();
+        return list.Select((e, i) => (e, i)).OrderBy(t => t.e, Comparer<byte[]>.Create(CompareRustCmsChoice)).ThenBy(t => t.i).Select(t => t.e).ToList();
+    }
+
+    /// <summary>
+    /// Ordering of Rust <c>cms</c> <c>SignerInfo</c> values in <c>SignerInfos</c>: the derived structural <c>ValueOrd</c>
+    /// compares the outer header, then <c>version</c>, then <c>sid</c> (a CHOICE compared with
+    /// <see cref="CompareRustCmsChoice"/> after its header), then the remaining fields in encoding order.
+    /// </summary>
+    public static int CompareRustSignerInfo(byte[] a, byte[] b)
+    {
+        var ta = First(a);
+        var tb = First(b);
+        if (ta is null || tb is null)
+        {
+            return CompareDer(a, b);
+        }
+
+        int header = a.AsSpan(0, ta.Value.ValueStart).SequenceCompareTo(b.AsSpan(0, tb.Value.ValueStart));
+        if (header != 0)
+        {
+            return header;
+        }
+
+        var ca = Children(a, ta.Value);
+        var cb = Children(b, tb.Value);
+        if (ca is null || cb is null || ca.Count < 2 || cb.Count < 2)
+        {
+            return CompareDer(a, b);
+        }
+
+        int version = ca[0].Encoded(a).SequenceCompareTo(cb[0].Encoded(b));
+        if (version != 0)
+        {
+            return version;
+        }
+
+        var sa = ca[1];
+        var sb = cb[1];
+        int sidHeader = a.AsSpan(sa.TagStart, sa.ValueStart - sa.TagStart).SequenceCompareTo(b.AsSpan(sb.TagStart, sb.ValueStart - sb.TagStart));
+        if (sidHeader != 0)
+        {
+            return sidHeader;
+        }
+
+        int sid = CompareRustCmsChoice(sa.Encoded(a).ToArray(), sb.Encoded(b).ToArray());
+        if (sid != 0)
+        {
+            return sid;
+        }
+
+        return a.AsSpan(sa.End).SequenceCompareTo(b.AsSpan(sb.End));
+    }
+
     /// <summary>Encode a SEQUENCE (tag 0x30) of the given encoded elements, preserving order.</summary>
     public static byte[] EncodeSequence(params byte[][] elements) => EncodeTlv(0x30, elements);
 

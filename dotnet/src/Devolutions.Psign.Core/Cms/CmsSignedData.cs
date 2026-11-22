@@ -117,15 +117,15 @@ public sealed class CmsSignedData
         };
         if (Certificates is not null)
         {
-            parts.Add(Der.EncodeSetOf(0xA0, Certificates));
+            parts.Add(Der.EncodeTlv(0xA0, Der.SortRustCmsChoiceSet(Certificates).ToArray()));
         }
 
         if (Crls is not null)
         {
-            parts.Add(Der.EncodeSetOf(0xA1, Crls));
+            parts.Add(Der.EncodeTlv(0xA1, Der.SortRustCmsChoiceSet(Crls).ToArray()));
         }
 
-        parts.Add(Der.EncodeSetOf(0x31, SignerInfos.Select(s => s.Encode())));
+        parts.Add(Der.EncodeTlv(0x31, SignerInfos.Select(s => s.Encode()).OrderBy(e => e, Comparer<byte[]>.Create(Der.CompareRustSignerInfo)).ToArray()));
         return Der.EncodeTlv(0x30, parts.ToArray());
     }
 
