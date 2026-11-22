@@ -72,6 +72,12 @@ public sealed class OptionSpec
     /// <summary>For <see cref="OptionKind.Value"/> booleans with <c>ArgAction::Set</c> (explicit true/false value).</summary>
     public bool IsExplicitBool { get; set; }
 
+    /// <summary>
+    /// When set, the value must parse as an unsigned integer no larger than this (clap <c>u32</c>/<c>u64</c>/<c>usize</c>
+    /// value parsers). <c>null</c> applies the built-in table of known numeric psign options.
+    /// </summary>
+    public ulong? UnsignedMax { get; set; }
+
     /// <summary>Optional value (<c>num_args = 0..=1</c>); <see cref="DefaultMissingValue"/> is used when omitted.</summary>
     public string? DefaultMissingValue { get; set; }
 

@@ -31,8 +31,12 @@ public static class CliRunner
         {
             Output.ErrorLine($"error: {usage.Message}");
             Output.ErrorLine();
-            Output.ErrorLine(usage.Usage);
-            Output.ErrorLine();
+            if (usage.Usage is not null)
+            {
+                Output.ErrorLine(usage.Usage);
+                Output.ErrorLine();
+            }
+
             Output.ErrorLine("For more information, try '--help'.");
             return 2;
         }

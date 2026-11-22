@@ -6,13 +6,13 @@ namespace Devolutions.Psign.Cli.Framework;
 /// <summary>Usage error (clap exits with status 2).</summary>
 public sealed class UsageException : Exception
 {
-    public UsageException(string message, string usage)
+    public UsageException(string message, string? usage)
         : base(message)
     {
         Usage = usage;
     }
 
-    public string Usage { get; }
+    public string? Usage { get; }
 }
 
 /// <summary>Help or version requested (exit 0 after printing <see cref="Text"/>).</summary>
@@ -178,14 +178,14 @@ public sealed class ParsedCommand
     public int Int(string id, int defaultValue = 0)
     {
         var v = Value(id);
-        return v is null ? defaultValue : int.Parse(v, NumberStyles.None, CultureInfo.InvariantCulture);
+        return v is null ? defaultValue : int.Parse(v.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture);
     }
 
     /// <summary>Optional integer option.</summary>
     public int? IntOrNull(string id)
     {
         var v = Value(id);
-        return v is null ? null : int.Parse(v, NumberStyles.None, CultureInfo.InvariantCulture);
+        return v is null ? null : int.Parse(v.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture);
     }
 
     internal static bool ParseBool(string v) => v.Equals("true", StringComparison.OrdinalIgnoreCase) || v == "1" || v.Equals("yes", StringComparison.OrdinalIgnoreCase) || v.Equals("on", StringComparison.OrdinalIgnoreCase);
@@ -262,14 +262,14 @@ public static class CommandLineParser
                         break;
                     }
 
-                    throw new UsageException($"unexpected argument '--{name}' found", usage);
+                    throw new UsageException(UnexpectedArgument("--" + name), usage);
                 }
 
                 i = Consume(parsed, opt, args, i, inline, $"--{name}", usage);
                 continue;
             }
 
-            if (!optionsEnded && arg.Length > 1 && arg[0] == '-' && arg != "-" && !IsNegativeNumber(arg))
+            if (!optionsEnded && arg.Length > 1 && arg[0] == '-' && arg != "-")
             {
                 char c = arg[1];
                 if (!spec.DisableHelpFlag && c == 'h' && arg.Length == 2)
@@ -290,7 +290,7 @@ public static class CommandLineParser
                         break;
                     }
 
-                    throw new UsageException($"unexpected argument '-{c}' found", usage);
+                    throw new UsageException(UnexpectedArgument(arg), usage);
                 }
 
                 string? inline = arg.Length > 2 ? (arg[2] == '=' ? arg[3..] : arg[2..]) : null;
@@ -344,7 +344,7 @@ public static class CommandLineParser
 
             if (currentPos is null)
             {
-                throw new UsageException($"unexpected argument '{arg}' found", usage);
+                throw new UsageException(LooksLikeOption(arg) ? UnexpectedArgument(arg) : $"unexpected argument '{arg}' found", usage);
             }
 
             CheckPossible(currentPos.PossibleValues, currentPos.IgnoreCase, arg, currentPos.Display, usage);
@@ -370,7 +370,57 @@ public static class CommandLineParser
 
     private static bool LooksLikeOption(string arg) => arg.Length > 1 && arg[0] == '-';
 
-    private static bool IsNegativeNumber(string arg) => arg.Length > 1 && arg[0] == '-' && char.IsDigit(arg[1]);
+    /// <summary>Long option names that Rust declares with unsigned integer types (value = max).</summary>
+    private static readonly Dictionary<string, ulong> KnownUnsignedOptions = new(StringComparer.Ordinal)
+    {
+        ["index"] = ulong.MaxValue,
+        ["signer-index"] = ulong.MaxValue,
+        ["nonce"] = ulong.MaxValue,
+        ["expect-nonce"] = ulong.MaxValue,
+        ["online-timeout-secs"] = ulong.MaxValue,
+        ["online-max-download-bytes"] = ulong.MaxValue,
+        ["max-concurrency"] = ulong.MaxValue,
+        ["max-degree-of-parallelism"] = ulong.MaxValue,
+        ["signature-index"] = uint.MaxValue,
+    };
+
+    private static void CheckUnsigned(OptionSpec opt, string value)
+    {
+        ulong? max = opt.UnsignedMax;
+        if (max is null && opt.Long is not null && KnownUnsignedOptions.TryGetValue(opt.Long, out var known))
+        {
+            max = known;
+        }
+
+        if (max is null)
+        {
+            return;
+        }
+
+        // Rust `u64::from_str`: optional leading '+', ASCII digits only.
+        var digits = value.StartsWith('+') ? value[1..] : value;
+        string? error = null;
+        if (digits.Length == 0)
+        {
+            error = "cannot parse integer from empty string";
+        }
+        else if (!digits.All(char.IsAsciiDigit))
+        {
+            error = "invalid digit found in string";
+        }
+        else if (!ulong.TryParse(digits, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n) || n > max)
+        {
+            error = "number too large to fit in target type";
+        }
+
+        if (error is not null)
+        {
+            throw new UsageException($"invalid value '{value}' for '{opt.Display}': {error}", null);
+        }
+    }
+
+    private static string UnexpectedArgument(string arg) =>
+        $"unexpected argument '{arg}' found\n\n  tip: to pass '{arg}' as a value, use '-- {arg}'";
 
     private static int Consume(ParsedCommand parsed, OptionSpec opt, IReadOnlyList<string> args, int i, string? inline, string shown, string usage)
     {
@@ -392,10 +442,14 @@ public static class CommandLineParser
                 {
                     value = inline;
                 }
-                else if (next < args.Count && (opt.AllowHyphenValues || !LooksLikeOption(args[next]) || IsNegativeNumber(args[next])))
+                else if (next < args.Count && (opt.AllowHyphenValues || !LooksLikeOption(args[next])))
                 {
                     value = args[next];
                     next++;
+                }
+                else if (next < args.Count && args[next].Length > 1 && args[next][0] == '-' && char.IsDigit(args[next][1]))
+                {
+                    throw new UsageException(UnexpectedArgument(args[next]), usage);
                 }
                 else if (opt.DefaultMissingValue is not null)
                 {
@@ -408,10 +462,11 @@ public static class CommandLineParser
 
                 if (opt.IsExplicitBool && !IsBoolLiteral(value))
                 {
-                    throw new UsageException($"invalid value '{value}' for '{opt.Display}'\n  [possible values: true, false]", usage);
+                    throw new UsageException($"invalid value '{value}' for '{opt.Display}'\n  [possible values: true, false]", null);
                 }
 
                 CheckPossible(opt.PossibleValues, opt.IgnoreCase, value, opt.Display, usage);
+                CheckUnsigned(opt, value);
                 value = NormalizeChoice(opt.PossibleValues, opt.IgnoreCase, value);
                 if (opt.Kind == OptionKind.Multi)
                 {
@@ -440,7 +495,7 @@ public static class CommandLineParser
         {
             throw new UsageException(
                 $"invalid value '{value}' for '{display}'\n  [possible values: {string.Join(", ", possible)}]",
-                usage);
+                null);
         }
     }
 
@@ -517,6 +572,33 @@ public static class CommandLineParser
 
     private static void Validate(ParsedCommand parsed, CommandSpec spec, string usage)
     {
+        var missing = new List<string>();
+        foreach (var o in spec.Options)
+        {
+            if (o.Required && !parsed.IsPresent(o.Id))
+            {
+                missing.Add(o.Display);
+            }
+        }
+
+        if (parsed.Subcommand is null)
+        {
+            foreach (var p in spec.Positionals)
+            {
+                if (p.Required && parsed.PosAll(p.Id).Count == 0)
+                {
+                    missing.Add(p.Display);
+                }
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new UsageException(
+                "the following required arguments were not provided:\n" + string.Join("\n", missing.Select(m => "  " + m)),
+                RequiredUsage(spec, parsed.Path));
+        }
+
         foreach (var o in spec.Options)
         {
             if (o.Required && !parsed.IsPresent(o.Id))
@@ -534,9 +616,15 @@ public static class CommandLineParser
                 if (!parsed.IsPresent(r))
                 {
                     var other = spec.Options.FirstOrDefault(x => x.Id == r);
+                    var requiresUsage = new StringBuilder("Usage: ").Append(parsed.Path).Append(' ').Append(o.Display).Append(' ').Append(other?.Display ?? "--" + r);
+                    foreach (var rp in spec.Positionals.Where(rp => rp.Required))
+                    {
+                        requiresUsage.Append(' ').Append(rp.Display);
+                    }
+
                     throw new UsageException(
                         $"the following required arguments were not provided:\n  {other?.Display ?? "--" + r}",
-                        usage);
+                        requiresUsage.ToString());
                 }
             }
 
@@ -582,13 +670,18 @@ public static class CommandLineParser
         }
     }
 
-    /// <summary>One-line usage string.</summary>
+    /// <summary>One-line usage string (clap style: <c>[OPTIONS]</c>, required options, then positionals).</summary>
     public static string Usage(CommandSpec spec, string path)
     {
         var sb = new StringBuilder("Usage: ").Append(path);
-        if (spec.Options.Any(o => !o.Hidden))
+        if (spec.Options.Any(o => !o.Hidden && !o.Required))
         {
             sb.Append(" [OPTIONS]");
+        }
+
+        foreach (var o in spec.Options.Where(o => o.Required))
+        {
+            sb.Append(' ').Append(o.Display);
         }
 
         foreach (var p in spec.Positionals)
@@ -599,6 +692,23 @@ public static class CommandLineParser
         if (spec.Subcommands.Count > 0)
         {
             sb.Append(" <COMMAND>");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Usage line printed with missing-required-argument errors (required arguments only).</summary>
+    public static string RequiredUsage(CommandSpec spec, string path)
+    {
+        var sb = new StringBuilder("Usage: ").Append(path);
+        foreach (var o in spec.Options.Where(o => o.Required))
+        {
+            sb.Append(' ').Append(o.Display);
+        }
+
+        foreach (var p in spec.Positionals.Where(p => p.Required))
+        {
+            sb.Append(' ').Append(p.Display);
         }
 
         return sb.ToString();
