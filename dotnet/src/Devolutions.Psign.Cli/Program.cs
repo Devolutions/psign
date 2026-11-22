@@ -66,6 +66,8 @@ public static class PsignTool
             c.Handler = p => RunPortable(p.PosAll("args").Count == 0 ? ["--help"] : p.PosAll("args"));
         });
 
+        TopLevel.CodeCommand.Register(root);
+
         root.Sub("remove", "Remove embedded signature data from a PE file (native remove).", c =>
         {
             c.Flag("strip-signature", "Remove signature(s) entirely (native /s).").Alias("s");
