@@ -72,7 +72,7 @@ public static class TrustVerifyFile
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw PsignException.Context($"read {path}", e);
+            throw PsignException.Context($"read {path}", new PsignException(TrustVerifyEsd.IoMessage(e)));
         }
     }
 }

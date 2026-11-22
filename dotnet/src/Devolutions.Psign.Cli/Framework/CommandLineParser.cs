@@ -381,7 +381,6 @@ public static class CommandLineParser
         ["online-max-download-bytes"] = ulong.MaxValue,
         ["max-concurrency"] = ulong.MaxValue,
         ["max-degree-of-parallelism"] = ulong.MaxValue,
-        ["signature-index"] = uint.MaxValue,
     };
 
     private static void CheckUnsigned(OptionSpec opt, string value)
@@ -462,12 +461,17 @@ public static class CommandLineParser
 
                 if (opt.IsExplicitBool && !IsBoolLiteral(value))
                 {
-                    throw new UsageException($"invalid value '{value}' for '{opt.Display}'\n  [possible values: true, false]", null);
+                    throw new UsageException($"invalid value '{value}' for '{opt.Display}'\n  [possible values: true, false]", string.Empty);
                 }
 
                 CheckPossible(opt.PossibleValues, opt.IgnoreCase, value, opt.Display, usage);
                 CheckUnsigned(opt, value);
                 value = NormalizeChoice(opt.PossibleValues, opt.IgnoreCase, value);
+                if (opt.Validator?.Invoke(value) is { } invalid)
+                {
+                    throw new UsageException($"invalid value '{value}' for '{opt.Display}': {invalid}", string.Empty);
+                }
+
                 if (opt.Kind == OptionKind.Multi)
                 {
                     parsed.AddValue(opt.Id, value);
@@ -495,7 +499,7 @@ public static class CommandLineParser
         {
             throw new UsageException(
                 $"invalid value '{value}' for '{display}'\n  [possible values: {string.Join(", ", possible)}]",
-                null);
+                string.Empty);
         }
     }
 

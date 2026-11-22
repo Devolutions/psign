@@ -47,7 +47,8 @@ public static class TrustVerifyEsd
         }
     }
 
-    private static string IoMessage(Exception e) => e switch
+    /// <summary>Rust <c>std::io::Error</c> display text for common file errors.</summary>
+    internal static string IoMessage(Exception e) => e switch
     {
         FileNotFoundException or DirectoryNotFoundException =>
             OperatingSystem.IsWindows()
