@@ -34,6 +34,7 @@ internal static class CliHarness
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
             UseShellExecute = false,
         };
         foreach (var a in args)
