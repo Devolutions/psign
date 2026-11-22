@@ -57,6 +57,8 @@ dotnet pack dotnet/src/Devolutions.Psign.Cli -c Release -o dist/nuget
 dotnet tool install -g Devolutions.Psign.Cli --add-source dist/nuget
 psign-tool portable trust-verify-pe app.exe
 psign-tool verify --trusted-ca ca.crt app.exe package.nupkg   # routes each file to the matching portable verifier
+psign-tool sign /fd sha256 /f cert.pfx /p pwd /tr http://tsa /td sha256 app.exe setup.msi pkg.msix   # signs in place
+psign-tool timestamp /tr http://tsa /td sha256 app.exe
 ```
 
 The managed tool accepts the same arguments as the native `psign-tool` for the portable surface (including

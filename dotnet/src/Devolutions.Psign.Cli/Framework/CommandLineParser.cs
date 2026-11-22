@@ -464,6 +464,19 @@ public static class CommandLineParser
                     throw new UsageException($"invalid value '{value}' for '{opt.Display}'\n  [possible values: true, false]", string.Empty);
                 }
 
+                if (opt.ValueAliases is { } aliases)
+                {
+                    var cmp = opt.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                    foreach (var (alias, canonical) in aliases)
+                    {
+                        if (string.Equals(alias, value, cmp))
+                        {
+                            value = canonical;
+                            break;
+                        }
+                    }
+                }
+
                 CheckPossible(opt.PossibleValues, opt.IgnoreCase, value, opt.Display, usage);
                 CheckUnsigned(opt, value);
                 value = NormalizeChoice(opt.PossibleValues, opt.IgnoreCase, value);
@@ -475,6 +488,18 @@ public static class CommandLineParser
                 if (opt.Kind == OptionKind.Multi)
                 {
                     parsed.AddValue(opt.Id, value);
+                    for (int extra = 1; extra < opt.ValuesPerOccurrence; extra++)
+                    {
+                        if (next < args.Count && (opt.AllowHyphenValues || !LooksLikeOption(args[next])))
+                        {
+                            parsed.AddValue(opt.Id, args[next]);
+                            next++;
+                        }
+                        else
+                        {
+                            throw new UsageException($"{opt.ValuesPerOccurrence} values required for '{opt.Display}' but {extra} was provided", usage);
+                        }
+                    }
                 }
                 else
                 {
@@ -589,7 +614,7 @@ public static class CommandLineParser
         {
             foreach (var p in spec.Positionals)
             {
-                if (p.Required && parsed.PosAll(p.Id).Count == 0)
+                if (IsPositionalRequired(parsed, p) && parsed.PosAll(p.Id).Count == 0)
                 {
                     missing.Add(p.Display);
                 }
@@ -666,7 +691,7 @@ public static class CommandLineParser
         {
             foreach (var p in spec.Positionals)
             {
-                if (p.Required && parsed.PosAll(p.Id).Count == 0)
+                if (IsPositionalRequired(parsed, p) && parsed.PosAll(p.Id).Count == 0)
                 {
                     throw new UsageException($"the following required arguments were not provided:\n  {p.Display}", usage);
                 }
@@ -710,13 +735,16 @@ public static class CommandLineParser
             sb.Append(' ').Append(o.Display);
         }
 
-        foreach (var p in spec.Positionals.Where(p => p.Required))
+        foreach (var p in spec.Positionals.Where(p => p.Required || p.RequiredUnlessPresent is not null))
         {
             sb.Append(' ').Append(p.Display);
         }
 
         return sb.ToString();
     }
+
+    private static bool IsPositionalRequired(ParsedCommand parsed, PositionalSpec p) =>
+        p.Required || (p.RequiredUnlessPresent is { } other && !parsed.IsPresent(other));
 
     /// <summary>Help text for a command.</summary>
     public static string HelpText(CommandSpec spec, string path)

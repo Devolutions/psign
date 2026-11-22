@@ -114,6 +114,8 @@ public static class PsignTool
         Devolutions.Psign.Cli.TopLevel.ArtifactSigningSubmitCommand.Register(root);
         TopLevel.CodeCommand.Register(root);
         VerifyCommand.Register(root);
+        SignCommand.Register(root);
+        TimestampCommand.Register(root);
         CatdbCommand.Register(root);
 
         root.Sub("remove", "Remove embedded signature data from a PE file (native remove).", c =>

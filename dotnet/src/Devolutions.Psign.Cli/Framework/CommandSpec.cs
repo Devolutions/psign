@@ -87,6 +87,12 @@ public sealed class OptionSpec
     /// </summary>
     public Func<string, string?>? Validator { get; set; }
 
+    /// <summary>Hidden value aliases (clap <c>#[value(alias = ...)]</c>) mapped to their canonical possible value.</summary>
+    public Dictionary<string, string>? ValueAliases { get; set; }
+
+    /// <summary>Values consumed per occurrence (clap <c>num_args = N</c>); only meaningful for <see cref="OptionKind.Multi"/>.</summary>
+    public int ValuesPerOccurrence { get; set; } = 1;
+
     internal string Display => Long is not null
         ? (Kind is OptionKind.Flag or OptionKind.Count ? $"--{Long}" : $"--{Long} <{ValueName ?? Long.ToUpperInvariant().Replace('-', '_')}>")
         : $"-{Short}";
@@ -121,6 +127,9 @@ public sealed class PositionalSpec
     public string[]? PossibleValues { get; set; }
 
     public bool IgnoreCase { get; set; }
+
+    /// <summary>Required unless the option with this id is present (clap <c>required_unless_present</c>).</summary>
+    public string? RequiredUnlessPresent { get; set; }
 
     internal string Display => Multiple ? $"<{ValueName ?? Id.ToUpperInvariant()}>..." : $"<{ValueName ?? Id.ToUpperInvariant()}>";
 }
@@ -288,6 +297,13 @@ public static class OptionSpecExtensions
     public static OptionSpec HyphenValues(this OptionSpec o)
     {
         o.AllowHyphenValues = true;
+        return o;
+    }
+
+    /// <summary>Accept <paramref name="alias"/> as a hidden spelling of the possible value <paramref name="canonical"/>.</summary>
+    public static OptionSpec ValueAlias(this OptionSpec o, string alias, string canonical)
+    {
+        (o.ValueAliases ??= new Dictionary<string, string>(StringComparer.Ordinal))[alias] = canonical;
         return o;
     }
 
