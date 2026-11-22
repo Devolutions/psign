@@ -63,9 +63,41 @@ public static class PsignTool
         {
             c.DisableHelpFlag = true;
             c.Positionals.Add(new PositionalSpec("args", required: false, multiple: true) { Trailing = true });
-            c.Handler = p => RunPortable(p.PosAll("args"));
+            c.Handler = p => RunPortable(p.PosAll("args").Count == 0 ? ["--help"] : p.PosAll("args"));
+        });
+
+        root.Sub("remove", "Remove embedded signature data from a PE file (native remove).", c =>
+        {
+            c.Flag("strip-signature", "Remove signature(s) entirely (native /s).").Alias("s");
+            c.Flag("strip-chain-except-signer", "Remove all certificates except the signer from the embedded signature (native /c).").Alias("c");
+            c.Flag("strip-unauthenticated-attributes", "Remove unauthenticated attributes (native /u).").Alias("u");
+            c.Positionals.Add(new PositionalSpec("files", required: true, multiple: true) { ValueName = "FILES" });
+            c.Handler = p =>
+            {
+                RequirePortableMode(p);
+                bool quiet = p.Flag("quiet");
+                var text = Devolutions.Psign.Signing.Remove.PortableRemove.RemoveCommand(
+                    p.PosAll("files"),
+                    p.Flag("strip-signature"),
+                    p.Flag("strip-chain-except-signer"),
+                    p.Flag("strip-unauthenticated-attributes"),
+                    quiet);
+                Output.Write(text);
+                return 0;
+            };
         });
 
         return root;
+    }
+
+    /// <summary>The managed tool only implements the portable backend.</summary>
+    internal static void RequirePortableMode(ParsedCommand p)
+    {
+        var mode = p.Value("mode") ?? Environment.GetEnvironmentVariable("PSIGN_TOOL_MODE");
+        if (mode is not null && mode.Trim().Equals("windows", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new Devolutions.Psign.Core.PsignException(
+                "--mode windows requires the native psign-tool (WinVerifyTrust, SignerSignEx3, registered CryptSIP); the managed psign-tool implements the portable backend only");
+        }
     }
 }
