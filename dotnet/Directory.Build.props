@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <Authors>Devolutions</Authors>
+    <Company>Devolutions Inc.</Company>
+    <Product>psign</Product>
+    <Version Condition="'$(Version)' == ''">0.8.5</Version>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Devolutions/psign</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Devolutions/psign.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageTags>psign;authenticode;signtool;code-signing;dotnet</PackageTags>
+    <PackageReleaseNotes>See the repository changelog and release notes for details.</PackageReleaseNotes>
+    <Copyright>Copyright 2024-2026 Devolutions Inc.</Copyright>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>

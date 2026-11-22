@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <AssemblyName>Devolutions.Psign.Core</AssemblyName>
+    <RootNamespace>Devolutions.Psign.Core</RootNamespace>
+    <PackageId>Devolutions.Psign.Core</PackageId>
+    <Description>Pure C# psign core: Authenticode SIP digest recomputation (PE, CAB, MSI, MSIX/APPX, catalogs, scripts, ZIP, ESD, RDP), OPC package primitives, and PKCS#7 / CMS parsing shared by verification and signing.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Devolutions.Psign.Verification" />
+    <InternalsVisibleTo Include="Devolutions.Psign.Signing" />
+    <InternalsVisibleTo Include="Devolutions.Psign.Cli" />
+    <InternalsVisibleTo Include="Devolutions.Psign.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenMcdf" Version="3.4.0" />
+  </ItemGroup>
+
+</Project>

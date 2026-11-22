@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <AssemblyName>Devolutions.Psign.Signing</AssemblyName>
+    <RootNamespace>Devolutions.Psign.Signing</RootNamespace>
+    <PackageId>Devolutions.Psign.Signing</PackageId>
+    <Description>Pure C# portable Authenticode and package signing compatible with psign: CMS / PKCS#7 producers, PE/CAB/MSI/MSIX/catalog/script/ZIP/RDP embedding, NuGet/VSIX/ClickOnce/App Installer signing, RFC 3161 timestamping, Azure Key Vault and Azure Artifact Signing remote signers, and test PKI generation.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Devolutions.Psign.Cli" />
+    <InternalsVisibleTo Include="Devolutions.Psign.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Devolutions.Psign.Core\Devolutions.Psign.Core.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.Verification\Devolutions.Psign.Verification.csproj" />
+  </ItemGroup>
+
+</Project>

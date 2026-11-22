@@ -1,0 +1,48 @@
+# C# port conventions
+
+The `dotnet/` tree is a pure C# port of the Rust portable psign stack (no P/Invoke, no native helpers). These rules keep
+the port consistent across contributors.
+
+## Projects
+
+| Project | Contents | May reference |
+|---------|----------|---------------|
+| `Devolutions.Psign.Core` | Format parsing, SIP digest recomputation, signature *extraction*, layout helpers that embed an already-built signature blob, ASN.1 / CMS read model, X.509 structural view, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. **No** private keys, **no** CMS production, **no** network. | BCL, `OpenMcdf` |
+| `Devolutions.Psign.Verification` | Portable trust (anchors, chain building, AuthRoot CTL / CAB cache, RFC 3161 validation, revocation / online fetch, Artifact Signing identity checks) and the `trust-verify-*` style verifiers for every format. **No** signing. | Core |
+| `Devolutions.Psign.Signing` | CMS / PKCS#7 producers (`Cms/Pkcs7Builder.cs`), format signers, timestamp clients, remote signers (Azure Key Vault, Azure Artifact Signing), key / PFX / cert-store loading, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
+| `Devolutions.Psign.Cli` | `psign-tool` (managed) — argv-compatible with the Rust `psign-tool` portable surface. | all |
+| `Devolutions.Psign.Tests` | xUnit tests; fixtures come from `../tests/fixtures`. | all |
+
+Namespaces follow folders: `Devolutions.Psign.Core.Cab`, `Devolutions.Psign.Signing.Catalog`, … Mirror the Rust module
+name in the file / class name so reviewers can map files 1:1 (for example `msi_digest.rs` → `Core/Msi/MsiDigest.cs`).
+
+## Foundation types (use these, do not duplicate)
+
+- `Hex` (`Lower`, `Upper`, `Decode`), `PsignException` (Rust `anyhow`; keep the Rust error message text where practical so CLI output matches).
+- `AuthenticodeHashKind` + extensions (`DigestLength`, `Oid`, `Hash`, `CreateHasher`, `Name`) and `AuthenticodeHashKinds` (`FromDigestLength`, `FromOid`, `Parse`).
+- `Oids` — add constants here rather than scattering string literals.
+- `Asn1/Der` — minimal TLV reader/writer (`First`, `TlvAt`, `Children`, `EncodeTlv`, `EncodeSequence`, `EncodeSetOf` (DER-sorted), `EncodeOid`, `DecodeOid`). `System.Formats.Asn1.AsnReader/AsnWriter` are fine for higher-level structures. `Asn1/Asn1Time`.
+- `Cms/CmsSignedData`, `Cms/CmsSignerInfo`, `Cms/CmsAttribute`, `Cms/AlgorithmIdentifier`, `Cms/Pkcs7Wire` — raw-preserving CMS model. `Encode()` reproduces DER byte-for-byte for DER input and sorts SET OF like the Rust `der` crate.
+- `Authenticode/SpcIndirectDataContent` (`ForPe/ForCab/ForMsi/ForScript/ForMsix`, `Parse`, `Encode`), `Authenticode/AuthenticodeSignature` (authenticode-crate validation rules).
+- `X509/CertificateInfo` (raw issuer/subject/serial/SPKI/extensions; `SameIssuerAndSerial`, `IsIssuerOf`, `VerifySignatureBy`), `X509/SignatureVerifier`, `X509/X509CertificateLoaderCompat`.
+- `Pe/PeFile` (offsets, sections, cert table, Authenticode digest ranges), `Pe/PeAuthenticode` (digest, consistency, nth PKCS#7), `Pe/PeEmbed` (checksum, `WIN_CERTIFICATE`, prepare/append/replace/remove).
+- Signing: `Signing/Cms/Pkcs7Builder` (Authenticode + generic CMS producers, signed attribute profiles, timestamp-token attachment), `IDigestSigner`, `RsaDigestSigner`, `PrecomputedDigestSigner`.
+
+## Behavioral parity
+
+- Output must be byte-identical to Rust where Rust is deterministic (RSA PKCS#1 v1.5 signatures, DER, embedded layouts,
+  JSON/text CLI output). Differential tests use the Rust tool through `Tests/RustTool.cs` (`[SkippableFact]` +
+  `RustTool.Require()`); see `Tests/Signing/Pkcs7BuilderParityTests.cs` for the pattern. Build the Rust tool with
+  `cargo build -p psign --bin psign-tool` at the repo root.
+- Port the Rust unit tests that exercise fixtures under `tests/fixtures`. Use `Fixtures.Bytes("relative/path")`.
+- Prefer BCL crypto (`RSA`, `ECDsa`, `IncrementalHash`, `X509Certificate2`, `CertificateRequest`). Never rely on the OS
+  certificate store or `X509Chain` with the system trust: portable trust uses explicit anchors only.
+- Targets: libraries `net8.0;net10.0`, CLI/tests `net10.0`. Guard newer APIs with `#if NET9_0_OR_GREATER`.
+- Nullable enabled, file-scoped namespaces, 4-space indent, braces on new lines.
+
+## Build / test
+
+```powershell
+dotnet build dotnet/Devolutions.Psign.slnx
+dotnet test dotnet/src/Devolutions.Psign.Tests
+```
