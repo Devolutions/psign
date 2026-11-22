@@ -16,8 +16,36 @@ public static class PsignTool
     /// <summary>Run the top-level CLI with <paramref name="args"/> (argv without the executable).</summary>
     public static int Run(IReadOnlyList<string> args)
     {
-        var root = BuildRoot();
-        return CliRunner.Run(root, args, BinName, p => p.Flag("quiet"));
+        if (args.Count == 0)
+        {
+            return CliRunner.Run(BuildRoot(), args, BinName);
+        }
+
+        List<List<string>> invocations;
+        try
+        {
+            invocations = ResponseArgv.ExpandInvocations(args);
+        }
+        catch (Devolutions.Psign.Core.PsignException e)
+        {
+            Output.ErrorLine(e.FullMessage);
+            return 1;
+        }
+
+        int batchExit = 0;
+        foreach (var invocation in invocations)
+        {
+            var argv = NativeArgv.Normalize(invocation);
+            int code = CliRunner.Run(BuildRoot(), argv, BinName, p => p.Flag("quiet"));
+            if (code == 2 && invocations.Count == 1)
+            {
+                return 2;
+            }
+
+            batchExit = ResponseArgv.CombineBatchExitCodes(batchExit, code);
+        }
+
+        return batchExit;
     }
 
     /// <summary>Run the <c>psign-tool portable ...</c> command parser directly.</summary>
