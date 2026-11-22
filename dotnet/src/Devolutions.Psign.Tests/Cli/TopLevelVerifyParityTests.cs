@@ -38,8 +38,13 @@ public class TopLevelVerifyParityTests
         var managed = CliHarness.RunManaged(env, args);
         var line = string.Join(' ', args);
         Assert.True(rust.ExitCode == managed.ExitCode, $"exit code mismatch for {line}: rust={rust.ExitCode} managed={managed.ExitCode}\nrust stderr: {rust.Stderr}\nmanaged stderr: {managed.Stderr}");
-        Assert.Equal(rust.Stdout, managed.Stdout);
-        Assert.Equal(rust.StdoutBytes, managed.StdoutBytes);
+        // Artifact Signing reports print the verification instant (` time=...Z`) when no --as-of is given.
+        Assert.Equal(MaskTime(rust.Stdout), MaskTime(managed.Stdout));
+        if (MaskTime(rust.Stdout) == rust.Stdout)
+        {
+            Assert.Equal(rust.StdoutBytes, managed.StdoutBytes);
+        }
+
         Assert.Equal(NormalizeRustStderr(rust.Stderr), managed.Stderr.Replace("\r\n", "\n", StringComparison.Ordinal));
         return managed;
     }
@@ -56,6 +61,9 @@ public class TopLevelVerifyParityTests
         Assert.Equal(FirstLine(rust.Stderr), FirstLine(managed.Stderr));
         Assert.Equal(rust.Stdout, managed.Stdout);
     }
+
+    private static string MaskTime(string s) =>
+        System.Text.RegularExpressions.Regex.Replace(s, @" time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", " time=<now>");
 
     private static string FirstLine(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')[0];
 
