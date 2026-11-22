@@ -41,8 +41,10 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2.9.1
 
-      - name: Build Rust psign-tool (differential test oracle)
-        run: cargo build -p psign --bin psign-tool --locked
+      - name: Build Rust psign-tool and portable FFI (differential test oracles)
+        run: |
+          cargo build -p psign --bin psign-tool --locked
+          cargo build -p psign-portable-ffi --features "azure-kv-sign artifact-signing-rest" --locked
 
       - name: Restore
         run: dotnet restore dotnet/Devolutions.Psign.slnx
