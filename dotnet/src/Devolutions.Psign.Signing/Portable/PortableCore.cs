@@ -156,9 +156,12 @@ public static partial class PortableCore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            throw new PsignException(context ?? $"read {path}", e);
+            throw new PsignException(context ?? $"read {path}", IoCause(e));
         }
     }
+
+    /// <summary>Rust <c>std::io::Error</c> display text for I/O failures (keeps other exceptions as-is).</summary>
+    private static Exception IoCause(Exception e) => e is IOException or UnauthorizedAccessException ? IoErrorText.Inner(e) : e;
 
     internal static void WriteFile(string path, byte[] data, string? context = null)
     {
@@ -168,7 +171,7 @@ public static partial class PortableCore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            throw new PsignException(context ?? $"write {path}", e);
+            throw new PsignException(context ?? $"write {path}", IoCause(e));
         }
     }
 
@@ -180,7 +183,7 @@ public static partial class PortableCore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            throw new PsignException($"copy {from} to {to}", e);
+            throw new PsignException($"copy {from} to {to}", IoCause(e));
         }
     }
 
