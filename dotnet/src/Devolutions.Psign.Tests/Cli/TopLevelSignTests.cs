@@ -322,7 +322,7 @@ public class TopLevelSignTests : IClassFixture<SigningCliPki>
         Assert.EndsWith($"\n\nSigned: {cab}\npfx={_pki.LeafPfx}\n", r.Stdout, StringComparison.Ordinal);
 
         var all = CliHarness.RunManaged(new Dictionary<string, string?> { ["PSIGN_EXIT_CODES"] = "azure" }, "sign", "--pfx", _pki.LeafPfx, "--continue-on-error", txt);
-        Assert.Equal(unchecked((int)0xA0000002), all.ExitCode);
+        Assert.Equal(OperatingSystem.IsWindows() ? unchecked((int)0xA0000002) : 0x02, all.ExitCode);
     }
 
     [Fact]
