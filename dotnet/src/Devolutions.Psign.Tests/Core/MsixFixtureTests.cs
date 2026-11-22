@@ -3,6 +3,7 @@ using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cms;
 using Devolutions.Psign.Core.Msix;
+using Devolutions.Psign.Core.Zip;
 using Xunit;
 
 namespace Devolutions.Psign.Tests.Core;
@@ -134,7 +135,7 @@ public class MsixFixtureTests
     public void StandaloneP7xMatchesSignedSamplePackage()
     {
         var p7x = Fixtures.Bytes("generated-signed/p7x/appxsignature-from-sample-msix.p7x");
-        var fromPackage = ZipArchiveReader.Open(Fixtures.Bytes("generated-signed/msix/sample.msix")).ReadAll("AppxSignature.p7x");
+        var fromPackage = ZipCrateArchive.Open(Fixtures.Bytes("generated-signed/msix/sample.msix")).Read("AppxSignature.p7x");
         Assert.Equal(fromPackage, p7x);
         var pkcs7 = MsixDigest.StripPkcx(p7x);
         var (embeddedPkcs7, digest) = MsixDigest.MsixVerifiedSignature(Fixtures.Bytes("generated-signed/msix/sample.msix"), "MSIX");
@@ -152,7 +153,7 @@ public class MsixFixtureTests
     public void MinimalManifestFixtureAppearsInGeneratedPackage()
     {
         var manifest = Fixtures.Bytes("msix-minimal/AppxManifest.xml");
-        var fromPackage = ZipArchiveReader.Open(Fixtures.Bytes("generated-unsigned/msix/sample.msix")).ReadAll("AppxManifest.xml");
+        var fromPackage = ZipCrateArchive.Open(Fixtures.Bytes("generated-unsigned/msix/sample.msix")).Read("AppxManifest.xml");
         Assert.Contains("Identity", System.Text.Encoding.UTF8.GetString(fromPackage));
         Assert.Contains("Identity", System.Text.Encoding.UTF8.GetString(manifest));
     }
@@ -161,7 +162,7 @@ public class MsixFixtureTests
     public void TamperedSignedPackageReportsDigestMismatch()
     {
         var signed = Fixtures.Bytes("generated-signed/msix/sample.msix");
-        var archive = ZipArchiveReader.Open(signed);
+        var archive = ZipCrateArchive.Open(signed);
         var tail = MsixDigest.ParseZipTail(signed);
 
         // Flip one byte of a stored/deflated payload: block map or digest mismatch must be reported.

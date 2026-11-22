@@ -102,19 +102,19 @@ public class Pkcs12IdentityTests
         };
         foreach (var input in inputs)
         {
-            Assert.Equal(expected, SigningMaterialLoader.ParseRsaPrivateKeyMaterial(input).Pkcs8Der);
+            Assert.Equal(expected, PrivateKeyLoader.ParseRsaPrivateKeyMaterial(input).Pkcs8Der);
         }
 
-        Assert.Equal("parse DER RSA private key", Assert.Throws<PsignException>(() => SigningMaterialLoader.ParseRsaPrivateKey([1, 2, 3])).Message);
+        Assert.Equal("parse DER RSA private key", Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey([1, 2, 3])).Message);
         Assert.Equal(
             "parse PKCS#8 RSA private key PEM",
-            Assert.Throws<PsignException>(() => SigningMaterialLoader.ParseRsaPrivateKey(Encoding.ASCII.GetBytes("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"))).Message);
+            Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey(Encoding.ASCII.GetBytes("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"))).Message);
 
         using var ec = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var ecError = Assert.Throws<PsignException>(() => SigningMaterialLoader.ParseRsaPrivateKey(ec.ExportPkcs8PrivateKey()));
+        var ecError = Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey(ec.ExportPkcs8PrivateKey()));
         Assert.Equal("parse DER RSA private key", ecError.Message);
         var ecPem = Encoding.ASCII.GetBytes(new string(PemEncoding.Write("PRIVATE KEY", ec.ExportPkcs8PrivateKey())));
-        Assert.Contains("is not RSA", Assert.Throws<PsignException>(() => SigningMaterialLoader.ParseRsaPrivateKey(ecPem)).FullMessage, StringComparison.Ordinal);
+        Assert.Contains("is not RSA", Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey(ecPem)).FullMessage, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -133,14 +133,15 @@ public class Pkcs12IdentityTests
         var leaf = TestPki.IssueCodeSigningCert(root.AsIssuer(), new CodeSigningCertSpec("CN=Loader Leaf"));
         var bundle = Encoding.ASCII.GetBytes(TestPki.EncodePemCertificateBundle([leaf.CertificateDer, root.CertificateDer]));
 
-        Assert.Equal(leaf.CertificateDer, SigningMaterialLoader.ParseCertificate(leaf.CertificateDer).RawData);
-        Assert.Equal(leaf.CertificateDer, SigningMaterialLoader.ParseCertificate(bundle).RawData);
-        Assert.Equal(2, SigningMaterialLoader.ParseCertificates(bundle).Count);
-        Assert.Equal(leaf.CertificateDer, SigningMaterialLoader.PemOrDerToDer(bundle));
-        Assert.Equal("parse DER certificate", Assert.Throws<PsignException>(() => SigningMaterialLoader.ParseCertificate([0x30, 0x00])).Message);
+        Assert.Equal(leaf.CertificateDer, CertificateLoader.ParseCertificate(leaf.CertificateDer).RawData);
+        // Rust rdp::parse_certificate (pem-rfc7468) accepts exactly one PEM block; bundles go through ParseCertificates.
+        Assert.Equal("parse PEM certificate", Assert.Throws<PsignException>(() => CertificateLoader.ParseCertificate(bundle)).Message);
+        Assert.Equal(2, CertificateLoader.ParseCertificates(bundle).Count);
+        Assert.Equal(leaf.CertificateDer, CertificateLoader.PemOrDerToDer(bundle));
+        Assert.Equal("parse DER certificate", Assert.Throws<PsignException>(() => CertificateLoader.ParseCertificate([0x30, 0x00])).Message);
         Assert.Equal(
             "PEM certificate is missing END CERTIFICATE marker",
-            Assert.Throws<PsignException>(() => SigningMaterialLoader.PemOrDerToDer(Encoding.ASCII.GetBytes("-----BEGIN CERTIFICATE-----\nAAAA"))).Message);
+            Assert.Throws<PsignException>(() => CertificateLoader.PemOrDerToDer(Encoding.ASCII.GetBytes("-----BEGIN CERTIFICATE-----\nAAAA"))).Message);
     }
 
     [Fact]

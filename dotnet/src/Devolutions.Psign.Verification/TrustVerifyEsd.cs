@@ -17,7 +17,7 @@ public static class TrustVerifyEsd
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw PsignException.Context($"open {path}", new PsignException(IoMessage(e)));
+            throw PsignException.Context($"open {path}", IoErrorText.Inner(e));
         }
 
         using (f)
@@ -46,16 +46,4 @@ public static class TrustVerifyEsd
             return report;
         }
     }
-
-    /// <summary>Rust <c>std::io::Error</c> display text for common file errors.</summary>
-    internal static string IoMessage(Exception e) => e switch
-    {
-        FileNotFoundException or DirectoryNotFoundException =>
-            OperatingSystem.IsWindows()
-                ? "The system cannot find the file specified. (os error 2)"
-                : "No such file or directory (os error 2)",
-        UnauthorizedAccessException =>
-            OperatingSystem.IsWindows() ? "Access is denied. (os error 5)" : "Permission denied (os error 13)",
-        _ => e.Message,
-    };
 }

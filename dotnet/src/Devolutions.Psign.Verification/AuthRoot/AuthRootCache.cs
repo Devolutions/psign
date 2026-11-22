@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 
 namespace Devolutions.Psign.Verification.AuthRoot;
 

@@ -12,26 +12,57 @@ namespace Devolutions.Psign.Core.Json;
 /// <para>
 /// Object key order is preserved from the <see cref="JsonObject"/>. Note that Rust <c>serde_json::json!</c> objects are
 /// <c>BTreeMap</c>-backed (keys sorted by UTF-8 bytes) — build those with <c>SortedObject</c> — while
-/// <c>#[derive(Serialize)]</c> structs keep declaration order.
+/// <c>#[derive(Serialize)]</c> structs keep declaration order. Pass <c>sortKeys: true</c> to emit every object of a
+/// dynamic <c>serde_json::Value</c> with sorted keys.
+/// </para>
+/// <para>
+/// This is the only serde_json-compatible writer in the port; typed report models go through
+/// <see cref="ToStringPretty{T}"/> (System.Text.Json attributes for names / order, this writer for the text).
 /// </para>
 /// </summary>
 public static class RustJson
 {
+    private static readonly JsonSerializerOptions ModelOptions = new();
+
     /// <summary>Serialize like <c>serde_json::to_string_pretty</c>.</summary>
-    public static string Pretty(JsonNode? node)
+    public static string Pretty(JsonNode? node, bool sortKeys = false)
     {
         var sb = new StringBuilder();
-        Write(sb, node, pretty: true, indent: 0);
+        Write(sb, node, pretty: true, indent: 0, sortKeys);
         return sb.ToString();
     }
 
     /// <summary>Serialize like <c>serde_json::to_string</c>.</summary>
-    public static string Compact(JsonNode? node)
+    public static string Compact(JsonNode? node, bool sortKeys = false)
     {
         var sb = new StringBuilder();
-        Write(sb, node, pretty: false, indent: 0);
+        Write(sb, node, pretty: false, indent: 0, sortKeys);
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Serialize a typed model like <c>serde_json::to_string_pretty</c>: property names and order come from the
+    /// System.Text.Json contract (<c>[JsonPropertyName]</c>, <c>[JsonPropertyOrder]</c>, converters, ignore conditions).
+    /// </summary>
+    public static string ToStringPretty<T>(T value) => Pretty(JsonSerializer.SerializeToNode(value, ModelOptions));
+
+    /// <summary>Encode <paramref name="s"/> as a serde_json string literal (quotes included).</summary>
+    public static string String(string s)
+    {
+        var sb = new StringBuilder(s.Length + 2);
+        WriteString(sb, s);
+        return sb.ToString();
+    }
+
+    /// <summary>Encode a list of strings as a compact JSON array (<c>serde_json::to_string(&amp;Vec&lt;String&gt;)</c>).</summary>
+    public static string StringArray(IEnumerable<string> values) => "[" + string.Join(",", values.Select(String)) + "]";
+
+    /// <summary>Ordinal comparison of the UTF-8 encodings (Rust <c>String</c> / <c>BTreeMap</c> key ordering).</summary>
+    public static int CompareUtf8(string a, string b) =>
+        Encoding.UTF8.GetBytes(a).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(b));
+
+    /// <summary>Comparer for <see cref="CompareUtf8"/>.</summary>
+    public static IComparer<string> Utf8Comparer { get; } = Comparer<string>.Create(CompareUtf8);
 
     /// <summary>Create an object whose keys are sorted by ordinal UTF-8 byte order (serde_json <c>Map</c> default).</summary>
     public static JsonObject SortedObject(IEnumerable<KeyValuePair<string, JsonNode?>> properties)
@@ -78,12 +109,7 @@ public static class RustJson
         }
     }
 
-    private static int CompareUtf8(string a, string b)
-    {
-        return Encoding.UTF8.GetBytes(a).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(b));
-    }
-
-    private static void Write(StringBuilder sb, JsonNode? node, bool pretty, int indent)
+    private static void Write(StringBuilder sb, JsonNode? node, bool pretty, int indent, bool sortKeys)
     {
         switch (node)
         {
@@ -99,7 +125,8 @@ public static class RustJson
 
                 sb.Append('{');
                 bool first = true;
-                foreach (var kv in obj)
+                IEnumerable<KeyValuePair<string, JsonNode?>> props = sortKeys ? obj.OrderBy(p => p.Key, Utf8Comparer) : obj;
+                foreach (var kv in props)
                 {
                     if (!first)
                     {
@@ -115,7 +142,7 @@ public static class RustJson
 
                     WriteString(sb, kv.Key);
                     sb.Append(pretty ? ": " : ":");
-                    Write(sb, kv.Value, pretty, indent + 1);
+                    Write(sb, kv.Value, pretty, indent + 1, sortKeys);
                 }
 
                 if (pretty)
@@ -147,7 +174,7 @@ public static class RustJson
                         sb.Append(' ', (indent + 1) * 2);
                     }
 
-                    Write(sb, arr[i], pretty, indent + 1);
+                    Write(sb, arr[i], pretty, indent + 1, sortKeys);
                 }
 
                 if (pretty)

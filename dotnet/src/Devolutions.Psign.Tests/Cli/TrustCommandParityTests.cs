@@ -62,7 +62,7 @@ public class TrustCommandParityTests
     public void TrustVerifyWithWrongAnchorMatchesRust(string command, string fixture)
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         Same(command, fixture, "--trusted-ca", pki.RootPath, "--as-of", AsOf);
     }
 

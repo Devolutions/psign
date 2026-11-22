@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Devolutions.Psign.Cli;
 using Devolutions.Psign.Cli.Framework;
 using Xunit;
@@ -16,7 +15,7 @@ internal static class CliHarness
 {
     private static readonly object Gate = new();
 
-    private static readonly IReadOnlyDictionary<string, string?> NoEnv = new Dictionary<string, string?>();
+    private static IReadOnlyDictionary<string, string?> NoEnv => RustTool.NoEnv;
 
     /// <summary>Run the managed <c>psign-tool</c> in-process.</summary>
     public static CliResult RunManaged(params string[] args) => RunManaged(NoEnv, args);
@@ -57,38 +56,8 @@ internal static class CliHarness
     /// <summary>Run the Rust <c>psign-tool</c> with environment overrides (<c>null</c> removes a variable).</summary>
     public static CliResult RunRust(IReadOnlyDictionary<string, string?> env, params string[] args)
     {
-        var psi = new ProcessStartInfo(RustTool.Require())
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardErrorEncoding = System.Text.Encoding.UTF8,
-            UseShellExecute = false,
-        };
-        foreach (var a in args)
-        {
-            psi.ArgumentList.Add(a);
-        }
-
-        psi.Environment["PSIGN_TOOL_MODE"] = "portable";
-        foreach (var (k, v) in env)
-        {
-            if (v is null)
-            {
-                psi.Environment.Remove(k);
-            }
-            else
-            {
-                psi.Environment[k] = v;
-            }
-        }
-
-        using var p = Process.Start(psi)!;
-        using var ms = new MemoryStream();
-        var copy = p.StandardOutput.BaseStream.CopyToAsync(ms);
-        var stderr = p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        copy.Wait();
-        return new CliResult(p.ExitCode, ms.ToArray(), stderr);
+        var (code, stdout, stderr) = RustTool.RunBytes(env, args);
+        return new CliResult(code, stdout, stderr);
     }
 
     /// <summary>Assert that both CLIs produce identical exit codes and stdout bytes.</summary>

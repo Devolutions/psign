@@ -213,7 +213,7 @@ public static partial class PortableCore
 
     private static byte[] SignUnsignedBundleChildren(byte[] package, PortableSignRequest request, PortableSigningProvider provider, PortableCoreOptions options)
     {
-        var archive = WithContext("open MSIX bundle ZIP", () => ZipArchiveReader.Open(package));
+        var archive = WithContext("open MSIX bundle ZIP", () => ZipCrateArchive.Open(package));
         var entries = new List<(string Name, byte[] Data)>();
         for (int i = 0; i < archive.Count; i++)
         {
@@ -224,7 +224,7 @@ public static partial class PortableCore
                 continue;
             }
 
-            var data = archive.ReadAll(i);
+            var data = archive.Read(i);
             int dot = name.LastIndexOf('.');
             var childExt = dot >= 0 ? RustText.ToAsciiLowercase(name[(dot + 1)..]) : string.Empty;
             if (childExt is "msix" or "appx" && !MsixDigest.MsixSignaturePartPresent(data))
@@ -236,7 +236,7 @@ public static partial class PortableCore
             entries.Add((name, data));
         }
 
-        return LegacyZipWriter.WriteStored(entries);
+        return ZipCrateWriter.WriteStored(entries);
     }
 
     // ------------------------------------------------------------------ ZIP / scripts
@@ -550,7 +550,7 @@ public static partial class PortableCore
             CertificateInfo signerCert;
             try
             {
-                signerCert = SigningMaterialLoader.ParseCertificate(signerDer);
+                signerCert = CertificateLoader.ParseCertificate(signerDer);
             }
             catch (PsignException e)
             {
@@ -694,13 +694,13 @@ public static partial class PortableCore
             };
         }
 
-        var signerCert = WithContext("parse signer certificate", () => SigningMaterialLoader.ParseCertificate(certBytes));
-        var key = WithContext("parse RSA private key", () => SigningMaterialLoader.ParseRsaPrivateKey(keyBytes));
+        var signerCert = WithContext("parse signer certificate", () => CertificateLoader.ParseCertificate(certBytes));
+        var key = WithContext("parse RSA private key", () => PrivateKeyLoader.ParseRsaPrivateKey(keyBytes));
         var chain = new List<CertificateInfo>(pfxChain.Count + request.ChainCertificatePaths.Count);
         for (int i = 0; i < pfxChain.Count; i++)
         {
             var der = pfxChain[i];
-            chain.Add(WithContext($"parse PFX chain certificate[{i}]", () => SigningMaterialLoader.ParseCertificate(der)));
+            chain.Add(WithContext($"parse PFX chain certificate[{i}]", () => CertificateLoader.ParseCertificate(der)));
         }
 
         chain.AddRange(LoadChainCertificates(request));
@@ -713,13 +713,13 @@ public static partial class PortableCore
         foreach (var path in request.ChainCertificatePaths)
         {
             var bytes = ReadFile(path);
-            chain.Add(WithContext($"parse chain certificate {path}", () => SigningMaterialLoader.ParseCertificate(bytes)));
+            chain.Add(WithContext($"parse chain certificate {path}", () => CertificateLoader.ParseCertificate(bytes)));
         }
 
         for (int i = 0; i < request.ChainCertificatesDerBase64.Count; i++)
         {
             var bytes = DecodeBase64(request.ChainCertificatesDerBase64[i], $"decode chain_certificates_der_base64[{i}]");
-            chain.Add(WithContext($"parse chain certificate {i}", () => SigningMaterialLoader.ParseCertificate(bytes)));
+            chain.Add(WithContext($"parse chain certificate {i}", () => CertificateLoader.ParseCertificate(bytes)));
         }
 
         return chain;

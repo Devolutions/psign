@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using Devolutions.Psign.Core.Opc;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.Zip;
 
 namespace Devolutions.Psign.Core.NuGet;
@@ -311,7 +312,7 @@ public static class NuGetPackage
                 byte[] packageHash;
                 try
                 {
-                    packageHash = RustBase64.DecodeStrict(value);
+                    packageHash = Base64Standard.Decode(value);
                 }
                 catch (FormatException e)
                 {

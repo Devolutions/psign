@@ -107,7 +107,7 @@ public class OpcPackageTests
     [Fact]
     public void ArchiveReaderRejectsGarbage()
     {
-        var e = Assert.Throws<PsignException>(() => ZipCrateArchive.Open(new byte[100]));
+        var e = Assert.Throws<ZipFormatException>(() => ZipCrateArchive.Open(new byte[100]));
         Assert.Contains("Could not find central directory end", e.Message);
     }
 

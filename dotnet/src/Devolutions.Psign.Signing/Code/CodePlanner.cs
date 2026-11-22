@@ -187,7 +187,7 @@ public static class CodePlanner
             }
             catch (Exception e) when (RustIo.IsIo(e))
             {
-                throw new PsignException($"read {dir}", new PsignException(RustIo.Message(e)));
+                throw new PsignException($"read {dir}", IoErrorText.Inner(e));
             }
 
             foreach (var entry in entries)
@@ -307,7 +307,7 @@ public static class CodePlanner
             }
             catch (Exception e) when (RustIo.IsIo(e))
             {
-                throw new PsignException($"open {path}", new PsignException(RustIo.Message(e)));
+                throw new PsignException($"open {path}", IoErrorText.Inner(e));
             }
         }
 

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.ClickOnce;
+using Devolutions.Psign.Core.X509;
 
 namespace Devolutions.Psign.Signing.ClickOnce;
 
@@ -29,7 +30,7 @@ public static class ClickOnceSigner
         string unsigned = ClickOnceManifest.UnsignedManifestText(manifestText);
         try
         {
-            ClickOnceManifest.ParseCertificate(certBytes);
+            CertificateLoader.ParseCertificate(certBytes);
         }
         catch (PsignException e)
         {

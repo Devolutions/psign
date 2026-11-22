@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Signing.Internal;
 
 namespace Devolutions.Psign.Signing.Providers;
@@ -341,7 +342,7 @@ public sealed record SigningProviderConfig(
     };
 
     /// <summary><c>serde_json::to_string_pretty</c> rendering.</summary>
-    public string ToJson() => SerdeJson.Pretty(ToJsonObject());
+    public string ToJson() => RustJson.Pretty(ToJsonObject());
 
     /// <summary>Kebab-case kind name.</summary>
     public static string KindName(SigningProviderKind kind) => kind switch

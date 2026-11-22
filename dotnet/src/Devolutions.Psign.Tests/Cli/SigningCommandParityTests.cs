@@ -11,6 +11,7 @@ using Devolutions.Psign.Core.Cms;
 using Devolutions.Psign.Core.Msi;
 using Devolutions.Psign.Core.Pe;
 using Devolutions.Psign.Core.X509;
+using Devolutions.Psign.Signing.AzureKeyVault;
 using Devolutions.Psign.Signing.Cms;
 using Devolutions.Psign.Signing.Pki;
 using Devolutions.Psign.Tests.Signing;
@@ -28,22 +29,22 @@ public sealed class SigningCliPki : IDisposable
 
     public SigningCliPki()
     {
-        var root = Devolutions.Psign.Signing.Pki.TestPki.GenerateRootCa(new RootCaSpec("CN=psign CLI Test Root, O=Devolutions Inc., C=CA"));
-        var leaf = Devolutions.Psign.Signing.Pki.TestPki.IssueCodeSigningCert(root.AsIssuer(), new CodeSigningCertSpec("CN=psign CLI Test Signer, O=Devolutions Inc."));
-        var tsa = Devolutions.Psign.Signing.Pki.TestPki.IssueCodeSigningCert(root.AsIssuer(), new CodeSigningCertSpec("CN=psign CLI Test TSA", ExtraEkuOids: [Oids.EkuTimeStamping]));
+        var root = TestPki.GenerateRootCa(new RootCaSpec("CN=psign CLI Test Root, O=Devolutions Inc., C=CA"));
+        var leaf = TestPki.IssueCodeSigningCert(root.AsIssuer(), new CodeSigningCertSpec("CN=psign CLI Test Signer, O=Devolutions Inc."));
+        var tsa = TestPki.IssueCodeSigningCert(root.AsIssuer(), new CodeSigningCertSpec("CN=psign CLI Test TSA", ExtraEkuOids: [Oids.EkuTimeStamping]));
         CaCert = Write("ca.der", root.CertificateDer);
         CaKey = Write("ca.key", Encoding.ASCII.GetBytes(root.PrivateKeyPem));
-        CaPfx = Write("ca.pfx", Devolutions.Psign.Signing.Pki.TestPki.EncodePfxDer(root, PfxPassword));
+        CaPfx = Write("ca.pfx", TestPki.EncodePfxDer(root, PfxPassword));
         LeafCert = Write("leaf.der", leaf.CertificateDer);
         LeafKey = Write("leaf.key", Encoding.ASCII.GetBytes(leaf.PrivateKeyPem));
-        LeafPfx = Write("leaf.pfx", Devolutions.Psign.Signing.Pki.TestPki.EncodePfxDer(leaf, PfxPassword));
+        LeafPfx = Write("leaf.pfx", TestPki.EncodePfxDer(leaf, PfxPassword));
         LeafDer = leaf.CertificateDer;
         CaDer = root.CertificateDer;
         LeafRsa = leaf.PrivateKey.CreateRsa();
         TsaRsa = tsa.PrivateKey.CreateRsa();
         TsaInfo = tsa.Certificate;
         LeafThumbprint = Convert.ToHexString(SHA1.HashData(leaf.CertificateDer));
-        PemBundle = Devolutions.Psign.Signing.Pki.TestPki.EncodePemCertificateBundle([leaf.CertificateDer, root.CertificateDer]);
+        PemBundle = TestPki.EncodePemCertificateBundle([leaf.CertificateDer, root.CertificateDer]);
     }
 
     public string CaCert { get; }
@@ -439,7 +440,7 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         {
             var body = JsonNode.Parse(req.Body)!;
             var alg = body["alg"]!.GetValue<string>();
-            var digest = Base64UrlDecode(body["value"]!.GetValue<string>());
+            var digest = AzureKeyVaultClient.Base64UrlDecode(body["value"]!.GetValue<string>());
             var hash = alg switch
             {
                 "RS256" => HashAlgorithmName.SHA256,
@@ -447,18 +448,10 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
                 _ => HashAlgorithmName.SHA512,
             };
             var sig = _pki.LeafRsa.SignHash(digest, hash, RSASignaturePadding.Pkcs1);
-            return LocalHttpResponse.Json(new JsonObject { ["kid"] = kid, ["value"] = Base64UrlEncode(sig) }.ToJsonString());
+            return LocalHttpResponse.Json(new JsonObject { ["kid"] = kid, ["value"] = AzureKeyVaultClient.Base64UrlEncode(sig) }.ToJsonString());
         }
 
         return LocalHttpResponse.Json("{\"error\":{\"code\":\"NotFound\"}}", 404);
-    }
-
-    private static string Base64UrlEncode(byte[] data) => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-
-    private static byte[] Base64UrlDecode(string s)
-    {
-        var t = s.Replace('-', '+').Replace('_', '/');
-        return Convert.FromBase64String(t + new string('=', (4 - (t.Length % 4)) % 4));
     }
 
     [SkippableTheory]
@@ -710,7 +703,12 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
 
     private static readonly string[] NondeterministicPkiKeys = ["thumbprint_sha1", "thumbprint_sha256", "serial_hex", "not_before", "not_after", "cert_out", "pem_out", "key_out", "pfx_out"];
 
-    private static void AssertSamePkiJson(JsonObject rust, JsonObject managed)
+    /// <summary>
+    /// Compare PKI JSON reports ignoring nondeterministic fields. <paramref name="compareValiditySpan"/> must be
+    /// <c>false</c> when the validity is clamped to an issuing CA created at a different time: the span then depends on
+    /// how many (whole) seconds elapsed between CA creation and issuance, which differs between the two tools under load.
+    /// </summary>
+    private static void AssertSamePkiJson(JsonObject rust, JsonObject managed, bool compareValiditySpan = true)
     {
         Assert.Equal(rust.Select(kv => kv.Key), managed.Select(kv => kv.Key));
         foreach (var (key, value) in rust)
@@ -721,11 +719,18 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
             }
         }
 
-        var span = DateTimeOffset.Parse(rust["not_after"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture) - DateTimeOffset.Parse(rust["not_before"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
-        var mspan = DateTimeOffset.Parse(managed["not_after"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture) - DateTimeOffset.Parse(managed["not_before"]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Equal(span, mspan);
+        if (compareValiditySpan)
+        {
+            Assert.Equal(ValiditySpan(rust), ValiditySpan(managed));
+        }
+
         Assert.Equal(rust["serial_hex"]!.GetValue<string>().Length, managed["serial_hex"]!.GetValue<string>().Length);
     }
+
+    private static DateTimeOffset JsonTime(JsonObject json, string key) =>
+        DateTimeOffset.Parse(json[key]!.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture);
+
+    private static TimeSpan ValiditySpan(JsonObject json) => JsonTime(json, "not_after") - JsonTime(json, "not_before");
 
     private static string ExtensionProfile(string certPath)
     {
@@ -758,15 +763,20 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         string Mask(string s, string tag) => string.Join('\n', Norm(s).Split('\n').Select(l => l.Split('=')[0] is "thumbprint_sha1" or "thumbprint_sha256" or "serial_hex" or "not_before" or "not_after" ? l.Split('=')[0] : l.Replace(dir.File(tag), "{tag}", StringComparison.Ordinal)));
         Assert.Equal(Mask(rustText.Stdout, "rt"), Mask(managedText.Stdout, "mt"));
 
-        // Each tool can issue from the other's CA (PFX with password and cert + key).
+        // Each tool can issue from the other's CA (PFX with password and cert + key). The default 365-day leaf validity
+        // is clamped to the 30-day CA notAfter, so compare the clamped notAfter instead of the (timing-dependent) span.
         var leafRust = ParseJson(RunRust("portable", "issue-code-signing-cert", "--ca-pfx", dir.File("m.pfx"), "--ca-password", "secret", "--subject", "CN=Leaf", "--eku-oid", "1.3.6.1.4.1.311.10.3.13", "--cert-out", dir.File("lr.der"), "--json"));
         var leafManaged = ParseJson(CliHarness.RunManaged("portable", "issue-code-signing-cert", "--ca-pfx", dir.File("r.pfx"), "--ca-password", "secret", "--subject", "CN=Leaf", "--eku-oid", "1.3.6.1.4.1.311.10.3.13", "--cert-out", dir.File("lm.der"), "--json"));
-        AssertSamePkiJson(leafRust, leafManaged);
+        AssertSamePkiJson(leafRust, leafManaged, compareValiditySpan: false);
+        Assert.Equal(JsonTime(managedJson, "not_after"), JsonTime(leafRust, "not_after"));
+        Assert.Equal(JsonTime(rustJson, "not_after"), JsonTime(leafManaged, "not_after"));
         Assert.Equal(ExtensionProfile(dir.File("lr.der")).Split('|')[0], ExtensionProfile(dir.File("lm.der")).Split('|')[0]);
 
         var fromKeyRust = ParseJson(RunRust("portable", "issue-code-signing-cert", "--ca-cert", dir.File("m.pem"), "--ca-key", Path.Combine(dir.DirPath, "m", "k.key"), "--ca-chain-cert", _pki.CaCert, "--subject", "CN=Leaf2", "--pfx-out", dir.File("l2r.pfx"), "--json"));
         var fromKeyManaged = ParseJson(CliHarness.RunManaged("portable", "issue-code-signing-cert", "--ca-cert", dir.File("r.pem"), "--ca-key", Path.Combine(dir.DirPath, "r", "k.key"), "--ca-chain-cert", _pki.CaCert, "--subject", "CN=Leaf2", "--pfx-out", dir.File("l2m.pfx"), "--json"));
-        AssertSamePkiJson(fromKeyRust, fromKeyManaged);
+        AssertSamePkiJson(fromKeyRust, fromKeyManaged, compareValiditySpan: false);
+        Assert.Equal(JsonTime(managedJson, "not_after"), JsonTime(fromKeyRust, "not_after"));
+        Assert.Equal(JsonTime(rustJson, "not_after"), JsonTime(fromKeyManaged, "not_after"));
         Assert.Equal(2, fromKeyManaged["chain_certificate_count"]!.GetValue<int>());
     }
 
@@ -857,7 +867,7 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         }
 
         var leafPem = dir.File("leaf.pem");
-        File.WriteAllText(leafPem, Devolutions.Psign.Signing.Pki.TestPki.EncodePemCertificateBundle([_pki.LeafDer]));
+        File.WriteAllText(leafPem, TestPki.EncodePemCertificateBundle([_pki.LeafDer]));
         Same(s => ["cert-store", "list", "--cert-store-dir", s]);
         Same(s => ["cert-store", "list", "--cert-store-dir", s, "--json"]);
         Same(s => ["cert-store", "import", "--cert-store-dir", s, "--key", _pki.LeafKey, leafPem]);

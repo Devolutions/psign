@@ -133,7 +133,7 @@ internal static class FormatCommands
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException(Output.IoMessage(e));
+            throw new PsignException(IoErrorText.Message(e));
         }
     }
 

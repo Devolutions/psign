@@ -8,7 +8,7 @@ namespace Devolutions.Psign.Core.Zip;
 /// feature and <c>flate2</c>'s <c>miniz_oxide</c> backend): local headers without data descriptors or extra fields,
 /// version made by <c>0x032E</c> (Unix, 4.6), version needed 20, external attributes <c>0o100644 &lt;&lt; 16</c>
 /// (files) / <c>0o40755 &lt;&lt; 16</c> (directories), DEFLATE level 6 via <see cref="MinizDeflater"/>, and a plain
-/// end-of-central-directory record.
+/// end-of-central-directory record (preceded by the ZIP64 end record + locator when more than 65535 entries are written).
 /// </summary>
 public sealed class ZipCrateWriter
 {
@@ -132,21 +132,55 @@ public sealed class ZipCrateWriter
             ulong centralSize = (ulong)_out.Position - centralStart;
             if (_files.Count > ushort.MaxValue || Math.Max(centralSize, centralStart) > 0xFFFFFFFF)
             {
-                throw new PsignException("ZIP64 output is not supported by the portable package writer");
+                // Rust write_central_and_footer: ZIP64 end record + locator before the classic EOCD.
+                ulong zip64Start = (ulong)_out.Position;
+                Span<byte> z = stackalloc byte[56 + 20];
+                BinaryPrimitives.WriteUInt32LittleEndian(z, 0x06064b50);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[4..], 44);
+                BinaryPrimitives.WriteUInt16LittleEndian(z[12..], DefaultVersion);
+                BinaryPrimitives.WriteUInt16LittleEndian(z[14..], DefaultVersion);
+                BinaryPrimitives.WriteUInt32LittleEndian(z[16..], 0);
+                BinaryPrimitives.WriteUInt32LittleEndian(z[20..], 0);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[24..], (ulong)_files.Count);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[32..], (ulong)_files.Count);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[40..], centralSize);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[48..], centralStart);
+                BinaryPrimitives.WriteUInt32LittleEndian(z[56..], 0x07064b50);
+                BinaryPrimitives.WriteUInt32LittleEndian(z[60..], 0);
+                BinaryPrimitives.WriteUInt64LittleEndian(z[64..], zip64Start);
+                BinaryPrimitives.WriteUInt32LittleEndian(z[72..], 1);
+                _out.Write(z);
             }
 
+            ushort count = (ushort)Math.Min(_files.Count, ushort.MaxValue);
             Span<byte> e = stackalloc byte[22];
             BinaryPrimitives.WriteUInt32LittleEndian(e, 0x06054b50);
             BinaryPrimitives.WriteUInt16LittleEndian(e[4..], 0);
             BinaryPrimitives.WriteUInt16LittleEndian(e[6..], 0);
-            BinaryPrimitives.WriteUInt16LittleEndian(e[8..], (ushort)_files.Count);
-            BinaryPrimitives.WriteUInt16LittleEndian(e[10..], (ushort)_files.Count);
-            BinaryPrimitives.WriteUInt32LittleEndian(e[12..], (uint)centralSize);
-            BinaryPrimitives.WriteUInt32LittleEndian(e[16..], (uint)centralStart);
+            BinaryPrimitives.WriteUInt16LittleEndian(e[8..], count);
+            BinaryPrimitives.WriteUInt16LittleEndian(e[10..], count);
+            BinaryPrimitives.WriteUInt32LittleEndian(e[12..], (uint)Math.Min(centralSize, 0xFFFFFFFF));
+            BinaryPrimitives.WriteUInt32LittleEndian(e[16..], (uint)Math.Min(centralStart, 0xFFFFFFFF));
             BinaryPrimitives.WriteUInt16LittleEndian(e[20..], 0);
             _out.Write(e);
         }
 
         return _out.ToArray();
+    }
+
+    /// <summary>
+    /// Write <paramref name="entries"/> as stored files with default options (1980-01-01, <c>0o100644</c>) and return the
+    /// finished archive (Rust <c>ZipWriter</c> + <c>FileOptions::default().compression_method(Stored)</c>). Used where the
+    /// Rust MSIX code re-zips bundle children before restaging and by tests that build ZIPs.
+    /// </summary>
+    public static byte[] WriteStored(IEnumerable<(string Name, byte[] Data)> entries)
+    {
+        var writer = new ZipCrateWriter();
+        foreach (var (name, data) in entries)
+        {
+            writer.StartFile(name, data, Stored);
+        }
+
+        return writer.Finish();
     }
 }

@@ -2,6 +2,8 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Signing.ArtifactSigning;
 using Devolutions.Psign.Signing.Internal;
@@ -230,7 +232,7 @@ public sealed class AzureKeyVaultClient : IDisposable
     {
         try
         {
-            return Convert.FromBase64String(cerB64.Trim());
+            return Base64Standard.Decode(cerB64.Trim());
         }
         catch (FormatException e)
         {
@@ -279,7 +281,7 @@ public sealed class AzureKeyVaultClient : IDisposable
     /// <inheritdoc cref="SignDigest"/>
     public async Task<byte[]> SignDigestAsync(string token, string signUrl, string jwsAlg, byte[] digest, CancellationToken cancellationToken = default)
     {
-        var body = SerdeJson.Compact(new JsonObject
+        var body = RustJson.Compact(new JsonObject
         {
             ["alg"] = jwsAlg,
             ["value"] = Base64UrlEncode(digest),

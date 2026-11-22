@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Asn1;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Signing.Internal;
 using Devolutions.Psign.Signing.Keys;
@@ -122,7 +123,7 @@ public sealed record GeneratedCertSummary(
     }
 
     /// <summary><c>serde_json::to_string_pretty</c> rendering.</summary>
-    public string ToJson() => SerdeJson.Pretty(ToJsonObject());
+    public string ToJson() => RustJson.Pretty(ToJsonObject());
 }
 
 /// <summary>
@@ -170,7 +171,7 @@ public static class TestPki
         CertificateInfo cert;
         try
         {
-            cert = SigningMaterialLoader.ParseCertificate(certBytes);
+            cert = CertificateLoader.ParseCertificate(certBytes);
         }
         catch (PsignException e)
         {
@@ -180,7 +181,7 @@ public static class TestPki
         PrivateKeyMaterial key;
         try
         {
-            key = SigningMaterialLoader.ParseRsaPrivateKeyMaterial(keyBytes);
+            key = PrivateKeyLoader.ParseRsaPrivateKeyMaterial(keyBytes);
         }
         catch (PsignException e)
         {

@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Signing.Internal;
 using Devolutions.Psign.Signing.Pki;
@@ -349,7 +351,7 @@ public sealed class ArtifactSigningClient : IDisposable
         var submitUrl = $"{baseUrl}/codesigningaccounts/{account}/certificateprofiles/{profile}:sign?api-version={api}";
 
         // serde_json::json! builds a BTreeMap, so the body keys are sorted.
-        var body = SerdeJson.Compact(new JsonObject
+        var body = RustJson.Compact(new JsonObject
         {
             ["digest"] = Convert.ToBase64String(p.Digest),
             ["signatureAlgorithm"] = p.SignatureAlgorithm.Trim(),
@@ -424,7 +426,7 @@ public sealed class ArtifactSigningClient : IDisposable
                 case "Succeeded":
                     return v;
                 case "Failed":
-                    throw new PsignException("codesign operation failed: " + SerdeJson.Compact(v, sortKeys: true));
+                    throw new PsignException("codesign operation failed: " + RustJson.Compact(v, sortKeys: true));
                 case "Canceled":
                     throw new PsignException("codesign operation canceled");
                 default:
@@ -456,7 +458,7 @@ public sealed class ArtifactSigningClient : IDisposable
         var s = StringMember(obj, field) ?? throw new PsignException($"codesign result missing {field}");
         try
         {
-            return Convert.FromBase64String(s.Trim());
+            return Base64Standard.Decode(s.Trim());
         }
         catch (FormatException e)
         {

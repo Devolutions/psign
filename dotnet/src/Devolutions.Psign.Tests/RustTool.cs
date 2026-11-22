@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using Xunit;
 
 namespace Devolutions.Psign.Tests;
@@ -43,13 +44,23 @@ internal static class RustTool
         return Path!;
     }
 
-    /// <summary>Run the Rust tool and return (exit code, stdout, stderr).</summary>
-    public static (int ExitCode, string Stdout, string Stderr) Run(params string[] args)
+    /// <summary>No environment overrides.</summary>
+    public static IReadOnlyDictionary<string, string?> NoEnv { get; } = new Dictionary<string, string?>();
+
+    /// <summary>Disable automatic AuthRoot trust (<c>PSIGN_NO_AUTO_TRUST=1</c>) for deterministic trust output.</summary>
+    public static IReadOnlyDictionary<string, string?> NoAutoTrust { get; } = new Dictionary<string, string?> { ["PSIGN_NO_AUTO_TRUST"] = "1" };
+
+    /// <summary>
+    /// Run the Rust tool (<c>PSIGN_TOOL_MODE=portable</c> plus <paramref name="env"/> overrides, <c>null</c> removes a
+    /// variable) and return the raw stdout bytes and the UTF-8 decoded stderr. Skips the test when the tool is unavailable.
+    /// </summary>
+    public static (int ExitCode, byte[] Stdout, string Stderr) RunBytes(IReadOnlyDictionary<string, string?> env, params string[] args)
     {
         var psi = new ProcessStartInfo(Require())
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            StandardErrorEncoding = Encoding.UTF8,
             UseShellExecute = false,
         };
         foreach (var a in args)
@@ -58,17 +69,44 @@ internal static class RustTool
         }
 
         psi.Environment["PSIGN_TOOL_MODE"] = "portable";
+        foreach (var (k, v) in env)
+        {
+            if (v is null)
+            {
+                psi.Environment.Remove(k);
+            }
+            else
+            {
+                psi.Environment[k] = v;
+            }
+        }
+
         using var p = Process.Start(psi)!;
-        var stdoutTask = p.StandardOutput.ReadToEndAsync();
+        using var ms = new MemoryStream();
+        var copy = p.StandardOutput.BaseStream.CopyToAsync(ms);
         var stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
-        return (p.ExitCode, stdoutTask.Result, stderr);
+        copy.Wait();
+        return (p.ExitCode, ms.ToArray(), stderr);
+    }
+
+    /// <summary>Run the Rust tool and return (exit code, stdout, stderr), both streams decoded as UTF-8.</summary>
+    public static (int ExitCode, string Stdout, string Stderr) Run(params string[] args) => Run(NoEnv, args);
+
+    /// <summary>Run the Rust tool with environment overrides; both streams decoded as UTF-8.</summary>
+    public static (int ExitCode, string Stdout, string Stderr) Run(IReadOnlyDictionary<string, string?> env, params string[] args)
+    {
+        var (code, stdout, stderr) = RunBytes(env, args);
+        return (code, Encoding.UTF8.GetString(stdout), stderr);
     }
 
     /// <summary>Run and assert success.</summary>
-    public static string RunOk(params string[] args)
+    public static string RunOk(params string[] args) => RunOk(NoEnv, args);
+
+    /// <summary>Run with environment overrides and assert success.</summary>
+    public static string RunOk(IReadOnlyDictionary<string, string?> env, params string[] args)
     {
-        var (code, stdout, stderr) = Run(args);
+        var (code, stdout, stderr) = Run(env, args);
         Assert.True(code == 0, $"rust psign-tool {string.Join(' ', args)} failed ({code}): {stderr}\n{stdout}");
         return stdout;
     }

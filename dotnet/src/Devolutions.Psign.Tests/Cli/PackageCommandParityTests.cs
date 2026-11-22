@@ -19,7 +19,7 @@ public class PackageCommandParityTests
 
     private static string[] FixtureTrust => ["--trusted-ca", Fixtures.Path(TestCa), "--as-of", AsOf];
 
-    private static string[] PkiTrust(TestPki pki) => ["--trusted-ca", pki.RootPath, "--as-of", TestPki.Today];
+    private static string[] PkiTrust(GeneratedTestPki pki) => ["--trusted-ca", pki.RootPath, "--as-of", GeneratedTestPki.Today];
 
     private static string Norm(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
 
@@ -100,7 +100,7 @@ public class PackageCommandParityTests
     public void NuGetSplitSigningMatchesRust(string alg)
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var package = Fixtures.Path("package-signing/unsigned/sample.nupkg");
         var prehash = SameWithOutput(dir, "prehash.bin", "portable", "nupkg-signature-pkcs7-prehash", package, "--algorithm", alg, "--cert", pki.LeafPath, "--encoding", "raw", "--output", "{out}");
         SameFiles(prehash);
@@ -139,7 +139,7 @@ public class PackageCommandParityTests
     public void NuGetLocalSigningMatchesRust()
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var package = Fixtures.Path("package-signing/unsigned/with-pe.nupkg");
 
         // signingTime makes the CMS bytes time-dependent; stdout (lengths) and verification must agree.
@@ -195,7 +195,7 @@ public class PackageCommandParityTests
     public void VsixSigningMatchesRust(string alg)
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var package = Fixtures.Path("package-signing/unsigned/nested.vsix");
 
         var reference = SameWithOutput(dir, "reference.xml", "portable", "vsix-signature-reference-xml", package, "--algorithm", alg, "--output", "{out}");
@@ -233,7 +233,7 @@ public class PackageCommandParityTests
     public void VsixSignMatchesRust()
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var package = Fixtures.Path("package-signing/unsigned/deep-nested.vsix");
         var signed = SameWithOutput(dir, "signed.vsix", "portable", "vsix-sign", package, "--algorithm", "sha512", "--cert", pki.LeafPath, "--key", pki.LeafKeyPemPath, "--output", "{out}");
         foreach (var output in new[] { signed.Rust, signed.Managed })
@@ -324,7 +324,7 @@ public class PackageCommandParityTests
     public void ClickOnceSigningMatchesRust(string digest)
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var manifest = WriteClickOnceTree(dir);
 
         var signed = SameWithOutput(dir, "signed.manifest", "portable", "clickonce-sign-manifest", manifest, "--digest", digest, "--cert", pki.LeafPath, "--key", pki.LeafKeyPath, "--output", "{out}");
@@ -347,7 +347,7 @@ public class PackageCommandParityTests
             CliHarness.AssertSameOutput("portable", "clickonce-verify-manifest-signature", output, "--digest", digest);
             CliHarness.AssertSameOutput("portable", "clickonce-verify-manifest-signature", output, "--digest", digest, "--cert", pki.LeafPemPath);
             CliHarness.AssertSameOutput(["portable", "clickonce-verify-manifest-signature", output, "--digest", digest, .. PkiTrust(pki)]);
-            CliHarness.AssertSameOutput(["portable", "clickonce-verify-manifest-signature", output, "--digest", digest, "--verbose-chain", "--anchor-dir", dir.DirPath, "--as-of", TestPki.Today]);
+            CliHarness.AssertSameOutput(["portable", "clickonce-verify-manifest-signature", output, "--digest", digest, "--verbose-chain", "--anchor-dir", dir.DirPath, "--as-of", GeneratedTestPki.Today]);
             CliHarness.AssertSameOutput(["portable", "clickonce-verify-manifest-signature", output, "--digest", digest, .. FixtureTrust]);
             CliHarness.AssertSameOutput(["portable", "clickonce-verify-manifest-signature", output, "--digest", digest, "--prefer-timestamp-signing-time", "--require-valid-timestamp", "--trusted-ca", pki.RootPath]);
             CliHarness.AssertSameOutput("portable", "clickonce-verify-manifest-signature", output, "--digest", digest == "sha256" ? "sha384" : "sha256");
@@ -386,7 +386,7 @@ public class PackageCommandParityTests
     public void AppInstallerCompanionSigningMatchesRust(string digest)
     {
         using var dir = new TempDir();
-        using var pki = new TestPki(dir);
+        using var pki = new GeneratedTestPki(dir);
         var path = Fixtures.Path(AppInstaller);
 
         var companion = SameWithOutput(dir, "companion.p7", "portable", "appinstaller-sign-companion", path, "--digest", digest, "--cert", pki.LeafPath, "--key", pki.LeafKeyPath, "--chain-cert", pki.RootPath, "--output", "{out}");

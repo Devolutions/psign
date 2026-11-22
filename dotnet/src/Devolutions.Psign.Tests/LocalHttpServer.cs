@@ -2,9 +2,10 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-namespace Devolutions.Psign.Tests.Cli;
+namespace Devolutions.Psign.Tests;
 
-/// <summary>A request received by <see cref="LocalHttpServer"/>.</summary>
+/// <summary>A request received by <see cref="LocalHttpServer"/> (or an in-process mock handler).</summary>
+/// <param name="Target">Request target (path and query).</param>
 internal sealed record LocalHttpRequest(string Method, string Target, Dictionary<string, string> Headers, byte[] Body)
 {
     public string Path => Target.Split('?')[0];
@@ -12,17 +13,26 @@ internal sealed record LocalHttpRequest(string Method, string Target, Dictionary
     public string BodyText => Encoding.UTF8.GetString(Body);
 }
 
-/// <summary>A response produced by a <see cref="LocalHttpServer"/> handler.</summary>
-internal sealed record LocalHttpResponse(int Status, byte[] Body, string ContentType = "application/octet-stream", params (string Name, string Value)[] Headers)
+/// <summary>
+/// A response produced by a <see cref="LocalHttpServer"/> handler. <see cref="ContentType"/> is sent as the
+/// <c>Content-Type</c> header when not <c>null</c>; <see cref="Headers"/> are sent verbatim.
+/// </summary>
+internal sealed record LocalHttpResponse(int Status, byte[] Body, string? ContentType, params (string Name, string Value)[] Headers)
 {
+    /// <summary>Response without a dedicated content type (headers only).</summary>
+    public LocalHttpResponse(int status, byte[] body, params (string Name, string Value)[] headers)
+        : this(status, body, null, headers)
+    {
+    }
+
     public static LocalHttpResponse Json(string json, int status = 200, params (string Name, string Value)[] headers) =>
         new(status, Encoding.UTF8.GetBytes(json), "application/json", headers);
 }
 
 /// <summary>
-/// Minimal HTTP/1.1 server on <c>127.0.0.1</c> (raw <see cref="TcpListener"/>, one request per connection) used to mock
-/// TSA / Azure Key Vault / Artifact Signing endpoints for both the Rust and the managed <c>psign-tool</c> without real
-/// network access or HTTP.sys URL ACLs.
+/// Minimal HTTP/1.1 server on <c>127.0.0.1</c> (raw <see cref="TcpListener"/>, one request per connection,
+/// <c>Content-Length</c> or chunked request bodies) used to mock TSA / Azure Key Vault / Artifact Signing endpoints for
+/// the Rust tool, the Rust FFI and the managed implementation without real network access or HTTP.sys URL ACLs.
 /// </summary>
 internal sealed class LocalHttpServer : IDisposable
 {
@@ -100,7 +110,11 @@ internal sealed class LocalHttpServer : IDisposable
 
                 var head = new StringBuilder();
                 head.Append("HTTP/1.1 ").Append(response.Status).Append(' ').Append(Reason(response.Status)).Append("\r\n");
-                head.Append("Content-Type: ").Append(response.ContentType).Append("\r\n");
+                if (response.ContentType is not null)
+                {
+                    head.Append("Content-Type: ").Append(response.ContentType).Append("\r\n");
+                }
+
                 head.Append("Content-Length: ").Append(response.Body.Length).Append("\r\n");
                 foreach (var (name, value) in response.Headers)
                 {

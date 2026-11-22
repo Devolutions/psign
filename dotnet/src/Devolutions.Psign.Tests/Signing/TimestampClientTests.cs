@@ -153,7 +153,7 @@ public class TimestampClientTests
         Assert.Equal("1.3.6.1.4.1.311.3.3.1", attr.Oid);
         Assert.Equal(Req("2.16.840.1.101.3.4.2.1", SHA256.HashData(signature), null, true), mock.Requests[0].Body);
 
-        var cms = CmsSignedData.Parse(client.TimestampPkcs7(pkcs7, "http://t/tsa", AuthenticodeHashKind.Sha256, Devolutions.Psign.Signing.Timestamp.Rfc3161TimestampAttribute.CmsTimeStampToken));
+        var cms = CmsSignedData.Parse(client.TimestampPkcs7(pkcs7, "http://t/tsa", AuthenticodeHashKind.Sha256, Devolutions.Psign.Signing.Cms.Rfc3161TimestampAttribute.CmsTimeStampToken));
         Assert.Equal("1.2.840.113549.1.9.16.2.14", Assert.Single(cms.SignerInfos[0].UnsignedAttributes!).Oid);
     }
 }

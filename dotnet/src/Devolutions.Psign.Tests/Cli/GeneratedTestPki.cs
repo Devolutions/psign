@@ -3,10 +3,13 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace Devolutions.Psign.Tests.Cli;
 
-/// <summary>Generated two-level PKI (root CA + RSA-2048 code signing leaf) written to <see cref="TempDir"/>.</summary>
-internal sealed class TestPki : IDisposable
+/// <summary>
+/// Generated two-level PKI (root CA + RSA-2048 code signing leaf) written to <see cref="TempDir"/> with the BCL
+/// <see cref="CertificateRequest"/> (test-only; the ported Rust generator is <see cref="Devolutions.Psign.Signing.Pki.TestPki"/>).
+/// </summary>
+internal sealed class GeneratedTestPki : IDisposable
 {
-    public TestPki(TempDir dir, string prefix = "pki")
+    public GeneratedTestPki(TempDir dir, string prefix = "pki")
     {
         var now = DateTimeOffset.UtcNow;
         RootKey = RSA.Create(2048);

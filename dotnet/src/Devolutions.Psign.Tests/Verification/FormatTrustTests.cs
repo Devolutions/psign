@@ -242,8 +242,8 @@ public class FormatTrustTests
     public void XmlSignerTrustChainsToAnchor()
     {
         using var dir = new TempDir();
-        using var pki = new Cli.TestPki(dir);
-        var today = Cli.TestPki.Today;
+        using var pki = new Cli.GeneratedTestPki(dir);
+        var today = Cli.GeneratedTestPki.Today;
         var shared = new TrustVerifySharedArgs { TrustedCa = [pki.RootPath], AsOf = today };
         Assert.Equal(1, XmlSignerTrust.VerifyXmlSignerCertificateTrust(pki.Leaf.RawData, shared));
 

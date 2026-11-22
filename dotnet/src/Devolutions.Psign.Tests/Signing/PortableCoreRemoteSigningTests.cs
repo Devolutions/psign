@@ -43,6 +43,11 @@ internal sealed class FuncHttpHandler : HttpMessageHandler
         Requests.Add(captured);
         var response = _handler(captured);
         var message = new HttpResponseMessage((HttpStatusCode)response.Status) { Content = new ByteArrayContent(response.Body) };
+        if (response.ContentType is not null)
+        {
+            message.Content.Headers.TryAddWithoutValidation("Content-Type", response.ContentType);
+        }
+
         foreach (var (name, value) in response.Headers)
         {
             if (!message.Headers.TryAddWithoutValidation(name, value))
@@ -128,7 +133,7 @@ internal sealed class CloudMock : IDisposable
             }.ToJsonString());
         }
 
-        return new LocalHttpResponse(404, Encoding.UTF8.GetBytes("no mock route for " + request.Method + " " + request.PathAndQuery));
+        return new LocalHttpResponse(404, Encoding.UTF8.GetBytes("no mock route for " + request.Method + " " + request.Target));
     }
 
     private static HashAlgorithmName HashFor(string alg) => alg switch
@@ -270,7 +275,7 @@ public sealed class PortableCoreRemoteSigningTests
         Assert.Equal("RS512", JsonNode.Parse(sign.BodyText)!["signatureAlgorithm"]!.GetValue<string>());
         Assert.Equal("corr-1", sign.Headers["x-correlation-id"]);
         Assert.Equal("Bearer as-token", sign.Headers["Authorization"]);
-        Assert.StartsWith("/codesigningaccounts/acct/certificateprofiles/prof:sign?api-version=2024-06-15", sign.PathAndQuery, StringComparison.Ordinal);
+        Assert.StartsWith("/codesigningaccounts/acct/certificateprofiles/prof:sign?api-version=2024-06-15", sign.Target, StringComparison.Ordinal);
     }
 
     [Fact]

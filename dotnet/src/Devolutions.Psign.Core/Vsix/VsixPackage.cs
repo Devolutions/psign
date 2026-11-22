@@ -1,6 +1,7 @@
 using System.Text;
 using Devolutions.Psign.Core.NuGet;
 using Devolutions.Psign.Core.Opc;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.Zip;
 
 namespace Devolutions.Psign.Core.Vsix;
@@ -413,7 +414,7 @@ public static class VsixPackage
             byte[] digest;
             try
             {
-                digest = RustBase64.DecodeStrict(digestValue);
+                digest = Base64Standard.Decode(digestValue);
             }
             catch (FormatException e)
             {
@@ -519,7 +520,7 @@ public static class VsixPackage
         byte[] signature;
         try
         {
-            signature = RustBase64.DecodeStrict(value);
+            signature = Base64Standard.Decode(value);
         }
         catch (FormatException e)
         {
@@ -542,7 +543,7 @@ public static class VsixPackage
         byte[] cert;
         try
         {
-            cert = RustBase64.DecodeStrict(value);
+            cert = Base64Standard.Decode(value);
         }
         catch (FormatException e)
         {

@@ -26,7 +26,26 @@ name in the file / class name so reviewers can map files 1:1 (for example `msi_d
 - `Authenticode/SpcIndirectDataContent` (`ForPe/ForCab/ForMsi/ForScript/ForMsix`, `Parse`, `Encode`), `Authenticode/AuthenticodeSignature` (authenticode-crate validation rules).
 - `X509/CertificateInfo` (raw issuer/subject/serial/SPKI/extensions; `SameIssuerAndSerial`, `IsIssuerOf`, `VerifySignatureBy`), `X509/SignatureVerifier`, `X509/X509CertificateLoaderCompat`.
 - `Pe/PeFile` (offsets, sections, cert table, Authenticode digest ranges), `Pe/PeAuthenticode` (digest, consistency, nth PKCS#7), `Pe/PeEmbed` (checksum, `WIN_CERTIFICATE`, prepare/append/replace/remove).
-- Signing: `Signing/Cms/Pkcs7Builder` (Authenticode + generic CMS producers, signed attribute profiles, timestamp-token attachment), `IDigestSigner`, `RsaDigestSigner`, `PrecomputedDigestSigner`.
+- ZIP (Rust `zip` 0.6.6 + `miniz_oxide` 0.8.9 emulation, all under `Core/Zip`): `ZipCrateArchive` / `ZipCrateEntry` /
+  `ZipFormatException` (reader: `ByName` / `RequireByName` for metadata, `ByIndex` / `OpenByName` / `TryOpenByName` for
+  Rust `by_index` / `by_name` validation, `Read`, `ReadRaw`, `DataStart`), `ZipCrateWriter` (`StartFile`, `AddDirectory`,
+  `Finish`, `WriteStored`), `MinizDeflater` (one-shot `Compress` or streaming with `DeflateFlush`), `ZipCrc32`,
+  `ZipDateTime`. `Core/Msix/QuickXml` is the quick-xml event reader/writer used by MSIX manifest rewriting (not a DOM;
+  `Core/Xml/XmlC14n` / `XmlTextScan` serve XMLDSig and text scanning).
+- Text / encoding: `Text/RustText` (strict UTF-8, Rust string helpers), `Text/Base64Standard` (Rust `base64` `STANDARD`
+  decode with its error texts, plus the lenient ClickOnce `DecodeXmlDsig`), `Json/RustJson` (the only serde_json-compatible
+  writer: `Pretty` / `Compact` with optional `sortKeys`, `ToStringPretty<T>` for System.Text.Json models, `String`,
+  `StringArray`, `SortedObject`, `CompareUtf8` / `Utf8Comparer`), `IoErrorText` (Rust `std::io::Error` display text;
+  `Message`, `Inner`).
+- Certificates and keys: `X509/CertificateLoader` (Rust `rdp::parse_certificate`: `ParseCertificate`, `ParseCertificates`,
+  `ParsePemBundle`, `PemText`, `DecodeSinglePem`, `PemOrDerToDer`), `Signing/Keys/PrivateKeyLoader` (Rust
+  `rdp::parse_rsa_private_key`: `ParseRsaPrivateKey`, `ParseRsaPrivateKeyMaterial`, `LoadPkcs8KeyPemFile`),
+  `Signing/ArtifactSigning/ArtifactSigningCertificates` (Rust `parse_artifact_signing_certificates`).
+- Signing: `Signing/Cms/Pkcs7Builder` (Authenticode + generic CMS producers, signed attribute profiles, timestamp-token attachment), `IDigestSigner`, `RsaDigestSigner`, `PrecomputedDigestSigner`, `Signing/Cms/Rfc3161TimestampAttribute` (which unsigned attribute carries an RFC 3161 token).
+- Tests: `RustTool` (`Run` / `RunOk` / `RunBytes`, UTF-8 decoding, optional env overrides such as `RustTool.NoAutoTrust`),
+  `Cli/CliHarness` (in-process managed CLI vs Rust CLI), `LocalHttpServer` (loopback mock for TSA / Key Vault / Artifact
+  Signing), `Signing/PfxIdentity` (vendored test PFX), `Cli/GeneratedTestPki` (BCL-generated root + leaf on disk; the
+  library generator is `Signing.Pki.TestPki`), `TempDir`, `Fixtures`.
 
 ## Behavioral parity
 

@@ -1,6 +1,7 @@
 using System.Text;
 using Devolutions.Psign.Core.Asn1;
 using Devolutions.Psign.Core.Cms;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.Text;
 
 namespace Devolutions.Psign.Core.Timestamp;
@@ -876,7 +877,7 @@ public static class Rfc3161
         int tokLen = p.TimeStampToken?.Length ?? 0;
         sb.Append($"pki_status={p.PkiStatus.Label} pki_status_int={p.PkiStatus.AsRawInteger()} granted={(p.PkiStatus.Granted ? "yes" : "no")} time_stamp_token_len={tokLen}\n");
         sb.Append($"time_stamp_token_prefix_hex={TimeStampTokenPrefixHex(p.TimeStampToken, p.TimeStampToken is not null)}\n");
-        sb.Append($"status_strings_json={RustText.JsonStringArray(p.StatusStrings)}\n");
+        sb.Append($"status_strings_json={RustJson.StringArray(p.StatusStrings)}\n");
         sb.Append($"fail_info_tlv_hex={(p.FailInfoTlv is null ? "-" : Hex.Lower(p.FailInfoTlv))}\n");
         string flagsJson;
         if (p.FailInfoTlv is null)
@@ -886,7 +887,7 @@ public static class Rfc3161
         else
         {
             var labels = PkiFailureInfoFlagLabelsFromBitStringTlv(p.FailInfoTlv);
-            flagsJson = labels is null ? "null" : RustText.JsonStringArray(labels);
+            flagsJson = labels is null ? "null" : RustJson.StringArray(labels);
         }
 
         sb.Append($"fail_info_flags_json={flagsJson}\n");

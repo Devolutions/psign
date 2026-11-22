@@ -6,8 +6,6 @@ namespace Devolutions.Psign.Signing.Internal;
 /// <summary>Minimal PEM helpers matching the Rust <c>picky::pem</c> / <c>pem-rfc7468</c> text forms used by psign.</summary>
 internal static class Pem
 {
-    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
-
     /// <summary>Encode <paramref name="der"/> as a PEM block with 64-column base64 lines and a trailing newline.</summary>
     public static string Encode(string label, ReadOnlySpan<byte> der)
     {
@@ -21,40 +19,6 @@ internal static class Pem
 
         sb.Append("-----END ").Append(label).Append("-----\n");
         return sb.ToString();
-    }
-
-    /// <summary>Strict UTF-8 decode, or <c>null</c> when <paramref name="bytes"/> are not valid UTF-8.</summary>
-    public static string? TryUtf8(ReadOnlySpan<byte> bytes)
-    {
-        try
-        {
-            return StrictUtf8.GetString(bytes);
-        }
-        catch (DecoderFallbackException)
-        {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Rust <c>rdp::pem_text</c>: return the PEM text (BOM and leading whitespace trimmed) when <paramref name="bytes"/>
-    /// look like PEM, <c>null</c> for binary (DER) input.
-    /// </summary>
-    public static string? PemText(ReadOnlySpan<byte> bytes)
-    {
-        var text = TryUtf8(bytes);
-        if (text is not null)
-        {
-            var trimmed = text.TrimStart('\uFEFF').TrimStart();
-            return trimmed.StartsWith("-----BEGIN ", StringComparison.Ordinal) ? trimmed : null;
-        }
-
-        if (bytes.StartsWith("-----BEGIN "u8) || bytes.StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }))
-        {
-            throw new PsignException("PEM input is not valid UTF-8");
-        }
-
-        return null;
     }
 
     /// <summary>A decoded PEM block.</summary>
@@ -114,19 +78,5 @@ internal static class Pem
 
             pos = end + endMarker.Length;
         }
-    }
-
-    /// <summary>Every PEM block with <paramref name="label"/> in <paramref name="text"/>.</summary>
-    public static List<byte[]> FindAll(string text, string label)
-    {
-        var list = new List<byte[]>();
-        var pos = 0;
-        while (Find(text, label, pos) is { } block)
-        {
-            list.Add(block.Data);
-            pos = block.End;
-        }
-
-        return list;
     }
 }

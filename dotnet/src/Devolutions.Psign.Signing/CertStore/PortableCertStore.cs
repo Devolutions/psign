@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Asn1;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Signing.Internal;
 using Devolutions.Psign.Signing.Keys;
@@ -65,7 +66,7 @@ public sealed record CertificateDetails(
     };
 
     /// <summary>Pretty JSON plus trailing newline (CLI <c>--json</c> output).</summary>
-    public string ToJson() => SerdeJson.Pretty(ToJsonObject()) + "\n";
+    public string ToJson() => RustJson.Pretty(ToJsonObject()) + "\n";
 
     /// <summary>Text output of <c>cert-store print</c>.</summary>
     public string Format() =>
@@ -107,7 +108,7 @@ public sealed record CertStoreListReport(string Scope, string Store, string Path
     };
 
     /// <summary>Pretty JSON plus trailing newline (CLI <c>--json</c> output).</summary>
-    public string ToJson() => SerdeJson.Pretty(ToJsonObject()) + "\n";
+    public string ToJson() => RustJson.Pretty(ToJsonObject()) + "\n";
 
     /// <summary>Text output (Rust <c>format_list_report</c>).</summary>
     public string Format()
@@ -298,7 +299,7 @@ public sealed class PortableCertStore
         var keyImported = false;
         if (keyPath is not null)
         {
-            var key = SigningMaterialLoader.LoadPkcs8KeyPemFile(keyPath);
+            var key = PrivateKeyLoader.LoadPkcs8KeyPemFile(keyPath);
             Pkcs12Identity.EnsureKeyMatchesCertificate(der, key);
             storedKeyPath = loc.KeyPath(thumbprint);
             keyImported = WriteKeyIfNeeded(storedKeyPath, Encoding.ASCII.GetBytes(key.ToPkcs8Pem()));
@@ -501,7 +502,7 @@ public sealed class PortableCertStore
         byte[] der;
         try
         {
-            der = SigningMaterialLoader.PemOrDerToDer(bytes);
+            der = CertificateLoader.PemOrDerToDer(bytes);
         }
         catch (PsignException e)
         {

@@ -1,5 +1,6 @@
 using Devolutions.Psign.Cli.Framework;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Verification;
 using static Devolutions.Psign.Cli.Portable.PeCommands;
 

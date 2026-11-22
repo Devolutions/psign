@@ -1,5 +1,6 @@
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Catalog;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Signing.Catalog;
 
@@ -82,7 +83,7 @@ public static partial class PortableCore
             var status = actual.AsSpan().SequenceEqual(catalogMember.Digest) ? PortableCatalogItemStatus.Valid : PortableCatalogItemStatus.HashMismatch;
             pathItems.Add(new PortableCatalogPathItem(
                 subject.MemberName,
-                Hex(actual),
+                Hex.Lower(actual),
                 status,
                 status == PortableCatalogItemStatus.HashMismatch ? "File hash does not match the catalog." : null));
         }
@@ -95,14 +96,14 @@ public static partial class PortableCore
             }
 
             pathItems.Add(new PortableCatalogPathItem(
-                member.SubjectName ?? Hex(member.SubjectIdentifier),
+                member.SubjectName ?? Hex.Lower(member.SubjectIdentifier),
                 null,
                 PortableCatalogItemStatus.Missing,
                 "Catalog member was not found under the supplied path."));
         }
 
-        pathItems = pathItems.OrderBy(i => CatalogPathSortKey(i.Path), SerdeWrite.Utf8Comparer).ToList();
-        skippedItems = skippedItems.OrderBy(CatalogPathSortKey, SerdeWrite.Utf8Comparer).ToList();
+        pathItems = pathItems.OrderBy(i => CatalogPathSortKey(i.Path), RustJson.Utf8Comparer).ToList();
+        skippedItems = skippedItems.OrderBy(CatalogPathSortKey, RustJson.Utf8Comparer).ToList();
         var signature = PortableGetSignature(request.ToSignatureRequest(catalogFilePath), options);
         var overall = pathItems.All(i => i.Status == PortableCatalogItemStatus.Valid)
             ? PortableCatalogValidationStatus.Valid
@@ -157,7 +158,7 @@ public static partial class PortableCore
     };
 
     private static PortableCatalogItem PortableCatalogItemFromMember(CatalogMember member) =>
-        new(member.SubjectName ?? Hex(member.SubjectIdentifier), Hex(member.Digest));
+        new(member.SubjectName ?? Hex.Lower(member.SubjectIdentifier), Hex.Lower(member.Digest));
 
     private static List<CatalogSubjectPlan> CollectCatalogSubjects(IReadOnlyList<string> paths, string? catalogFilePath)
     {
@@ -208,8 +209,8 @@ public static partial class PortableCore
         }
 
         subjects = subjects
-            .OrderBy(s => CatalogPathSortKey(s.MemberName), SerdeWrite.Utf8Comparer)
-            .ThenBy(s => s.Path, SerdeWrite.Utf8Comparer)
+            .OrderBy(s => CatalogPathSortKey(s.MemberName), RustJson.Utf8Comparer)
+            .ThenBy(s => s.Path, RustJson.Utf8Comparer)
             .ToList();
         RejectDuplicateCatalogMemberNames(subjects);
         if (subjects.Count == 0)
@@ -232,7 +233,7 @@ public static partial class PortableCore
             throw new PsignException($"read directory {directory}", e);
         }
 
-        foreach (var entry in entries.OrderBy(e => e.Name, SerdeWrite.Utf8Comparer))
+        foreach (var entry in entries.OrderBy(e => e.Name, RustJson.Utf8Comparer))
         {
             var path = Path.Join(directory, entry.Name);
             if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)

@@ -684,7 +684,7 @@ public sealed class PortableCoreTests
             {
                 var entry = archive.RequireByName(opcName);
                 expectedOffset += 30 + opcName.Length;
-                Assert.Equal(expectedOffset, archive.DataStart(entry));
+                Assert.Equal((ulong)expectedOffset, archive.DataStart(entry));
                 Assert.Contains($"FileName=\"{escaped}\" Offset=\"{expectedOffset}\" Size=\"{data.Length}\"", xml, StringComparison.Ordinal);
                 Assert.Equal(data, archive.Read(entry));
                 expectedOffset += data.Length;

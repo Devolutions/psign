@@ -2,7 +2,8 @@ namespace Devolutions.Psign.Core;
 
 /// <summary>
 /// Rust <c>std::io::Error</c> display text for common .NET I/O exceptions, so error chains such as
-/// <c>read {path}: The system cannot find the file specified. (os error 2)</c> match the Rust tool.
+/// <c>read {path}: The system cannot find the file specified. (os error 2)</c> match the Rust tool. This is the single
+/// mapping used by the CLI, verification and signing layers.
 /// </summary>
 public static class IoErrorText
 {
@@ -18,6 +19,12 @@ public static class IoErrorText
         UnauthorizedAccessException => OperatingSystem.IsWindows()
             ? "Access is denied. (os error 5)"
             : "Permission denied (os error 13)",
+        PathTooLongException => OperatingSystem.IsWindows()
+            ? "The filename or extension is too long. (os error 206)"
+            : "File name too long (os error 36)",
+        ArgumentException or NotSupportedException => OperatingSystem.IsWindows()
+            ? "The filename, directory name, or volume label syntax is incorrect. (os error 123)"
+            : "invalid filename",
         _ => e.Message,
     };
 

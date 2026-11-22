@@ -205,8 +205,6 @@ public static partial class PortableCore
 
     /// <summary><c>&lt;path&gt;.p7</c> companion of an App Installer descriptor (Rust <c>with_extension("{ext}.p7")</c>).</summary>
     internal static string AppInstallerCompanionPath(string path) => path + ".p7";
-
-    internal static string Hex(ReadOnlySpan<byte> bytes) => Core.Hex.Lower(bytes);
 }
 
 /// <summary>Rust <c>std::path::Path</c> name helpers (<c>file_name</c> / <c>extension</c>).</summary>

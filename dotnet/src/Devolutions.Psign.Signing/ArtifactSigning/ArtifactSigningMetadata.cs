@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Signing.Internal;
 
 namespace Devolutions.Psign.Signing.ArtifactSigning;
@@ -142,7 +143,7 @@ public sealed record ArtifactSigningMetadata(
             return v.GetValue<string>();
         }
 
-        throw new PsignException(ParseContext, new PsignException($"invalid type: {SerdeJson.Compact(value)}, expected a string for `{name}`"));
+        throw new PsignException(ParseContext, new PsignException($"invalid type: {RustJson.Compact(value)}, expected a string for `{name}`"));
     }
 }
 

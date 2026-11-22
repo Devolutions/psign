@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Signing.AzureKeyVault;
 using Devolutions.Psign.Signing.Internal;
 using Xunit;
@@ -32,10 +33,10 @@ public class AzureKeyVaultTests
         var mock = new MockHttpHandler();
         var certRoute = mock.Map("GET", @"/certificates/my-cert(\?.*)?$")
             .MatchHeader("Authorization", "Bearer test-bearer-token")
-            .Respond(200, SerdeJson.Compact(new JsonObject { ["kid"] = kid, ["cer"] = cerB64 }), ("Content-Type", "application/json"));
+            .Respond(200, RustJson.Compact(new JsonObject { ["kid"] = kid, ["cer"] = cerB64 }), ("Content-Type", "application/json"));
         byte[] sigBytes = [0xde, 0xad, 0xbe, 0xef];
         var signRoute = mock.Map("POST", @"/keys/mykey/versions/v1/sign(\?.*)?$")
-            .Respond(200, SerdeJson.Compact(new JsonObject { ["value"] = AzureKeyVaultClient.Base64UrlEncode(sigBytes) }), ("Content-Type", "application/json"));
+            .Respond(200, RustJson.Compact(new JsonObject { ["value"] = AzureKeyVaultClient.Base64UrlEncode(sigBytes) }), ("Content-Type", "application/json"));
 
         using var client = new AzureKeyVaultClient(mock);
         const string token = "test-bearer-token";
@@ -173,7 +174,7 @@ public class AzureKeyVaultTests
         using var dir = new TempDir();
         using var signer = new TestSigner(dir);
         var mock = new MockHttpHandler();
-        mock.Map("GET", "/certificates/rsa").Respond(200, SerdeJson.Compact(new JsonObject
+        mock.Map("GET", "/certificates/rsa").Respond(200, RustJson.Compact(new JsonObject
         {
             ["kid"] = VaultBase + "/keys/rsa/versions/1",
             ["cer"] = Convert.ToBase64String(signer.Certificate.RawData),

@@ -230,14 +230,4 @@ internal static class SerdeWrite
 
     public static JsonNode? OptionalEnum<T>(T? value)
         where T : struct, System.Enum => value is null ? null : JsonValue.Create(value.Value.ToString());
-
-    /// <summary><c>serde_json::to_string</c> rendering.</summary>
-    public static string Compact(JsonNode node) => Core.Json.RustJson.Compact(node);
-
-    /// <summary>Ordinal comparison of the UTF-8 encodings (Rust <c>String</c> ordering).</summary>
-    public static int CompareUtf8(string a, string b) =>
-        Encoding.UTF8.GetBytes(a).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(b));
-
-    /// <summary>Comparer for <see cref="CompareUtf8"/>.</summary>
-    public static readonly IComparer<string> Utf8Comparer = Comparer<string>.Create(CompareUtf8);
 }

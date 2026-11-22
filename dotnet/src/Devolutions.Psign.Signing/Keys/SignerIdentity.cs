@@ -42,14 +42,14 @@ public sealed class SignerIdentity : IDisposable
     /// </summary>
     public static SignerIdentity FromCertificateAndKey(byte[] certificateBytes, byte[] keyBytes, IEnumerable<byte[]>? chainCertificateBytes = null)
     {
-        var certs = SigningMaterialLoader.ParseCertificates(certificateBytes);
-        var key = SigningMaterialLoader.ParseRsaPrivateKeyMaterial(keyBytes);
+        var certs = CertificateLoader.ParseCertificates(certificateBytes);
+        var key = PrivateKeyLoader.ParseRsaPrivateKeyMaterial(keyBytes);
         var chain = certs.Skip(1).ToList();
         if (chainCertificateBytes is not null)
         {
             foreach (var extra in chainCertificateBytes)
             {
-                chain.AddRange(SigningMaterialLoader.ParseCertificates(extra));
+                chain.AddRange(CertificateLoader.ParseCertificates(extra));
             }
         }
 

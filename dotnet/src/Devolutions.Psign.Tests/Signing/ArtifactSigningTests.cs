@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Signing.ArtifactSigning;
 using Devolutions.Psign.Signing.Internal;
 using Xunit;
@@ -682,7 +683,7 @@ public class ArtifactSigningTests
         var sig = Enumerable.Repeat((byte)0x5a, 256).ToArray();
         byte[] cert = [0x30, 0x03, 0x02, 0x01, 0x01];
         var mock = new MockHttpHandler();
-        mock.Map("POST", ":sign").Respond(200, SerdeJson.Compact(new JsonObject
+        mock.Map("POST", ":sign").Respond(200, RustJson.Compact(new JsonObject
         {
             ["status"] = "Succeeded",
             ["result"] = new JsonObject { ["signature"] = Convert.ToBase64String(sig), ["signingCertificate"] = Convert.ToBase64String(cert) },

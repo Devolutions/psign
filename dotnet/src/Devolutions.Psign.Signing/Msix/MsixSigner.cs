@@ -2,6 +2,7 @@ using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Msix;
 using Devolutions.Psign.Core.X509;
+using Devolutions.Psign.Core.Zip;
 using Devolutions.Psign.Signing.Cms;
 
 namespace Devolutions.Psign.Signing.Msix;
@@ -183,11 +184,11 @@ public static class MsixSigner
         return dot >= 0 ? MsixDigest.AsciiLower(name[(dot + 1)..]) : string.Empty;
     }
 
-    private static ZipArchiveReader OpenBundle(byte[] package)
+    private static ZipCrateArchive OpenBundle(byte[] package)
     {
         try
         {
-            return ZipArchiveReader.Open(package);
+            return ZipCrateArchive.Open(package);
         }
         catch (PsignException e)
         {
@@ -195,7 +196,7 @@ public static class MsixSigner
         }
     }
 
-    private static ZipEntryInfo ReadEntry(ZipArchiveReader archive, int i)
+    private static ZipCrateEntry ReadEntry(ZipCrateArchive archive, int i)
     {
         try
         {
@@ -214,14 +215,14 @@ public static class MsixSigner
         for (int i = 0; i < archive.Count; i++)
         {
             var entry = ReadEntry(archive, i);
-            if (entry.IsDirectory)
+            if (entry.IsDir)
             {
                 continue;
             }
 
             if (ChildExtension(entry.Name) is "msix" or "appx")
             {
-                var child = archive.ReadAll(i);
+                var child = archive.Read(i);
                 if (!MsixDigest.MsixSignaturePartPresent(child))
                 {
                     return true;
@@ -252,7 +253,7 @@ public static class MsixSigner
                 continue;
             }
 
-            var data = archive.ReadAll(i);
+            var data = archive.Read(i);
             var childExt = ChildExtension(name);
             if (childExt is "msix" or "appx" && !MsixDigest.MsixSignaturePartPresent(data))
             {
@@ -269,6 +270,6 @@ public static class MsixSigner
             entries.Add((name, data));
         }
 
-        return LegacyZipWriter.WriteStored(entries);
+        return ZipCrateWriter.WriteStored(entries);
     }
 }
