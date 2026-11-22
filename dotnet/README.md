@@ -56,6 +56,7 @@ dotnet run --project dotnet/src/Devolutions.Psign.Cli -- portable pe-digest app.
 dotnet pack dotnet/src/Devolutions.Psign.Cli -c Release -o dist/nuget
 dotnet tool install -g Devolutions.Psign.Cli --add-source dist/nuget
 psign-tool portable trust-verify-pe app.exe
+psign-tool verify --trusted-ca ca.crt app.exe package.nupkg   # routes each file to the matching portable verifier
 ```
 
 The managed tool accepts the same arguments as the native `psign-tool` for the portable surface (including

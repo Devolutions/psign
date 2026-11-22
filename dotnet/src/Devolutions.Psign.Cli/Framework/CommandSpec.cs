@@ -75,6 +75,12 @@ public sealed class OptionSpec
     /// <summary>Optional value (<c>num_args = 0..=1</c>); <see cref="DefaultMissingValue"/> is used when omitted.</summary>
     public string? DefaultMissingValue { get; set; }
 
+    /// <summary>
+    /// Typed value parser check (clap <c>value_parser</c>): returns an error message for an invalid value, which becomes the
+    /// usage error <c>invalid value '{v}' for '{opt}': {message}</c>.
+    /// </summary>
+    public Func<string, string?>? Validator { get; set; }
+
     internal string Display => Long is not null
         ? (Kind is OptionKind.Flag or OptionKind.Count ? $"--{Long}" : $"--{Long} <{ValueName ?? Long.ToUpperInvariant().Replace('-', '_')}>")
         : $"-{Short}";
@@ -283,5 +289,41 @@ public static class OptionSpecExtensions
     {
         o.Hidden = true;
         return o;
+    }
+
+    /// <summary>Parse the value as an unsigned integer no larger than <paramref name="max"/> (Rust <c>u32</c> / <c>u64</c> / <c>usize</c>).</summary>
+    public static OptionSpec Unsigned(this OptionSpec o, ulong max = ulong.MaxValue)
+    {
+        o.Validator = v => UnsignedError(v, max);
+        return o;
+    }
+
+    /// <summary>Rust <c>ParseIntError</c> display for an unsigned integer value, or <c>null</c> when valid.</summary>
+    internal static string? UnsignedError(string v, ulong max)
+    {
+        if (v.Length == 0)
+        {
+            return "cannot parse integer from empty string";
+        }
+
+        var digits = v[0] == '+' ? v[1..] : v;
+        if (digits.Length == 0 || digits.Any(c => c is < '0' or > '9'))
+        {
+            return "invalid digit found in string";
+        }
+
+        ulong value = 0;
+        foreach (char c in digits)
+        {
+            ulong d = (ulong)(c - '0');
+            if (value > (max - d) / 10)
+            {
+                return "number too large to fit in target type";
+            }
+
+            value = (value * 10) + d;
+        }
+
+        return null;
     }
 }
