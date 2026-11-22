@@ -11,6 +11,7 @@ internal static class PortableCli
         PeCommands.Register(portable);
         FormatCommands.Register(portable);
         ScriptCommands.Register(portable);
+        MsixCommands.Register(portable);
         return portable;
     }
 }
