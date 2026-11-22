@@ -23,6 +23,9 @@ public class CmsSetOrderingTests
         // Equal prefix: shorter first.
         Assert.True(Der.CompareRustCmsChoice([0x10], [0x10, 0x00]) < 0);
         Assert.Equal(0, Der.CompareRustCmsChoice([0x10, 0x81], [0x10, 0x81]));
+
+        // Complete TLVs: the element header (length) decides before the SEQUENCE OF INTEGER length.
+        Assert.True(Der.CompareRustCmsChoice([0x30, 0x02, 0x90, 0x90], [0x30, 0x03, 0x01, 0x01, 0x01]) < 0);
     }
 
     [SkippableFact]

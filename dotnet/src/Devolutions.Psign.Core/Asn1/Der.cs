@@ -281,13 +281,26 @@ public static class Der
     /// <summary>
     /// Ordering the Rust <c>cms</c> 0.2 crate uses for CHOICE types in a SET OF (<c>CertificateChoices</c>,
     /// <c>RevocationInfoChoice</c>, <c>SignerIdentifier</c>): it calls <c>der_cmp</c> on the <c>Vec&lt;u8&gt;</c> DER
-    /// encodings, which the <c>der</c> crate treats as <c>SEQUENCE OF INTEGER</c>. The comparison therefore orders
-    /// first by the encoded length of that sequence (each octet is an INTEGER TLV of 3 bytes, or 4 when it is ≥ 0x80),
+    /// encodings, which the <c>der</c> crate treats as <c>SEQUENCE OF INTEGER</c>, after comparing the CHOICE element's own
+    /// TLV header (tag, then encoded length). The comparison therefore orders by header, then by the encoded length of
+    /// that sequence (each octet is an INTEGER TLV of 3 bytes, or 4 when it is ≥ 0x80),
     /// then octet by octet numerically, then by octet count. This is <b>not</b> X.690 byte order; psign must reproduce it
     /// to stay byte-identical with the Rust encoder.
     /// </summary>
     public static int CompareRustCmsChoice(byte[] a, byte[] b)
     {
+        // DerOrd for the CHOICE value itself: header (tag, then encoded length) first.
+        var ha = First(a);
+        var hb = First(b);
+        if (ha is not null && hb is not null)
+        {
+            int header = a.AsSpan(0, ha.Value.ValueStart).SequenceCompareTo(b.AsSpan(0, hb.Value.ValueStart));
+            if (header != 0)
+            {
+                return header;
+            }
+        }
+
         static long SeqLen(byte[] x)
         {
             long n = 0;
