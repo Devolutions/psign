@@ -693,7 +693,7 @@ public static class ClickOnceManifest
 
             if (!ok)
             {
-                throw new PsignException($"verify {label} SignatureValue: signature error");
+                throw new PsignException($"verify {label} SignatureValue: signature error: verification error");
             }
         }
     }

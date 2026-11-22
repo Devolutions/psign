@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using Devolutions.Psign.Core;
 
 namespace Devolutions.Psign.Verification;
@@ -18,26 +17,14 @@ public enum TrustVerifyFormat
     Vsix,
 }
 
-/// <summary>Verifier for one format: receives the path, the lowercase extension (no dot) and the options.</summary>
-public delegate TrustVerifyPeReport TrustVerifyFormatHandler(string path, string extension, TrustVerifyPeOptions opts);
-
 /// <summary>
-/// Path-based format dispatch over the trust-verify entry points (same extension mapping as portable
-/// <c>psign-tool verify</c>). PE is implemented here; the other formats are <b>extension points</b>: their SIP digest code is
-/// being ported to Core separately, and each verifier registers itself with <see cref="RegisterFormat"/>. A registered
-/// verifier should recompute the format digest and then call <see cref="TrustVerifyPe.VerifyPkcs7Entry"/> (with
-/// <see cref="TrustVerifyPe.TrustMaterialFor"/> / <see cref="TrustVerifyPe.NewReport"/>), mirroring the Rust
-/// <c>trust_verify_{cab,msi,catalog,zip,script,msix,nuget,vsix,esd}.rs</c> modules.
+/// Path-based format dispatch over the <c>TrustVerify*</c> entry points (same extension mapping as portable
+/// <c>psign-tool verify</c>), so every caller applies the same per-format checks (Rust <c>trust_verify_file.rs</c>).
 /// </summary>
 public static class TrustVerifyFile
 {
-    private static readonly ConcurrentDictionary<TrustVerifyFormat, TrustVerifyFormatHandler> Handlers = new();
-
-    /// <summary>Register (or replace) the verifier for a non-PE format.</summary>
-    public static void RegisterFormat(TrustVerifyFormat format, TrustVerifyFormatHandler handler) => Handlers[format] = handler;
-
-    /// <summary>True when a verifier is available for <paramref name="format"/>.</summary>
-    public static bool IsFormatAvailable(TrustVerifyFormat format) => format == TrustVerifyFormat.Pe || Handlers.ContainsKey(format);
+    /// <summary>True when a verifier is available for <paramref name="format"/> (every format is implemented).</summary>
+    public static bool IsFormatAvailable(TrustVerifyFormat format) => Enum.IsDefined(format);
 
     /// <summary>Map a lowercase extension (no dot) to its format family, or <c>null</c> when unsupported.</summary>
     public static TrustVerifyFormat? FormatForExtension(string ext) => ext switch
@@ -55,24 +42,26 @@ public static class TrustVerifyFile
         _ => null,
     };
 
-    /// <summary>Trust-verify <paramref name="path"/>, choosing the format from its extension.</summary>
+    /// <summary>Trust-verify <paramref name="path"/>, choosing the format from its extension (Rust <c>trust_verify_path</c>).</summary>
     public static TrustVerifyPeReport TrustVerifyPath(string path, TrustVerifyPeOptions opts)
     {
-        var ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+        var ext = Core.Text.RustText.ToAsciiLowercase(Path.GetExtension(path).TrimStart('.'));
         var format = FormatForExtension(ext)
             ?? throw new PsignException($"portable trust verification does not support this file format: {path}");
-        if (format == TrustVerifyFormat.Pe)
+        return format switch
         {
-            return TrustVerifyPe.TrustVerifyPeBytes(Read(path), opts);
-        }
-
-        if (Handlers.TryGetValue(format, out var handler))
-        {
-            return handler(path, ext, opts);
-        }
-
-        throw new PsignException(
-            $"portable trust verification for .{ext} ({format}) is not available in this build (no verifier registered via TrustVerifyFile.RegisterFormat): {path}");
+            TrustVerifyFormat.WimEsd => TrustVerifyEsd.TrustVerifyWimEsdPath(path, opts),
+            TrustVerifyFormat.Pe => TrustVerifyPe.TrustVerifyPeBytes(Read(path), opts),
+            TrustVerifyFormat.Cab => TrustVerifyCab.TrustVerifyCabBytes(Read(path), opts),
+            TrustVerifyFormat.Msi => TrustVerifyMsi.TrustVerifyMsiBytes(Read(path), opts),
+            TrustVerifyFormat.Catalog => TrustVerifyCatalog.TrustVerifyCatalogBytes(Read(path), opts),
+            TrustVerifyFormat.Zip => TrustVerifyZip.TrustVerifyZipBytes(Read(path), opts),
+            TrustVerifyFormat.Script => TrustVerifyScript.TrustVerifyScriptBytes(Read(path), ext, opts),
+            TrustVerifyFormat.Msix => TrustVerifyMsix.TrustVerifyMsixBytes(Read(path), ext, opts),
+            TrustVerifyFormat.NuGet => TrustVerifyNuGet.TrustVerifyNuGetBytes(Read(path), opts),
+            TrustVerifyFormat.Vsix => TrustVerifyVsix.TrustVerifyVsixBytes(Read(path), opts),
+            _ => throw new PsignException($"portable trust verification does not support this file format: {path}"),
+        };
     }
 
     private static byte[] Read(string path)
