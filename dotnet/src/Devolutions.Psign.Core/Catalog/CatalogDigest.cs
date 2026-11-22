@@ -350,7 +350,7 @@ public static class CatalogDigest
     /// <c>catalog_rsa_sha256_signer_prehash_digest</c>; input is normalized like <c>pkcs7-signer-rs256-prehash</c>).
     /// </summary>
     public static byte[] RsaSha256SignerPrehashDigest(ReadOnlySpan<byte> data, int signerIndex) =>
-        Rs256SignerPrehash.Compute(CmsSignedData.Parse(data), signerIndex);
+        SignerPrehash.Rs256(CmsSignedData.Parse(data), signerIndex);
 
     /// <summary>Decode the catalog <c>ContentInfo(SignedData)</c> with a Microsoft CTL payload (Rust <c>catalog_signed_data</c>).</summary>
     public static CmsSignedData ParseSignedData(ReadOnlySpan<byte> data)

@@ -4,6 +4,7 @@ using Devolutions.Psign.Core.Asn1;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cms;
 using Devolutions.Psign.Core.Pe;
+using Devolutions.Psign.Core.Timestamp;
 using Devolutions.Psign.Signing.Cms;
 using Devolutions.Psign.Signing.Timestamp;
 using Xunit;
@@ -40,19 +41,23 @@ public class TimestampClientTests
         return Der.EncodeSequence(parts.ToArray());
     }
 
+    private static byte[]? Req(string digestOid, byte[] imprint, ulong? nonce, bool certReq) =>
+        Rfc3161.BuildTimestampRequestBytes(new Rfc3161TimestampRequestPlan { DigestAlgOid = digestOid, Nonce = nonce, CertReq = certReq }, imprint);
+
     [Fact]
     public void RequestBuilderMatchesRustEncoding()
     {
         var imprint = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
-        var der = TimestampRequestBuilder.Build("2.16.840.1.101.3.4.2.1", imprint, nonce: 0x80, certReq: true)!;
+        var der = Req("2.16.840.1.101.3.4.2.1", imprint, nonce: 0x80, certReq: true)!;
         Assert.Equal(
             "303d020101" + "3031300d06096086480165030402010500" + "0420" + Hex.Lower(imprint) + "02020080" + "0101ff",
             Hex.Lower(der));
-        Assert.Null(TimestampRequestBuilder.Build("2.16.840.1.101.3.4.2.1", new byte[20], null, false));
-        Assert.Null(TimestampRequestBuilder.Build("1.2.3", new byte[20], null, false));
+        Assert.Null(Req("2.16.840.1.101.3.4.2.1", new byte[20], null, false));
+        Assert.Null(Req("1.2.3", new byte[20], null, false));
+        // SHA-1 reproduces the Rust `digest_alg_spec` bytes verbatim (its AlgorithmIdentifier header declares 11 octets).
         Assert.Equal(
-            "302c020101" + "3021300906052b0e03021a0500" + "0414" + new string('0', 40) + "020100" + "0101ff",
-            Hex.Lower(TimestampRequestBuilder.Build("1.3.14.3.2.26", new byte[20], 0, true)!));
+            "302c020101" + "3021300b06052b0e03021a0500" + "0414" + new string('0', 40) + "020100" + "0101ff",
+            Hex.Lower(Req("1.3.14.3.2.26", new byte[20], 0, true)!));
     }
 
     [SkippableFact]
@@ -61,22 +66,22 @@ public class TimestampClientTests
         RustTool.Require();
         var imprint = SHA384.HashData("payload"u8);
         var hex = RustTool.RunOk("portable", "rfc3161-timestamp-req", "--algorithm", "sha384", "--digest-hex", Hex.Lower(imprint), "--nonce", "1234567", "--cert-req", "--output", "hex");
-        Assert.Equal(hex.Trim(), Hex.Lower(TimestampRequestBuilder.Build("2.16.840.1.101.3.4.2.2", imprint, 1234567, true)));
+        Assert.Equal(hex.Trim(), Hex.Lower(Req("2.16.840.1.101.3.4.2.2", imprint, 1234567, true)));
     }
 
     [Fact]
     public void ResponseParserIsStrict()
     {
-        var granted = TimestampResponseParser.Parse(Response(0, FakeToken, "ok", [0x03, 0x02, 0x00, 0x80]))!;
-        Assert.True(granted.Granted);
+        var granted = Rfc3161.ParseTimeStampRespDer(Response(0, FakeToken, "ok", [0x03, 0x02, 0x00, 0x80]))!;
+        Assert.True(granted.PkiStatus.Granted);
         Assert.Equal(FakeToken, granted.TimeStampToken);
         Assert.Equal(new[] { "ok" }, granted.StatusStrings);
         Assert.NotNull(granted.FailInfoTlv);
 
-        Assert.False(TimestampResponseParser.Parse(Response(2))!.Granted);
-        Assert.Null(TimestampResponseParser.Parse([0x30, 0x00]));
-        Assert.Null(TimestampResponseParser.Parse([.. Response(0, FakeToken), 0x00]));
-        Assert.Null(TimestampResponseParser.Parse(Der.EncodeSequence(Der.EncodeSequence(Der.EncodeTlv(0x02, [0]), [0x03, 0x01, 0x00], Der.EncodeSequence()))));
+        Assert.False(Rfc3161.ParseTimeStampRespDer(Response(2))!.PkiStatus.Granted);
+        Assert.Null(Rfc3161.ParseTimeStampRespDer([0x30, 0x00]));
+        Assert.Null(Rfc3161.ParseTimeStampRespDer([.. Response(0, FakeToken), 0x00]));
+        Assert.Null(Rfc3161.ParseTimeStampRespDer(Der.EncodeSequence(Der.EncodeSequence(Der.EncodeTlv(0x02, [0]), [0x03, 0x01, 0x00], Der.EncodeSequence()))));
     }
 
     [Fact]
@@ -92,7 +97,7 @@ public class TimestampClientTests
 
         Assert.Equal(FakeToken, client.RequestToken(Tsa, AuthenticodeHashKind.Sha256, stamped));
         Assert.Equal(1, route.Hits);
-        Assert.Equal(TimestampRequestBuilder.Build("2.16.840.1.101.3.4.2.1", SHA256.HashData(stamped), null, true), mock.Requests[0].Body);
+        Assert.Equal(Req("2.16.840.1.101.3.4.2.1", SHA256.HashData(stamped), null, true), mock.Requests[0].Body);
     }
 
     [Fact]
@@ -146,7 +151,7 @@ public class TimestampClientTests
         var stamped = CmsSignedData.Parse(client.TimestampPkcs7(pkcs7, "http://t/tsa", AuthenticodeHashKind.Sha256));
         var attr = Assert.Single(stamped.SignerInfos[0].UnsignedAttributes!);
         Assert.Equal("1.3.6.1.4.1.311.3.3.1", attr.Oid);
-        Assert.Equal(TimestampRequestBuilder.Build("2.16.840.1.101.3.4.2.1", SHA256.HashData(signature), null, true), mock.Requests[0].Body);
+        Assert.Equal(Req("2.16.840.1.101.3.4.2.1", SHA256.HashData(signature), null, true), mock.Requests[0].Body);
 
         var cms = CmsSignedData.Parse(client.TimestampPkcs7(pkcs7, "http://t/tsa", AuthenticodeHashKind.Sha256, Devolutions.Psign.Signing.Timestamp.Rfc3161TimestampAttribute.CmsTimeStampToken));
         Assert.Equal("1.2.840.113549.1.9.16.2.14", Assert.Single(cms.SignerInfos[0].UnsignedAttributes!).Oid);

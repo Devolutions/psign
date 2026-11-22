@@ -209,7 +209,7 @@ public static class MsiDigest
             catch (Exception e)
             {
                 root?.Dispose();
-                throw new PsignException($"open as OLE compound file: {e.Message}", e);
+                throw new PsignException("open as OLE compound file", e is PsignException ? e : new PsignException(e.Message));
             }
         }
 
@@ -298,7 +298,7 @@ public static class MsiDigest
         }
         catch (Exception e) when (e is not PsignException)
         {
-            throw new PsignException($"{openErrorPrefix}: {e.Message}", e);
+            throw new PsignException(openErrorPrefix, new PsignException(e.Message));
         }
 
         using (root)
@@ -399,7 +399,7 @@ public static class MsiDigest
     public static byte[] RsaSha256SignerPrehashDigest(byte[] data, int signerIndex)
     {
         var pkcs7 = DigitalSignaturePkcs7Der(data);
-        return Rs256SignerPrehash.Compute(CmsSignedData.Parse(pkcs7), signerIndex);
+        return SignerPrehash.Rs256(CmsSignedData.Parse(pkcs7), signerIndex);
     }
 
     /// <summary>

@@ -16,7 +16,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Devolutions.Psign.Verification" />
     <InternalsVisibleTo Include="Devolutions.Psign.Signing" />
-    <InternalsVisibleTo Include="Devolutions.Psign.Cli" />
+    <InternalsVisibleTo Include="psign-tool" />
     <InternalsVisibleTo Include="Devolutions.Psign.Tests" />
   </ItemGroup>
 

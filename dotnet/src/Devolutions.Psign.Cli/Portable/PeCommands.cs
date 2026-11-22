@@ -183,7 +183,7 @@ internal static class PeCommands
                 var bytes = Output.ReadFile(path);
                 var pkcs7 = Wrap($"pe-signer-rs256-prehash {path} --index {index} (need PKCS#7 row)", () => PeAuthenticode.NthPkcs7(bytes, index));
                 var sd = Wrap($"parse PKCS#7 SignedData ({path})", () => CmsSignedData.Parse(pkcs7));
-                var prehash = Wrap($"pe-signer-rs256-prehash {path} --signer-index {signerIndex}", () => Rs256Prehash(sd, signerIndex));
+                var prehash = Wrap($"pe-signer-rs256-prehash {path} --signer-index {signerIndex}", () => SignerPrehash.Rs256(sd, signerIndex));
                 Wrap($"write pe-signer-rs256-prehash output ({path})", () => Output.Digest(p.Required("encoding"), prehash, p.Value("output")));
                 return 0;
             };
@@ -201,7 +201,7 @@ internal static class PeCommands
                 int signerIndex = p.Int("signer-index");
                 var raw = Output.ReadFile(path);
                 var sd = Wrap($"pkcs7-signer-rs256-prehash {path} (need PKCS#7 SignedData)", () => CmsSignedData.Parse(Pkcs7Wire.NormalizeForAuthenticode(raw)));
-                var prehash = Wrap($"pkcs7-signer-rs256-prehash {path}", () => Rs256Prehash(sd, signerIndex));
+                var prehash = Wrap($"pkcs7-signer-rs256-prehash {path}", () => SignerPrehash.Rs256(sd, signerIndex));
                 Wrap($"write pkcs7-signer-rs256-prehash output ({path})", () => Output.Digest(p.Required("encoding"), prehash, p.Value("output")));
                 return 0;
             };
@@ -225,31 +225,6 @@ internal static class PeCommands
                 return 0;
             };
         });
-    }
-
-    /// <summary>Rust <c>signed_data_rsa_sha256_signer_prehash_digest</c>.</summary>
-    internal static byte[] Rs256Prehash(CmsSignedData sd, int signerIndex)
-    {
-        if (signerIndex < 0 || signerIndex >= sd.SignerInfos.Count)
-        {
-            throw new PsignException($"SignerInfo index {signerIndex} out of range (len {sd.SignerInfos.Count})");
-        }
-
-        var si = sd.SignerInfos[signerIndex];
-        if (si.DigestAlgorithm.Oid != Oids.Sha256)
-        {
-            throw new PsignException(
-                $"SignerInfo.digestAlgorithm must be SHA-256 ({Oids.Sha256}) for RS256 prehash; got {si.DigestAlgorithm.Oid}");
-        }
-
-        try
-        {
-            return AuthenticodeHashKind.Sha256.Hash(si.SignedAttributesSetDer());
-        }
-        catch (PsignException e)
-        {
-            throw new PsignException($"authenticated-attribute SET hash (SignerInfo index {signerIndex}) — need signedAttrs", new PsignException("SignerInfo has no authenticated attributes", e.InnerException));
-        }
     }
 
     /// <summary>Run <paramref name="f"/> and wrap failures with Rust-style context.</summary>

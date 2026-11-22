@@ -123,7 +123,7 @@ internal static class Pkcs12Reader
             }
         }
 
-        throw new PsignException("PKCS#12 MAC validation failed (wrong password or corrupted PFX)");
+        throw new PsignException("MAC validation failed (wrong password or corrupted data)");
     }
 
     private static void ReadSafeContents(byte[] der, string password, List<Pkcs12CertEntry> certs, List<Pkcs12KeyEntry> keys)

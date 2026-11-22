@@ -16,6 +16,7 @@ internal static class PortableCli
         NuGetCommands.Register(portable);
         VsixCommands.Register(portable);
         ClickOnceCommands.Register(portable);
+        SigningCommands.Register(portable);
         return portable;
     }
 }

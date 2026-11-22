@@ -122,16 +122,7 @@ public static class Output
     }
 
     /// <summary>Approximate Rust <c>std::io::Error</c> display text.</summary>
-    public static string IoMessage(Exception e) => e switch
-    {
-        FileNotFoundException or DirectoryNotFoundException =>
-            OperatingSystem.IsWindows()
-                ? "The system cannot find the file specified. (os error 2)"
-                : "No such file or directory (os error 2)",
-        UnauthorizedAccessException =>
-            OperatingSystem.IsWindows() ? "Access is denied. (os error 5)" : "Permission denied (os error 13)",
-        _ => e.Message,
-    };
+    public static string IoMessage(Exception e) => IoErrorText.Message(e);
 
     /// <summary>Write digest output (Rust <c>write_digest_output</c>): hex line or raw bytes, to file or stdout.</summary>
     public static void Digest(string encoding, byte[] digest, string? outputPath)

@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Devolutions.Psign.Cli" />
+    <InternalsVisibleTo Include="psign-tool" />
     <InternalsVisibleTo Include="Devolutions.Psign.Tests" />
   </ItemGroup>
 
