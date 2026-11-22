@@ -178,7 +178,8 @@ public static class Anchors
         var tlv = Der.First(der);
         if (tlv is null || tlv.Value.Tag != 0x30)
         {
-            throw new PsignException(errorPrefix + "(ASN1) couldn't deserialize x509 certificate: invalid data");
+            // picky_asn1_der::Asn1DerError's Display is its Debug form.
+            throw new PsignException(errorPrefix + "(ASN1) couldn't deserialize x509 certificate: InvalidData");
         }
 
         try
