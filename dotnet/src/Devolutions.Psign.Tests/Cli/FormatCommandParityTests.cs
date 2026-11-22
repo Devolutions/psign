@@ -84,4 +84,15 @@ public class FormatCommandParityTests
         CliHarness.AssertSameOutput("portable", "pe-page-hash-info", path);
         CliHarness.AssertSameStdout("portable", "verify-pe-page-hashes", path);
     }
+
+    [SkippableFact]
+    public void PkcxExtractMatchesRust()
+    {
+        foreach (var f in Directory.GetFiles(Fixtures.Path("generated-signed/p7x")))
+        {
+            CliHarness.AssertSameOutput("portable", "extract-pkcx-pkcs7", f);
+        }
+
+        CliHarness.AssertSameOutput("portable", "extract-pkcx-pkcs7", Fixtures.Path("generated-signed/cab/sample.cab"));
+    }
 }

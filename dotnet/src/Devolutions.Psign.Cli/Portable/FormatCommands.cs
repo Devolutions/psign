@@ -95,6 +95,11 @@ internal static class FormatCommands
         RegisterExtract(portable, "extract-msi-pkcs7", "Write the DigitalSignature stream (raw PKCS#7 DER) from an .msi.",
             (path, b) => Wrap($"extract-msi-pkcs7 {path} (need OLE compound with DigitalSignature stream)", () => MsiDigest.DigitalSignaturePkcs7Der(b)));
 
+        RegisterExtract(portable, "extract-pkcx-pkcs7", "Strip the AppX PKCX wrapper from AppxSignature.p7x and write the inner PKCS#7.",
+            (path, b) => Devolutions.Psign.Core.Cms.Pkcs7Wire.HasPkcxWrapper(b)
+                ? b[4..]
+                : throw new PsignException($"extract-pkcx-pkcs7 {path}: missing PKCX wrapper"));
+
         RegisterPrehash(portable, "cab-signer-rs256-prehash", (b, i) => CabDigest.RsaSha256SignerPrehashDigest(b, i));
         RegisterPrehash(portable, "msi-signer-rs256-prehash", (b, i) => MsiDigest.RsaSha256SignerPrehashDigest(b, i));
         RegisterPrehash(portable, "catalog-signer-rs256-prehash", (b, i) => CatalogDigest.RsaSha256SignerPrehashDigest(b, i));
