@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Devolutions.Psign.Core.Opc;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Core.Xml;
 
@@ -509,7 +510,7 @@ public static class ClickOnceManifest
         byte[] signature;
         try
         {
-            signature = RustBase64.DecodeXmlDsig(signatureXml[value.ContentStart..value.ContentEnd].Trim());
+            signature = Base64Standard.DecodeXmlDsig(signatureXml[value.ContentStart..value.ContentEnd].Trim());
         }
         catch (PsignException e)
         {
@@ -532,7 +533,7 @@ public static class ClickOnceManifest
         byte[] cert;
         try
         {
-            cert = RustBase64.DecodeXmlDsig(signatureXml[value.ContentStart..value.ContentEnd].Trim());
+            cert = Base64Standard.DecodeXmlDsig(signatureXml[value.ContentStart..value.ContentEnd].Trim());
         }
         catch (PsignException e)
         {
@@ -562,7 +563,7 @@ public static class ClickOnceManifest
         string unsigned = UnsignedManifestText(manifestText);
         try
         {
-            ParseCertificate(certBytes);
+            CertificateLoader.ParseCertificate(certBytes);
         }
         catch (PsignException e)
         {
@@ -588,7 +589,7 @@ public static class ClickOnceManifest
         string unsigned = UnsignedManifestText(text);
         try
         {
-            ParseCertificate(certBytes);
+            CertificateLoader.ParseCertificate(certBytes);
         }
         catch (PsignException e)
         {
@@ -624,7 +625,7 @@ public static class ClickOnceManifest
         CertificateInfo signerCert;
         try
         {
-            signerCert = ParseCertificate(signerBytes);
+            signerCert = CertificateLoader.ParseCertificate(signerBytes);
         }
         catch (PsignException e)
         {
@@ -695,54 +696,6 @@ public static class ClickOnceManifest
             {
                 throw new PsignException($"verify {label} SignatureValue: signature error: verification error");
             }
-        }
-    }
-
-    /// <summary>Parse a DER or PEM certificate (Rust <c>rdp::parse_certificate</c>).</summary>
-    public static CertificateInfo ParseCertificate(byte[] bytes)
-    {
-        string? pem = null;
-        try
-        {
-            string text = new UTF8Encoding(false, true).GetString(bytes);
-            if (text.Contains("-----BEGIN", StringComparison.Ordinal))
-            {
-                pem = text;
-            }
-        }
-        catch (DecoderFallbackException)
-        {
-        }
-
-        if (pem is not null)
-        {
-            try
-            {
-                var fields = System.Security.Cryptography.PemEncoding.Find(pem);
-                if (pem[fields.Label] != "CERTIFICATE")
-                {
-                    throw new PsignException("parse PEM certificate", new PsignException($"unexpected PEM label {pem[fields.Label]}"));
-                }
-
-                return CertificateInfo.Parse(Convert.FromBase64String(pem[fields.Base64Data]));
-            }
-            catch (Exception e) when (e is ArgumentException or FormatException or CryptographicException or System.Formats.Asn1.AsnContentException)
-            {
-                throw new PsignException("parse PEM certificate", e);
-            }
-        }
-
-        try
-        {
-            return CertificateInfo.Parse(bytes);
-        }
-        catch (Exception e) when (e is not PsignException)
-        {
-            throw new PsignException("parse DER certificate", e);
-        }
-        catch (PsignException e)
-        {
-            throw new PsignException("parse DER certificate", e);
         }
     }
 

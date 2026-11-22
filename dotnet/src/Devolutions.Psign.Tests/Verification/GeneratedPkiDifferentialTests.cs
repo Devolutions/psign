@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Verification;
 using Xunit;
 
@@ -103,13 +104,13 @@ public class GeneratedPkiDifferentialTests
         }
 
         args.Add(input);
-        RustToolUtf8.RunOk(args.ToArray());
+        RustTool.RunOk(RustTool.NoAutoTrust, args.ToArray());
         return output;
     }
 
     private static void Compare(string pe, params string[] trustArgs)
     {
-        var rust = RustToolUtf8.Run(["portable", "trust-verify-pe", pe, .. trustArgs]);
+        var rust = RustTool.Run(RustTool.NoAutoTrust, ["portable", "trust-verify-pe", pe, .. trustArgs]);
         string csText;
         bool csOk;
         try
@@ -225,7 +226,7 @@ public class GeneratedPkiDifferentialTests
         var nested = Sign(dir, pki, "nested.exe", first, "sha384", append: true);
         CompareMatrix(nested, pki);
 
-        var inspectRust = RustToolUtf8.RunOk("portable", "inspect-authenticode", nested);
+        var inspectRust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", nested);
         var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(nested)));
         Assert.Equal(inspectRust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), inspectCs);
     }
@@ -250,7 +251,7 @@ public class GeneratedPkiDifferentialTests
         File.WriteAllBytes(nested, image);
         CompareMatrix(nested, pki);
 
-        var inspectRust = RustToolUtf8.RunOk("portable", "inspect-authenticode", nested);
+        var inspectRust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", nested);
         var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(image));
         Assert.Equal(inspectRust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), inspectCs);
     }
@@ -262,7 +263,7 @@ public class GeneratedPkiDifferentialTests
         using var dir = new TempDir();
         using var signer = new TestSigner(dir);
         var output = dir.File("self.exe");
-        RustToolUtf8.RunOk("portable", "sign-pe", "--cert", signer.CertPath, "--key", signer.KeyPath, "--output", output, UnsignedPe());
+        RustTool.RunOk(RustTool.NoAutoTrust, "portable", "sign-pe", "--cert", signer.CertPath, "--key", signer.KeyPath, "--output", output, UnsignedPe());
         Compare(output, "--trusted-ca", signer.CertPath, "--as-of", Today);
         Compare(output, "--trusted-ca", signer.CertPath, "--as-of", "2000-01-01");
         Compare(output, "--trusted-ca", signer.CertPath, "--as-of", "2000-01-01", "--allow-loose-signing-cert");

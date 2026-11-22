@@ -6,6 +6,7 @@ using Devolutions.Psign.Core.Cms;
 using Devolutions.Psign.Core.NuGet;
 using Devolutions.Psign.Core.Pe;
 using Devolutions.Psign.Core.Zip;
+using Devolutions.Psign.Signing.ArtifactSigning;
 using Devolutions.Psign.Signing.CertStore;
 using Devolutions.Psign.Signing.Code;
 using Devolutions.Psign.Signing.Keys;

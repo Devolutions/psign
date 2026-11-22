@@ -7,6 +7,7 @@ using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Asn1;
 using Devolutions.Psign.Core.ClickOnce;
 using Devolutions.Psign.Core.Cms;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.NuGet;
 using Devolutions.Psign.Core.Pe;
 using Devolutions.Psign.Core.Vsix;
@@ -194,7 +195,7 @@ internal static class CodeTestKit
     }
 
     public static HttpResponseMessage Json(JsonObject body) =>
-        new(HttpStatusCode.OK) { Content = new StringContent(SerdeJson.Compact(body), Encoding.UTF8, "application/json") };
+        new(HttpStatusCode.OK) { Content = new StringContent(RustJson.Compact(body), Encoding.UTF8, "application/json") };
 
     /// <summary>Mock TSA returning a granted <c>TimeStampResp</c> with <see cref="FakeTimestampToken"/>.</summary>
     public static LambdaHandler TimestampServer() => new((request, body) =>

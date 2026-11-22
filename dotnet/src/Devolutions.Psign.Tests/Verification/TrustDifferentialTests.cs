@@ -1,4 +1,5 @@
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.Pe;
 using Devolutions.Psign.Verification;
 using Xunit;
@@ -16,7 +17,7 @@ public class TrustDifferentialTests
     public static IEnumerable<object[]> GeneratedPe() =>
         Directory.GetFiles(Fixtures.Path("generated-signed/pe")).OrderBy(p => p, StringComparer.Ordinal).Select(p => new object[] { Path.GetFileName(p) });
 
-    private static (int Code, string Stdout, string Stderr) RunRust(params string[] args) => RustToolUtf8.Run(args);
+    private static (int Code, string Stdout, string Stderr) RunRust(params string[] args) => RustTool.Run(RustTool.NoAutoTrust, args);
 
     /// <summary>Run the C# trust verification and render it like the Rust CLI (stdout on success, error line otherwise).</summary>
     private static (bool Ok, string Text) RunCs(string prefix, string displayPath, Func<TrustVerifyPeReport> verify)
@@ -211,7 +212,7 @@ public class TrustDifferentialTests
     public void InspectPeMatchesRust(string rel)
     {
         var path = Fixtures.Path(rel);
-        var rust = RustToolUtf8.RunOk("portable", "inspect-authenticode", path);
+        var rust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", path);
         var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(path)));
         Assert.Equal(rust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), cs);
     }
@@ -228,7 +229,7 @@ public class TrustDifferentialTests
     public void InspectPkcs7MatchesRust(string rel)
     {
         var path = Fixtures.Path(rel);
-        var rust = RustToolUtf8.RunOk("portable", "inspect-authenticode", path, "--input", "pkcs7");
+        var rust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", path, "--input", "pkcs7");
         var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(File.ReadAllBytes(path)));
         Assert.Equal(rust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), cs);
     }
@@ -242,7 +243,7 @@ public class TrustDifferentialTests
     public void PublisherIdJsonMatchesRust(string rel, string input)
     {
         var path = Fixtures.Path(rel);
-        var rust = RustToolUtf8.RunOk("portable", "artifact-signing-publisher-id", path, "--input", input);
+        var rust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "artifact-signing-publisher-id", path, "--input", input);
         var bytes = File.ReadAllBytes(path);
         string cs = input switch
         {

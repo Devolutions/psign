@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Text;
 using Devolutions.Psign.Core.Authenticode;
+using Devolutions.Psign.Core.Text;
+using Devolutions.Psign.Core.Zip;
 
 namespace Devolutions.Psign.Core.Msix;
 
@@ -453,12 +455,7 @@ public static class MsixDigest
     {
         try
         {
-            if (encoded.Length % 4 != 0 || encoded.AsSpan().IndexOfAny(" \t\r\n") >= 0)
-            {
-                throw new FormatException("Invalid input length.");
-            }
-
-            return Convert.FromBase64String(encoded);
+            return Base64Standard.Decode(encoded);
         }
         catch (FormatException e)
         {
@@ -1157,7 +1154,7 @@ public static class MsixDigest
         return (fixedUncomp == uint.MaxValue, fixedComp == uint.MaxValue, fixedOff == uint.MaxValue, fixedDisk == ushort.MaxValue, disk);
     }
 
-    private static void WriteLocalHeaderNormalized(IncrementalHashWrapper hasher, byte[] buf, ZipEntryInfo zf)
+    private static void WriteLocalHeaderNormalized(IncrementalHashWrapper hasher, byte[] buf, ZipCrateEntry zf)
     {
         long hs = checked((long)zf.HeaderStart);
         if (ReadU32(buf, hs) != LhSig)
@@ -1185,7 +1182,7 @@ public static class MsixDigest
         {
             Le(hasher, zf.Crc32);
             Le(hasher, zf.CompressedSize > uint.MaxValue ? uint.MaxValue : (uint)zf.CompressedSize);
-            Le(hasher, zf.Size > uint.MaxValue ? uint.MaxValue : (uint)zf.Size);
+            Le(hasher, zf.UncompressedSize > uint.MaxValue ? uint.MaxValue : (uint)zf.UncompressedSize);
         }
 
         Le(hasher, (ushort)zf.NameRaw.Length);
@@ -1194,7 +1191,7 @@ public static class MsixDigest
         hasher.Update(zf.ExtraField);
     }
 
-    private static void AppendDataDescriptor(IncrementalHashWrapper hasher, byte[] buf, ZipEntryInfo zf, bool packageZip64)
+    private static void AppendDataDescriptor(IncrementalHashWrapper hasher, byte[] buf, ZipCrateEntry zf, bool packageZip64)
     {
         long hs = checked((long)zf.HeaderStart);
         ushort flags = ReadU16(buf, hs + 6);
@@ -1208,7 +1205,7 @@ public static class MsixDigest
         if (packageZip64)
         {
             Le(hasher, zf.CompressedSize);
-            Le(hasher, zf.Size);
+            Le(hasher, zf.UncompressedSize);
         }
         else
         {
@@ -1217,17 +1214,17 @@ public static class MsixDigest
                 throw new PsignException("ZIP64 package flag required for large data descriptor");
             }
 
-            if (zf.Size > uint.MaxValue)
+            if (zf.UncompressedSize > uint.MaxValue)
             {
                 throw new PsignException("ZIP64 package flag required");
             }
 
             Le(hasher, (uint)zf.CompressedSize);
-            Le(hasher, (uint)zf.Size);
+            Le(hasher, (uint)zf.UncompressedSize);
         }
     }
 
-    private static ulong PayloadAndDescriptorLen(byte[] buf, ZipEntryInfo zf, bool packageZip64)
+    private static ulong PayloadAndDescriptorLen(byte[] buf, ZipCrateEntry zf, bool packageZip64)
     {
         long hs = checked((long)zf.HeaderStart);
         ushort flags = ReadU16(buf, hs + 6);
@@ -1236,7 +1233,7 @@ public static class MsixDigest
         return cs > ulong.MaxValue - ddExtra ? ulong.MaxValue : cs + ddExtra;
     }
 
-    private static (byte[] Hash, ulong CdCursor) HashZipFileData(byte[] buf, ZipArchiveReader archive, ZipTail tail, AuthenticodeHashKind kind)
+    private static (byte[] Hash, ulong CdCursor) HashZipFileData(byte[] buf, ZipCrateArchive archive, ZipTail tail, AuthenticodeHashKind kind)
     {
         bool packageZip64 = tail.Locator is not null;
         using var hasher = new IncrementalHashWrapper(kind);
@@ -1249,7 +1246,7 @@ public static class MsixDigest
                 continue;
             }
 
-            if (zf.IsDirectory)
+            if (zf.IsDir)
             {
                 continue;
             }
@@ -1278,7 +1275,7 @@ public static class MsixDigest
         return (hasher.Finish(), cdCursor);
     }
 
-    internal static byte[] HashCdAndEocd(byte[] buf, ZipArchiveReader archive, ZipTail tail, AuthenticodeHashKind kind, ulong cdOffsetVirtual)
+    internal static byte[] HashCdAndEocd(byte[] buf, ZipCrateArchive archive, ZipTail tail, AuthenticodeHashKind kind, ulong cdOffsetVirtual)
     {
         using var hasher = new IncrementalHashWrapper(kind);
         ulong cdSize = 0;
@@ -1292,7 +1289,7 @@ public static class MsixDigest
                 continue;
             }
 
-            if (zf.IsDirectory)
+            if (zf.IsDir)
             {
                 continue;
             }
@@ -1332,7 +1329,7 @@ public static class MsixDigest
             var fcomment = buf.AsSpan((int)b + nameLen + extraLen, commentLen).ToArray();
 
             var (uncompZ64, compZ64, offZ64, diskZ64, diskU32) = ParseZip64CdExtra(extra, comp32, uncomp32, localOff32, diskStart);
-            ulong uncompU64 = zf.Size;
+            ulong uncompU64 = zf.UncompressedSize;
             ulong compU64 = zf.CompressedSize;
             ulong offU64 = zf.HeaderStart;
             uncompZ64 = uncompZ64 || uncompU64 > uint.MaxValue;
@@ -1470,7 +1467,7 @@ public static class MsixDigest
         return hasher.Finish();
     }
 
-    private static byte[] ReadZipEntryRaw(ZipArchiveReader archive, string name) => archive.ReadAll(name);
+    private static byte[] ReadZipEntryRaw(ZipCrateArchive archive, string name) => archive.Read(name);
 
     // ================================================================== inventory / layout validation
 
@@ -1487,7 +1484,7 @@ public static class MsixDigest
         return null;
     }
 
-    internal static AppxPackageInventory ValidatePackagePartInventory(ZipArchiveReader archive, string ext)
+    internal static AppxPackageInventory ValidatePackagePartInventory(ZipCrateArchive archive, string ext)
     {
         bool isBundle = ext is "msixbundle" or "appxbundle";
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -1588,7 +1585,7 @@ public static class MsixDigest
     /// Validate a ZIP data descriptor using <c>AppxSip.dll</c>'s rule: <paramref name="isZip64"/>
     /// (<c>version_needed_to_extract &gt;= 45</c>) selects 8-byte sizes. Returns the descriptor length.
     /// </summary>
-    internal static ulong DataDescriptorLenAndValidate(byte[] buf, long off, bool isZip64, ZipEntryInfo zf)
+    internal static ulong DataDescriptorLenAndValidate(byte[] buf, long off, bool isZip64, ZipCrateEntry zf)
     {
         bool hasSig = off >= 0 && off + 4 <= buf.Length && BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan((int)off)) == DdSig;
         long cursor = off + (hasSig ? 4 : 0);
@@ -1611,7 +1608,7 @@ public static class MsixDigest
             uncompressed = ReadU32(buf, cursor + 8);
         }
 
-        if (compressed != zf.CompressedSize || uncompressed != zf.Size)
+        if (compressed != zf.CompressedSize || uncompressed != zf.UncompressedSize)
         {
             throw new PsignException($"ZIP data descriptor sizes do not match central directory (compressed={compressed}, uncompressed={uncompressed})");
         }
@@ -1619,7 +1616,7 @@ public static class MsixDigest
         return isZip64 ? (hasSig ? 24UL : 20UL) : (hasSig ? 16UL : 12UL);
     }
 
-    private static (ulong Start, ulong End) LocalFileRecordExtent(byte[] buf, ZipArchiveReader archive, ZipEntryInfo zf)
+    private static (ulong Start, ulong End) LocalFileRecordExtent(byte[] buf, ZipCrateArchive archive, ZipCrateEntry zf)
     {
         ulong headerStart = zf.HeaderStart;
         long hs = checked((long)headerStart);
@@ -1688,7 +1685,7 @@ public static class MsixDigest
                 throw new PsignException($"ZIP local compressed size does not match central directory for `{zf.Name}`");
             }
 
-            if (uncompressedSize != uint.MaxValue && uncompressedSize != zf.Size)
+            if (uncompressedSize != uint.MaxValue && uncompressedSize != zf.UncompressedSize)
             {
                 throw new PsignException($"ZIP local uncompressed size does not match central directory for `{zf.Name}`");
             }
@@ -1773,7 +1770,7 @@ public static class MsixDigest
         }
     }
 
-    internal static void ValidateZipFileLayout(byte[] buf, ZipArchiveReader archive, ZipTail tail)
+    internal static void ValidateZipFileLayout(byte[] buf, ZipCrateArchive archive, ZipTail tail)
     {
         ValidateCentralDirectoryRecords(buf, tail);
         var extents = new List<(ulong Start, ulong End, string Name)>();
@@ -1825,13 +1822,13 @@ public static class MsixDigest
         }
     }
 
-    private static Dictionary<string, int> ArchiveFileIndexByNormalizedName(ZipArchiveReader archive)
+    private static Dictionary<string, int> ArchiveFileIndexByNormalizedName(ZipCrateArchive archive)
     {
         var files = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < archive.Count; i++)
         {
             var zf = archive.ByIndex(i);
-            if (zf.IsDirectory)
+            if (zf.IsDir)
             {
                 continue;
             }
@@ -1850,7 +1847,7 @@ public static class MsixDigest
 
     internal static void ValidateBlockMapFileHashes(byte[] buf, AuthenticodeHashKind kind, IReadOnlyList<AppxBlockMapFile> blockMapFiles)
     {
-        var archive = ZipArchiveReader.Open(buf);
+        var archive = ZipCrateArchive.Open(buf);
         var fileIndex = ArchiveFileIndexByNormalizedName(archive);
 
         foreach (var bf in blockMapFiles)
@@ -1881,7 +1878,7 @@ public static class MsixDigest
                 }
             }
 
-            var data = archive.ReadAll(index);
+            var data = archive.Read(index);
             ulong dataLen = (ulong)data.Length;
             if (dataLen != bf.DeclaredSize)
             {
@@ -1968,12 +1965,12 @@ public static class MsixDigest
 
     internal static void VerifyBundleChildPackages(byte[] buf)
     {
-        var archive = ZipArchiveReader.Open(buf);
+        var archive = ZipCrateArchive.Open(buf);
         var children = new List<(string Name, string Ext, byte[] Data)>();
         for (int i = 0; i < archive.Count; i++)
         {
             var zf = archive.ByIndex(i);
-            if (zf.IsDirectory)
+            if (zf.IsDir)
             {
                 continue;
             }
@@ -1984,7 +1981,7 @@ public static class MsixDigest
                 continue;
             }
 
-            children.Add((normalized, ext, archive.ReadAll(i)));
+            children.Add((normalized, ext, archive.Read(i)));
         }
 
         foreach (var (name, ext, child) in children)
@@ -2162,8 +2159,8 @@ public static class MsixDigest
     /// <summary>Inspect <c>AppxBlockMap.xml</c> inside <paramref name="package"/> and return its declared hash kind, if present.</summary>
     public static AuthenticodeHashKind? DetectBlockMapHashKind(byte[] package)
     {
-        var archive = ZipArchiveReader.Open(package);
-        if (!archive.TryByName(BlockMap, out _))
+        var archive = ZipCrateArchive.Open(package);
+        if (!archive.TryOpenByName(BlockMap, out _))
         {
             return null;
         }
@@ -2246,10 +2243,10 @@ public static class MsixDigest
     /// </summary>
     public static byte[] MsixSignaturePkcs7Der(byte[] package)
     {
-        ZipArchiveReader archive;
+        ZipCrateArchive archive;
         try
         {
-            archive = ZipArchiveReader.Open(package);
+            archive = ZipCrateArchive.Open(package);
         }
         catch (PsignException e)
         {
@@ -2259,7 +2256,7 @@ public static class MsixDigest
         byte[] p7x;
         try
         {
-            p7x = archive.ReadAll(AppSignature);
+            p7x = archive.Read(AppSignature);
         }
         catch (PsignException e)
         {
@@ -2272,7 +2269,7 @@ public static class MsixDigest
     /// <summary>Fast <c>--skip-signed</c> preflight: does this package carry an <c>AppxSignature.p7x</c> part?</summary>
     public static bool MsixSignaturePartPresent(byte[] package)
     {
-        var archive = ZipArchiveReader.Open(package);
+        var archive = ZipCrateArchive.Open(package);
         return archive.FileNames.Any(n => n == AppSignature);
     }
 
@@ -2294,8 +2291,8 @@ public static class MsixDigest
         }
 
         var tail = ParseZipTail(buf);
-        ValidateZipFileLayout(buf, ZipArchiveReader.Open(buf), tail);
-        var archive = ZipArchiveReader.Open(buf);
+        ValidateZipFileLayout(buf, ZipCrateArchive.Open(buf), tail);
+        var archive = ZipCrateArchive.Open(buf);
         var inventory = ValidatePackagePartInventory(archive, ext);
 
         var blockMapBytes = ReadZipEntryRaw(archive, BlockMap);
@@ -2309,8 +2306,8 @@ public static class MsixDigest
         var bmHash = HashBytes(kind, blockMapBytes);
         var ciHash = ciRaw is null ? null : HashBytes(kind, ciRaw);
 
-        var (dataHash, cdOffVirt) = HashZipFileData(buf, ZipArchiveReader.Open(buf), tail, kind);
-        var cdHash = HashCdAndEocd(buf, ZipArchiveReader.Open(buf), tail, kind, cdOffVirt);
+        var (dataHash, cdOffVirt) = HashZipFileData(buf, ZipCrateArchive.Open(buf), tail, kind);
+        var cdHash = HashCdAndEocd(buf, ZipCrateArchive.Open(buf), tail, kind, cdOffVirt);
 
         ValidateBlockMapFileHashes(buf, kind, blockMapFiles);
         if (ext is "msixbundle" or "appxbundle")
@@ -2338,8 +2335,8 @@ public static class MsixDigest
     internal static (byte[] Pkcs7, byte[] Digest) VerifyMsixDigestConsistencyBytes(byte[] buf, string ext)
     {
         var tail = ParseZipTail(buf);
-        ValidateZipFileLayout(buf, ZipArchiveReader.Open(buf), tail);
-        var archive = ZipArchiveReader.Open(buf);
+        ValidateZipFileLayout(buf, ZipCrateArchive.Open(buf), tail);
+        var archive = ZipCrateArchive.Open(buf);
         var inventory = ValidatePackagePartInventory(archive, ext);
 
         var p7x = ReadZipEntryRaw(archive, AppSignature);
@@ -2379,8 +2376,8 @@ public static class MsixDigest
         var bmHash = HashBytes(kind, bmRaw);
         var ciHash = ciRaw is null ? null : HashBytes(kind, ciRaw);
 
-        var (dataHash, cdOffVirt) = HashZipFileData(buf, ZipArchiveReader.Open(buf), tail, kind);
-        var cdHash = HashCdAndEocd(buf, ZipArchiveReader.Open(buf), tail, kind, cdOffVirt);
+        var (dataHash, cdOffVirt) = HashZipFileData(buf, ZipCrateArchive.Open(buf), tail, kind);
+        var cdHash = HashCdAndEocd(buf, ZipCrateArchive.Open(buf), tail, kind, cdOffVirt);
 
         static void Check(string label, byte[] a, byte[] b)
         {

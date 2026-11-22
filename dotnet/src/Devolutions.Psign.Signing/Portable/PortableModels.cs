@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Verification;
 
 namespace Devolutions.Psign.Signing.Portable;
@@ -260,7 +261,7 @@ public sealed class PortableGetSignatureRequest : PortableTrustRequestBase
         return json;
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Validate in-memory PowerShell content (Rust <c>PortableValidatePowerShellRequest</c>).</summary>
@@ -296,7 +297,7 @@ public sealed class PortableValidatePowerShellRequest : PortableTrustRequestBase
         return json;
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Create an unsigned file catalog (Rust <c>PortableNewFileCatalogRequest</c>).</summary>
@@ -328,7 +329,7 @@ public sealed class PortableNewFileCatalogRequest
         ["catalog_version"] = CatalogVersion,
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Validate files against a catalog (Rust <c>PortableTestFileCatalogRequest</c>).</summary>
@@ -367,7 +368,7 @@ public sealed class PortableTestFileCatalogRequest : PortableTrustRequestBase
         return json;
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Remove a PE signature (Rust <c>PortableClearSignatureRequest</c>).</summary>
@@ -382,7 +383,7 @@ public sealed class PortableClearSignatureRequest
 
     public JsonObject ToJsonNode() => new() { ["path"] = Path };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Decode the Artifact Signing identity of a certificate (Rust <c>PortableArtifactSigningIdentityRequest</c>).</summary>
@@ -398,7 +399,7 @@ public sealed class PortableArtifactSigningIdentityRequest
 
     public JsonObject ToJsonNode() => new() { ["certificate_der_base64"] = CertificateDerBase64 };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Sign a file (Rust <c>PortableSignRequest</c>).</summary>
@@ -578,7 +579,7 @@ public sealed class PortableSignRequest
         ["artifact_signing_correlation_id"] = SerdeWrite.OptionalString(ArtifactSigningCorrelationId),
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Signature inspection / validation result (Rust <c>PortableSignatureResponse</c>).</summary>
@@ -697,7 +698,7 @@ public sealed class PortableSignatureResponse
         return json;
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>JSON for the Artifact Signing types embedded in portable responses (serde field order).</summary>
@@ -759,7 +760,7 @@ public sealed class PortableSignResponse
         return json;
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>One catalog member (Rust <c>PortableCatalogItem</c>).</summary>
@@ -822,7 +823,7 @@ public sealed class PortableNewFileCatalogResponse
         };
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Result of catalog validation (Rust <c>PortableTestFileCatalogResponse</c>).</summary>
@@ -871,7 +872,7 @@ public sealed class PortableTestFileCatalogResponse
         };
     }
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Result of signature removal (Rust <c>PortableClearSignatureResponse</c>).</summary>
@@ -899,7 +900,7 @@ public sealed class PortableClearSignatureResponse
         ["message"] = Message,
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Decoded Artifact Signing identity (Rust <c>PortableArtifactSigningIdentityResponse</c>).</summary>
@@ -915,7 +916,7 @@ public sealed class PortableArtifactSigningIdentityResponse
         ["identity"] = Identity is null ? null : PortableArtifactSigningJson.Identity(Identity),
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Library identity (Rust <c>PortableVersionResponse</c>).</summary>
@@ -935,7 +936,7 @@ public sealed class PortableVersionResponse
         ["crate_version"] = CrateVersion,
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }
 
 /// <summary>Structured error (Rust <c>PortableErrorResponse</c>).</summary>
@@ -954,5 +955,5 @@ public sealed class PortableErrorResponse
         ["message"] = Message,
     };
 
-    public string ToJson() => SerdeWrite.Compact(ToJsonNode());
+    public string ToJson() => RustJson.Compact(ToJsonNode());
 }

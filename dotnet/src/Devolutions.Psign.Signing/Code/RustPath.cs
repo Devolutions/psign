@@ -435,20 +435,9 @@ internal static class RustPath
     }
 }
 
-/// <summary>Rust <c>std::io::Error</c> display text and <c>std::fs</c> wrappers with anyhow-style context.</summary>
+/// <summary><c>std::fs</c> wrappers with anyhow-style context (I/O error text from <see cref="IoErrorText"/>).</summary>
 internal static class RustIo
 {
-    /// <summary>Approximate Rust <c>std::io::Error</c> display text for a .NET exception.</summary>
-    internal static string Message(Exception e) => e switch
-    {
-        FileNotFoundException => RustPath.IsWindows ? "The system cannot find the file specified. (os error 2)" : "No such file or directory (os error 2)",
-        DirectoryNotFoundException => RustPath.IsWindows ? "The system cannot find the path specified. (os error 3)" : "No such file or directory (os error 2)",
-        UnauthorizedAccessException => RustPath.IsWindows ? "Access is denied. (os error 5)" : "Permission denied (os error 13)",
-        PathTooLongException => RustPath.IsWindows ? "The filename or extension is too long. (os error 206)" : "File name too long (os error 36)",
-        ArgumentException or NotSupportedException => RustPath.IsWindows ? "The filename, directory name, or volume label syntax is incorrect. (os error 123)" : "invalid filename",
-        _ => e.Message,
-    };
-
     internal static bool IsIo(Exception e) =>
         e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException;
 
@@ -466,7 +455,7 @@ internal static class RustIo
         }
         catch (Exception e) when (IsIo(e))
         {
-            throw new PsignException(context, new PsignException(Message(e)));
+            throw new PsignException(context, IoErrorText.Inner(e));
         }
     }
 
@@ -479,7 +468,7 @@ internal static class RustIo
         }
         catch (Exception e) when (IsIo(e))
         {
-            throw new PsignException(context, new PsignException(Message(e)));
+            throw new PsignException(context, IoErrorText.Inner(e));
         }
     }
 
@@ -500,7 +489,7 @@ internal static class RustIo
         }
         catch (Exception e) when (IsIo(e))
         {
-            throw new PsignException(context, new PsignException(Message(e)));
+            throw new PsignException(context, IoErrorText.Inner(e));
         }
     }
 

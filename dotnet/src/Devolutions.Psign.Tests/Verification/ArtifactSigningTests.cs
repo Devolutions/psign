@@ -1,6 +1,7 @@
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cms;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Verification;
 using Xunit;
 

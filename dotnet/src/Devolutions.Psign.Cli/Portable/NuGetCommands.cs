@@ -257,7 +257,7 @@ internal static class NuGetCommands
         var bytes = Output.ReadFile(path);
         try
         {
-            return RsaPrivateKeyLoader.ParseRsaPrivateKey(bytes);
+            return PrivateKeyLoader.ParseRsaPrivateKey(bytes);
         }
         catch (PsignException e)
         {

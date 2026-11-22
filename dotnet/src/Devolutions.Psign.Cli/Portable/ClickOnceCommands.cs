@@ -5,6 +5,7 @@ using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.AppInstaller;
 using Devolutions.Psign.Core.BusinessCentral;
 using Devolutions.Psign.Core.ClickOnce;
+using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Signing.ClickOnce;
 using Devolutions.Psign.Signing.Cms;
 using Devolutions.Psign.Verification;
@@ -420,7 +421,7 @@ internal static class ClickOnceCommands
         var bytes = Output.ReadFile(cert);
         try
         {
-            ClickOnceManifest.ParseCertificate(bytes);
+            CertificateLoader.ParseCertificate(bytes);
         }
         catch (PsignException e)
         {
@@ -443,7 +444,7 @@ internal static class ClickOnceCommands
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"stat {path}", new PsignException(Output.IoMessage(e)));
+            throw new PsignException($"stat {path}", new PsignException(IoErrorText.Message(e)));
         }
     }
 
@@ -463,7 +464,7 @@ internal static class ClickOnceCommands
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"copy {input} to {output}", new PsignException(Output.IoMessage(e)));
+            throw new PsignException($"copy {input} to {output}", new PsignException(IoErrorText.Message(e)));
         }
     }
 }

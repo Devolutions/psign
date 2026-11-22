@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cms;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.Pe;
 
 namespace Devolutions.Psign.Verification;

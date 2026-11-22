@@ -100,7 +100,7 @@ internal sealed class CodeSigner : IDisposable
             }
             catch (Exception e) when (RustIo.IsIo(e))
             {
-                throw new PsignException($"read PFX '{pfxPath}'", new PsignException(RustIo.Message(e)));
+                throw new PsignException($"read PFX '{pfxPath}'", IoErrorText.Inner(e));
             }
 
             ParsedPfxIdentity parsed;
@@ -118,7 +118,7 @@ internal sealed class CodeSigner : IDisposable
             {
                 try
                 {
-                    chain.Add(SigningMaterialLoader.ParseCertificate(parsed.ChainCertificatesDer[i]));
+                    chain.Add(CertificateLoader.ParseCertificate(parsed.ChainCertificatesDer[i]));
                 }
                 catch (PsignException e)
                 {
@@ -252,7 +252,7 @@ internal sealed class CodeSigner : IDisposable
             var bytes = RustIo.Read(path, $"read {path}");
             try
             {
-                chain.Add(SigningMaterialLoader.ParseCertificate(bytes));
+                chain.Add(CertificateLoader.ParseCertificate(bytes));
             }
             catch (PsignException e)
             {
@@ -339,7 +339,7 @@ internal sealed class CodeSigner : IDisposable
         {
             try
             {
-                return SigningMaterialLoader.ParseCertificate(akv.CertDer);
+                return CertificateLoader.ParseCertificate(akv.CertDer);
             }
             catch (PsignException e)
             {
@@ -421,8 +421,8 @@ internal sealed class CodeSigner : IDisposable
             throw new PsignException($"PE SHA-256 digest must be 32 bytes, got {peDigestSha256.Length}");
         }
 
-        var signerCert = Ctx("parse signer certificate", () => SigningMaterialLoader.ParseCertificate(certBytes));
-        using var key = Ctx("parse RSA private key", () => SigningMaterialLoader.ParseRsaPrivateKey(keyBytes));
+        var signerCert = Ctx("parse signer certificate", () => CertificateLoader.ParseCertificate(certBytes));
+        using var key = Ctx("parse RSA private key", () => PrivateKeyLoader.ParseRsaPrivateKey(keyBytes));
         var indirect = SpcIndirectDataContent.ForPe(AuthenticodeHashKind.Sha256, peDigestSha256);
         var econtent = indirect.Encode();
         var attrs = new List<CmsAttribute>
@@ -454,7 +454,7 @@ internal sealed class CodeSigner : IDisposable
             CertificateInfo signerCert;
             try
             {
-                signerCert = SigningMaterialLoader.ParseCertificate(akv.CertDer);
+                signerCert = CertificateLoader.ParseCertificate(akv.CertDer);
             }
             catch (PsignException e)
             {
@@ -487,7 +487,7 @@ internal sealed class CodeSigner : IDisposable
     {
         try
         {
-            return SigningMaterialLoader.ParseCertificate(bytes);
+            return CertificateLoader.ParseCertificate(bytes);
         }
         catch (PsignException e)
         {
@@ -499,7 +499,7 @@ internal sealed class CodeSigner : IDisposable
     {
         try
         {
-            return SigningMaterialLoader.ParseRsaPrivateKey(bytes);
+            return PrivateKeyLoader.ParseRsaPrivateKey(bytes);
         }
         catch (Exception e) when (e is PsignException or CryptographicException)
         {

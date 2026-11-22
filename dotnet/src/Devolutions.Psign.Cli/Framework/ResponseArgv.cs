@@ -52,7 +52,7 @@ public static class ResponseArgv
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"reading response file {path}", new PsignException(Output.IoMessage(e)));
+            throw new PsignException($"reading response file {path}", new PsignException(IoErrorText.Message(e)));
         }
 
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)

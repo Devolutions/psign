@@ -401,9 +401,9 @@ internal static class SigningCommands
     private static (CertificateInfo Cert, System.Security.Cryptography.RSA Key, List<CertificateInfo> Chain) LoadLocalSigner(string cert, string key, IReadOnlyList<string> chainCerts)
     {
         var certBytes = Output.ReadFile(cert);
-        var signerCert = Ctx($"parse signer certificate {cert}", () => SigningMaterialLoader.ParseCertificate(certBytes));
+        var signerCert = Ctx($"parse signer certificate {cert}", () => CertificateLoader.ParseCertificate(certBytes));
         var keyBytes = Output.ReadFile(key);
-        var privateKey = Ctx($"parse RSA private key {key}", () => SigningMaterialLoader.ParseRsaPrivateKey(keyBytes));
+        var privateKey = Ctx($"parse RSA private key {key}", () => PrivateKeyLoader.ParseRsaPrivateKey(keyBytes));
         try
         {
             return (signerCert, privateKey, LoadChainCerts(chainCerts));
@@ -422,7 +422,7 @@ internal static class SigningCommands
         foreach (var path in chainCerts)
         {
             var bytes = Output.ReadFile(path);
-            chain.Add(Ctx($"parse chain certificate {path}", () => SigningMaterialLoader.ParseCertificate(bytes)));
+            chain.Add(Ctx($"parse chain certificate {path}", () => CertificateLoader.ParseCertificate(bytes)));
         }
 
         return chain;
@@ -499,7 +499,7 @@ internal static class SigningCommands
         });
         var kvCert = client.FetchCertificate(vaultUrl, certificate, TextOpt(kv.CertificateVersion), token);
         var signerCertDer = AzureKeyVaultClient.DecodeCerBase64(kvCert.Cer);
-        var signerCert = Ctx("parse Key Vault signer certificate", () => SigningMaterialLoader.ParseCertificate(signerCertDer));
+        var signerCert = Ctx("parse Key Vault signer certificate", () => CertificateLoader.ParseCertificate(signerCertDer));
         var chain = LoadChainCerts(chainCerts);
         var indirect = SpcIndirectDataContent.ForPe(kind, PeAuthenticode.Digest(pe, kind));
         var prehash = Pkcs7Builder.AuthenticodeRemoteSignedAttributesDigest(indirect, kind);
@@ -1014,7 +1014,7 @@ internal static class SigningCommands
         foreach (var extraPath in p.Values("ca-chain-cert"))
         {
             var raw = Output.ReadFile(extraPath);
-            extra.Add(Ctx($"parse CA chain certificate {extraPath}", () => SigningMaterialLoader.ParseCertificate(raw)).RawData);
+            extra.Add(Ctx($"parse CA chain certificate {extraPath}", () => CertificateLoader.ParseCertificate(raw)).RawData);
         }
 
         return TestPki.LoadCaIssuerFromCertAndKey(certBytes, keyBytes, extra);
@@ -1031,7 +1031,7 @@ internal static class SigningCommands
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                throw new PsignException($"create parent directory {parent}", new PsignException(Output.IoMessage(e)));
+                throw new PsignException($"create parent directory {parent}", new PsignException(IoErrorText.Message(e)));
             }
         }
     }
@@ -1053,7 +1053,7 @@ internal static class SigningCommands
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"write {path}", new PsignException(Output.IoMessage(e)));
+            throw new PsignException($"write {path}", new PsignException(IoErrorText.Message(e)));
         }
     }
 

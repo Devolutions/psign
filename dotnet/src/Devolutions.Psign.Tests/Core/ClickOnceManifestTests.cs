@@ -2,6 +2,7 @@ using System.Text;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.ClickOnce;
 using Devolutions.Psign.Core.Opc;
+using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.Xml;
 using Xunit;
 
@@ -113,10 +114,10 @@ public class ClickOnceManifestTests
     [Fact]
     public void XmlDsigBase64DecoderMatchesRustQuirks()
     {
-        Assert.Equal(new byte[] { 1, 2, 3 }, RustBase64.DecodeXmlDsig(" AQ\nID "));
-        Assert.Equal(new byte[] { 1 }, RustBase64.DecodeXmlDsig("AQ=="));
-        Assert.Contains("truncated", Assert.Throws<PsignException>(() => RustBase64.DecodeXmlDsig("AQI")).Message);
-        Assert.Contains("invalid base64", Assert.Throws<PsignException>(() => RustBase64.DecodeXmlDsig("A*==")).Message);
+        Assert.Equal(new byte[] { 1, 2, 3 }, Base64Standard.DecodeXmlDsig(" AQ\nID "));
+        Assert.Equal(new byte[] { 1 }, Base64Standard.DecodeXmlDsig("AQ=="));
+        Assert.Contains("truncated", Assert.Throws<PsignException>(() => Base64Standard.DecodeXmlDsig("AQI")).Message);
+        Assert.Contains("invalid base64", Assert.Throws<PsignException>(() => Base64Standard.DecodeXmlDsig("A*==")).Message);
     }
 
     [Fact]

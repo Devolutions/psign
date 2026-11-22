@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Core.Text;
 using Devolutions.Psign.Core.X509;
 using Xunit;
@@ -99,6 +100,6 @@ public class CertificateLoaderTests
         Assert.Equal(["foo", "bar", "", "baz\r"], RustText.Lines("foo\r\nbar\n\r\nbaz\r").ToArray());
         Assert.Equal(["a"], RustText.Lines("a\n").ToArray());
         Assert.Empty(RustText.Lines(string.Empty));
-        Assert.Equal("[\"a\\\"\\\\\\n\\u0001é\"]", RustText.JsonStringArray(["a\"\\\n\u0001é"]));
+        Assert.Equal("[\"a\\\"\\\\\\n\\u0001é\"]", RustJson.StringArray(["a\"\\\n\u0001é"]));
     }
 }

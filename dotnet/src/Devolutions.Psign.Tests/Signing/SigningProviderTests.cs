@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Nodes;
 using Devolutions.Psign.Core;
+using Devolutions.Psign.Core.Json;
 using Devolutions.Psign.Signing.ArtifactSigning;
 using Devolutions.Psign.Signing.CertStore;
 using Devolutions.Psign.Signing.Internal;
@@ -191,7 +192,7 @@ public class SigningProviderTests
         var mock = new MockHttpHandler();
         mock.Map("POST", @"^https://eus\.codesigning\.azure\.net/codesigningaccounts/acct/certificateprofiles/prof:sign\?api-version=2024-06-15$")
             .MatchHeader("Authorization", "Bearer as-token")
-            .Respond(200, SerdeJson.Compact(new JsonObject
+            .Respond(200, RustJson.Compact(new JsonObject
             {
                 ["status"] = "Succeeded",
                 ["signature"] = Convert.ToBase64String([9, 9]),

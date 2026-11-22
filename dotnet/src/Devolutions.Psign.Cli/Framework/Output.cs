@@ -104,7 +104,7 @@ public static class Output
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException(context ?? $"read {path}", new PsignException(IoMessage(e)));
+            throw new PsignException(context ?? $"read {path}", IoErrorText.Inner(e));
         }
     }
 
@@ -117,12 +117,9 @@ public static class Output
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException(context ?? $"write {path}", new PsignException(IoMessage(e)));
+            throw new PsignException(context ?? $"write {path}", IoErrorText.Inner(e));
         }
     }
-
-    /// <summary>Approximate Rust <c>std::io::Error</c> display text.</summary>
-    public static string IoMessage(Exception e) => IoErrorText.Message(e);
 
     /// <summary>Write digest output (Rust <c>write_digest_output</c>): hex line or raw bytes, to file or stdout.</summary>
     public static void Digest(string encoding, byte[] digest, string? outputPath)
@@ -142,7 +139,7 @@ public static class Output
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
             {
-                throw new PsignException($"create {outputPath}", new PsignException(IoMessage(e)));
+                throw new PsignException($"create {outputPath}", IoErrorText.Inner(e));
             }
 
             return;

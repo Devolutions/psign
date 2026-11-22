@@ -40,7 +40,7 @@ public static class ArtifactSigningCertificates
                 end += PemEnd.Length;
                 try
                 {
-                    certs.Add(SigningMaterialLoader.ParseCertificate(Encoding.UTF8.GetBytes(rest[..end])));
+                    certs.Add(CertificateLoader.ParseCertificate(Encoding.UTF8.GetBytes(rest[..end])));
                 }
                 catch (PsignException e)
                 {
@@ -87,7 +87,7 @@ public static class ArtifactSigningCertificates
         PsignException derError;
         try
         {
-            return (SigningMaterialLoader.ParseCertificate(bytes), []);
+            return (CertificateLoader.ParseCertificate(bytes), []);
         }
         catch (PsignException e)
         {
@@ -168,7 +168,7 @@ public static class ArtifactSigningCertificates
             return leaves[0];
         }
 
-        var nonCa = certs.Where(c => !c.IsCa && HasCodeSigningEku(c)).ToList();
+        var nonCa = certs.Where(c => !IsCa(c) && HasCodeSigningEku(c)).ToList();
         if (nonCa.Count == 1)
         {
             return nonCa[0];
@@ -180,8 +180,30 @@ public static class ArtifactSigningCertificates
     private static bool IssuesAnother(CertificateInfo candidate, List<CertificateInfo> certs) =>
         certs.Any(other => !candidate.SameIssuerAndSerial(other) && other.Issuer.AsSpan().SequenceEqual(candidate.Subject));
 
-    private static bool HasCodeSigningEku(CertificateInfo cert) =>
-        cert.ExtendedKeyUsages?.Contains("1.3.6.1.5.5.7.3.3") == true;
+    // Rust x509_cert_is_ca / x509_cert_has_code_signing_eku treat extension parse failures as "not asserted".
+    private static bool IsCa(CertificateInfo cert)
+    {
+        try
+        {
+            return cert.IsCa;
+        }
+        catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasCodeSigningEku(CertificateInfo cert)
+    {
+        try
+        {
+            return cert.ExtendedKeyUsages?.Contains(Oids.EkuCodeSigning) == true;
+        }
+        catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException)
+        {
+            return false;
+        }
+    }
 
     private static string? TryUtf8(byte[] bytes)
     {

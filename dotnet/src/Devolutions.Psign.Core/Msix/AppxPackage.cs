@@ -1,4 +1,5 @@
 using System.Text;
+using Devolutions.Psign.Core.Zip;
 
 namespace Devolutions.Psign.Core.Msix;
 
@@ -103,7 +104,7 @@ public static class AppxPackage
     /// <summary>Raw-deflate <paramref name="data"/> with a full flush after every 64 KiB block (Rust <c>deflate_appx_blocks</c>).</summary>
     internal static (byte[] Compressed, List<ulong> BlockSizes) DeflateAppxBlocks(byte[] data)
     {
-        var compress = new MinizOxideDeflater(6);
+        var compress = new MinizDeflater(6);
         var blockSizes = new List<ulong>((data.Length + AppxBlockSize - 1) / AppxBlockSize);
         for (int offset = 0; offset < data.Length; offset += AppxBlockSize)
         {
@@ -486,7 +487,7 @@ public static class AppxPackage
         var entries = new List<AppxZipEntry>(source.Count);
         for (int i = 0; i < source.Count; i++)
         {
-            ZipEntryInfo entry;
+            ZipCrateEntry entry;
             byte[] raw;
             try
             {
@@ -510,17 +511,17 @@ public static class AppxPackage
                 throw new PsignException($"unsupported compression Unsupported({entry.CompressionMethod}) in staged MSIX entry `{name}`");
             }
 
-            entries.Add(AppxZipEntry.Raw(name, entry.CompressionMethod, entry.Crc32, entry.Size, raw));
+            entries.Add(AppxZipEntry.Raw(name, entry.CompressionMethod, entry.Crc32, entry.UncompressedSize, raw));
         }
 
         return WriteAppxZip(entries);
     }
 
-    private static ZipArchiveReader OpenZip(byte[] package, string context)
+    private static ZipCrateArchive OpenZip(byte[] package, string context)
     {
         try
         {
-            return ZipArchiveReader.Open(package);
+            return ZipCrateArchive.Open(package);
         }
         catch (PsignException e)
         {
@@ -528,7 +529,7 @@ public static class AppxPackage
         }
     }
 
-    private static ZipEntryInfo ByIndex(ZipArchiveReader source, int i, string context)
+    private static ZipCrateEntry ByIndex(ZipCrateArchive source, int i, string context)
     {
         try
         {
@@ -543,8 +544,8 @@ public static class AppxPackage
     private static bool DetectIsBundleArchive(byte[] package, string extLower)
     {
         var archive = OpenZip(package, "open MSIX/AppX ZIP");
-        bool hasFlat = archive.TryByName(MsixDigest.AppManifest, out _);
-        bool hasBundle = archive.TryByName(MsixDigest.BundleManifest, out _);
+        bool hasFlat = archive.TryOpenByName(MsixDigest.AppManifest, out _);
+        bool hasBundle = archive.TryOpenByName(MsixDigest.BundleManifest, out _);
         if (IsMsixBundleExtension(extLower))
         {
             if (!hasBundle)
@@ -625,7 +626,7 @@ public static class AppxPackage
             switch (name)
             {
                 case MsixDigest.ContentTypes:
-                    contentTypes = source.ReadAll(i);
+                    contentTypes = source.Read(i);
                     break;
                 case MsixDigest.BlockMap:
                 case MsixDigest.AppSignature:
@@ -633,7 +634,7 @@ public static class AppxPackage
                     break;
                 default:
                     var logical = MsixDigest.DecodeOpcZipPartName(name);
-                    payloads.Add((logical, source.ReadAll(i)));
+                    payloads.Add((logical, source.Read(i)));
                     break;
             }
         }
@@ -668,10 +669,10 @@ public static class AppxPackage
             switch (name)
             {
                 case MsixDigest.BundleManifest:
-                    manifest = source.ReadAll(i);
+                    manifest = source.Read(i);
                     break;
                 case MsixDigest.ContentTypes:
-                    contentTypes = source.ReadAll(i);
+                    contentTypes = source.Read(i);
                     break;
                 case MsixDigest.BlockMap:
                 case MsixDigest.AppSignature:
@@ -680,7 +681,7 @@ public static class AppxPackage
                     break;
                 default:
                     var logical = MsixDigest.DecodeOpcZipPartName(name);
-                    children.Add((logical, source.ReadAll(i)));
+                    children.Add((logical, source.Read(i)));
                     break;
             }
         }
@@ -726,7 +727,7 @@ public static class AppxPackage
             switch (name)
             {
                 case MsixDigest.ContentTypes:
-                    contentTypes = source.ReadAll(i);
+                    contentTypes = source.Read(i);
                     break;
                 case MsixDigest.BlockMap:
                 case MsixDigest.AppSignature:
@@ -734,7 +735,7 @@ public static class AppxPackage
                     break;
                 case MsixDigest.AppManifest:
                     {
-                        var data = source.ReadAll(i);
+                        var data = source.Read(i);
                         byte[] rewritten;
                         try
                         {
@@ -752,7 +753,7 @@ public static class AppxPackage
 
                 default:
                     var logical = MsixDigest.DecodeOpcZipPartName(name);
-                    payloads.Add((logical, source.ReadAll(i)));
+                    payloads.Add((logical, source.Read(i)));
                     break;
             }
         }
@@ -785,7 +786,7 @@ public static class AppxPackage
             {
                 case MsixDigest.BundleManifest:
                     {
-                        var data = source.ReadAll(i);
+                        var data = source.Read(i);
                         try
                         {
                             manifest = RewriteXmlPublisher(data, ["Identity", "Package"], publisher);
@@ -799,7 +800,7 @@ public static class AppxPackage
                     }
 
                 case MsixDigest.ContentTypes:
-                    contentTypes = source.ReadAll(i);
+                    contentTypes = source.Read(i);
                     break;
                 case MsixDigest.BlockMap:
                 case MsixDigest.AppSignature:
@@ -809,7 +810,7 @@ public static class AppxPackage
                 default:
                     {
                         var logical = MsixDigest.DecodeOpcZipPartName(name);
-                        var data = source.ReadAll(i);
+                        var data = source.Read(i);
                         int dot = logical.LastIndexOf('.');
                         var childExt = dot >= 0 ? MsixDigest.AsciiLower(logical[(dot + 1)..]) : string.Empty;
                         if (MsixDigest.IsEncryptedMsixExtension(childExt))

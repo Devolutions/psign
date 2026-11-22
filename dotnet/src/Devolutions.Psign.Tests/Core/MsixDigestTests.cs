@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Msix;
+using Devolutions.Psign.Core.Zip;
 using Xunit;
 
 namespace Devolutions.Psign.Tests.Core;
@@ -9,7 +10,7 @@ namespace Devolutions.Psign.Tests.Core;
 /// <summary>ZIP construction / patching helpers mirroring the Rust <c>msix_digest.rs</c> test helpers.</summary>
 internal static class ZipTestHelpers
 {
-    public static byte[] ZipWithEntries(params (string Name, byte[] Data)[] entries) => LegacyZipWriter.WriteStored(entries);
+    public static byte[] ZipWithEntries(params (string Name, byte[] Data)[] entries) => ZipCrateWriter.WriteStored(entries);
 
     public static int FindEocd(byte[] zip)
     {
@@ -123,17 +124,17 @@ public class MsixDigestTests
 
     private static byte[] AppxWithTamperedManifest(byte[] original)
     {
-        var source = ZipArchiveReader.Open(original);
+        var source = ZipCrateArchive.Open(original);
         var entries = new List<(string, byte[])>();
         for (int i = 0; i < source.Count; i++)
         {
             var e = source.ByIndex(i);
-            if (e.IsDirectory)
+            if (e.IsDir)
             {
                 continue;
             }
 
-            var data = source.ReadAll(i);
+            var data = source.Read(i);
             if (e.Name == "AppxManifest.xml")
             {
                 data = "tampered manifest"u8.ToArray();
@@ -142,7 +143,7 @@ public class MsixDigestTests
             entries.Add((e.Name, data));
         }
 
-        return LegacyZipWriter.WriteStored(entries);
+        return ZipCrateWriter.WriteStored(entries);
     }
 
     [Fact]
@@ -279,7 +280,7 @@ public class MsixDigestTests
     }
 
     private static string LayoutErr(byte[] zip) =>
-        Err(() => MsixDigest.ValidateZipFileLayout(zip, ZipArchiveReader.Open(zip), MsixDigest.ParseZipTail(zip)));
+        Err(() => MsixDigest.ValidateZipFileLayout(zip, ZipCrateArchive.Open(zip), MsixDigest.ParseZipTail(zip)));
 
     [Fact]
     public void ZipLayoutRejectsGapBeforeCentralDirectory() =>
@@ -349,20 +350,20 @@ public class MsixDigestTests
     public void PackageInventoryRejectsMissingRequiredAndNoncanonicalReservedParts()
     {
         var missing = ZipTestHelpers.ZipWithEntries(("[Content_Types].xml", []), ("AppxBlockMap.xml", []), ("AppxSignature.p7x", []));
-        Assert.Contains("AppxManifest.xml", Err(() => MsixDigest.ValidatePackagePartInventory(ZipArchiveReader.Open(missing), "appx")));
+        Assert.Contains("AppxManifest.xml", Err(() => MsixDigest.ValidatePackagePartInventory(ZipCrateArchive.Open(missing), "appx")));
 
         var wrongCase = ZipTestHelpers.ZipWithEntries(("[Content_Types].xml", []), ("AppxBlockMap.xml", []), ("AppxSignature.p7x", []), ("appxmanifest.xml", []));
-        Assert.Contains("canonical path", Err(() => MsixDigest.ValidatePackagePartInventory(ZipArchiveReader.Open(wrongCase), "appx")));
+        Assert.Contains("canonical path", Err(() => MsixDigest.ValidatePackagePartInventory(ZipCrateArchive.Open(wrongCase), "appx")));
     }
 
     [Fact]
     public void PackageInventoryRejectsCaseCollidingPartsAndEncryptedBundleChildren()
     {
         var dup = ZipTestHelpers.ZipWithEntries(("[Content_Types].xml", []), ("AppxBlockMap.xml", []), ("AppxSignature.p7x", []), ("AppxManifest.xml", []), ("payload.txt", []), ("Payload.txt", []));
-        Assert.Contains("case-insensitive", Err(() => MsixDigest.ValidatePackagePartInventory(ZipArchiveReader.Open(dup), "appx")));
+        Assert.Contains("case-insensitive", Err(() => MsixDigest.ValidatePackagePartInventory(ZipCrateArchive.Open(dup), "appx")));
 
         var enc = ZipTestHelpers.ZipWithEntries(("[Content_Types].xml", []), ("AppxBlockMap.xml", []), ("AppxSignature.p7x", []), ("AppxMetadata/AppxBundleManifest.xml", []), ("child.emsix", []));
-        Assert.Contains("encrypted child", Err(() => MsixDigest.ValidatePackagePartInventory(ZipArchiveReader.Open(enc), "appxbundle")));
+        Assert.Contains("encrypted child", Err(() => MsixDigest.ValidatePackagePartInventory(ZipCrateArchive.Open(enc), "appxbundle")));
     }
 
     [Fact]
@@ -481,7 +482,7 @@ public class MsixDigestTests
     private static byte[] CdHashForTest(byte[] zip)
     {
         var tail = MsixDigest.ParseZipTail(zip);
-        return MsixDigest.HashCdAndEocd(zip, ZipArchiveReader.Open(zip), tail, AuthenticodeHashKind.Sha256, tail.CentralDirectoryOffset);
+        return MsixDigest.HashCdAndEocd(zip, ZipCrateArchive.Open(zip), tail, AuthenticodeHashKind.Sha256, tail.CentralDirectoryOffset);
     }
 
     [Fact]
@@ -504,7 +505,7 @@ public class MsixDigestTests
         Assert.Equal(uint.MaxValue, tail.Classic.CentralDirectorySize);
         Assert.Equal(uint.MaxValue, tail.Classic.CentralDirectoryOffset);
 
-        var archive = ZipArchiveReader.Open(normalized);
+        var archive = ZipCrateArchive.Open(normalized);
         for (int i = 0; i < archive.Count; i++)
         {
             int central = (int)archive.ByIndex(i).CentralHeaderStart;
@@ -512,7 +513,7 @@ public class MsixDigestTests
             Assert.Equal(0u, ZipTestHelpers.ReadU32(normalized, central + 38));
         }
 
-        Assert.Equal("beta"u8.ToArray(), archive.ReadAll("dir/b.txt"));
+        Assert.Equal("beta"u8.ToArray(), archive.Read("dir/b.txt"));
         int cd = (int)tail.CentralDirectoryOffset;
         Assert.Equal(zip[..cd], normalized[..cd]);
         Assert.Equal(normalized, MsixDigest.NormalizeZipForAppxSigning(normalized));
@@ -601,7 +602,7 @@ public class MsixDigestTests
         uint len32 = (uint)payload.Length;
         ulong len64 = (ulong)payload.Length;
         var reference = ZipTestHelpers.ZipWithEntries(("item.bin", payload));
-        var zf = ZipArchiveReader.Open(reference).ByIndex(0);
+        var zf = ZipCrateArchive.Open(reference).ByIndex(0);
 
         var classicNoSig = BitConverter.GetBytes(crc).Concat(BitConverter.GetBytes(len32)).Concat(BitConverter.GetBytes(len32)).ToArray();
         Assert.Equal(12UL, MsixDigest.DataDescriptorLenAndValidate(classicNoSig, 0, false, zf));
@@ -624,7 +625,7 @@ public class MsixDigestTests
         Assert.Contains("sizes do not match", Assert.ThrowsAny<PsignException>(() => MsixDigest.DataDescriptorLenAndValidate(badSizes, 0, true, zf)).Message);
 
         var emptyZip = ZipTestHelpers.ZipWithEntries(("empty.bin", []));
-        var emptyZf = ZipArchiveReader.Open(emptyZip).ByIndex(0);
+        var emptyZf = ZipCrateArchive.Open(emptyZip).ByIndex(0);
         var emptyDd = BitConverter.GetBytes(MsixDigest.DdSig).Concat(BitConverter.GetBytes(0u)).Concat(BitConverter.GetBytes(emptyZf.CompressedSize)).Concat(BitConverter.GetBytes(0UL)).ToArray();
         Assert.Equal(24UL, MsixDigest.DataDescriptorLenAndValidate(emptyDd, 0, true, emptyZf));
     }

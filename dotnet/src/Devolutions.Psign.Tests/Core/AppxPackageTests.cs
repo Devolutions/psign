@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Msix;
+using Devolutions.Psign.Core.Zip;
 using Xunit;
 
 namespace Devolutions.Psign.Tests.Core;
@@ -146,10 +147,10 @@ public class AppxPackageTests
         };
         var zip = AppxPackage.WriteAppxZip(entries);
         var tail = MsixDigest.ParseZipTail(zip);
-        MsixDigest.ValidateZipFileLayout(zip, ZipArchiveReader.Open(zip), tail);
-        var archive = ZipArchiveReader.Open(zip);
-        Assert.Equal(new string('x', 5000), Encoding.UTF8.GetString(archive.ReadAll("AppxManifest.xml")));
-        Assert.Equal(8, archive.ByName("AppxManifest.xml").CompressionMethod);
+        MsixDigest.ValidateZipFileLayout(zip, ZipCrateArchive.Open(zip), tail);
+        var archive = ZipCrateArchive.Open(zip);
+        Assert.Equal(new string('x', 5000), Encoding.UTF8.GetString(archive.Read("AppxManifest.xml")));
+        Assert.Equal(8, archive.OpenByName("AppxManifest.xml").CompressionMethod);
     }
 
     [Fact]

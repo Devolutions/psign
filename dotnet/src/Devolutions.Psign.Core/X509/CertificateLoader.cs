@@ -59,7 +59,7 @@ public static class CertificateLoader
 
                 return CertificateInfo.Parse(block.Der);
             }
-            catch (Exception e) when (e is PsignException or FormatException or System.Formats.Asn1.AsnContentException)
+            catch (Exception e) when (e is PsignException or FormatException or System.Formats.Asn1.AsnContentException or System.Security.Cryptography.CryptographicException)
             {
                 throw new PsignException("parse PEM certificate", e);
             }
@@ -69,7 +69,7 @@ public static class CertificateLoader
         {
             return CertificateInfo.Parse(bytes);
         }
-        catch (Exception e) when (e is PsignException or FormatException or System.Formats.Asn1.AsnContentException)
+        catch (Exception e) when (e is PsignException or FormatException or System.Formats.Asn1.AsnContentException or System.Security.Cryptography.CryptographicException)
         {
             throw new PsignException("parse DER certificate", e);
         }
@@ -119,6 +119,44 @@ public static class CertificateLoader
 
     /// <summary>Read and parse a single certificate file (DER or PEM).</summary>
     public static CertificateInfo LoadCertificateFile(string path) => ParseCertificate(File.ReadAllBytes(path));
+
+    /// <summary>
+    /// Cert-store certificate loading (Rust <c>cert_store::pem_or_der_to_der</c>): extract the first <c>CERTIFICATE</c>
+    /// PEM block when present, otherwise return the bytes unchanged.
+    /// </summary>
+    public static byte[] PemOrDerToDer(byte[] bytes)
+    {
+        var text = RustText.TryFromUtf8(bytes);
+        if (text is null)
+        {
+            return bytes;
+        }
+
+        const string begin = "-----BEGIN CERTIFICATE-----";
+        const string end = "-----END CERTIFICATE-----";
+        var start = text.IndexOf(begin, StringComparison.Ordinal);
+        if (start < 0)
+        {
+            return bytes;
+        }
+
+        var bodyStart = start + begin.Length;
+        var bodyEnd = text.IndexOf(end, bodyStart, StringComparison.Ordinal);
+        if (bodyEnd < 0)
+        {
+            throw new PsignException("PEM certificate is missing END CERTIFICATE marker");
+        }
+
+        var encoded = new string(text.AsSpan(bodyStart, bodyEnd - bodyStart).ToArray().Where(c => c is not (' ' or '\t' or '\n' or '\r' or '\f')).ToArray());
+        try
+        {
+            return Convert.FromBase64String(encoded);
+        }
+        catch (FormatException e)
+        {
+            throw new PsignException("decode PEM certificate base64", e);
+        }
+    }
 
     /// <summary>
     /// Decode a document that holds exactly one PEM block (RFC 7468 strict: only an optional preamble before the

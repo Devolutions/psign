@@ -108,7 +108,7 @@ internal static class MsixCommands
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"open {path}", new PsignException(Output.IoMessage(e)));
+            throw new PsignException($"open {path}", new PsignException(IoErrorText.Message(e)));
         }
 
         ZipCrateArchive archive;

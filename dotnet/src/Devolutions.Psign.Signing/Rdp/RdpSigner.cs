@@ -46,7 +46,7 @@ public sealed class RdpSigningIdentity
         RSA key;
         try
         {
-            key = RsaPrivateKeyLoader.ParseRsaPrivateKey(keyBytes);
+            key = PrivateKeyLoader.ParseRsaPrivateKey(keyBytes);
         }
         catch (PsignException e)
         {
@@ -116,7 +116,7 @@ public static class RdpSigner
     public static IReadOnlyList<string> RdpSigningEkus { get; } = [Oids.EkuServerAuth, Oids.EkuCodeSigning, "1.3.6.1.4.1.311.54.1.1"];
 
     /// <summary>Parse an RSA private key (Rust <c>rdp::parse_rsa_private_key</c>).</summary>
-    public static RSA ParseRsaPrivateKey(ReadOnlySpan<byte> bytes) => RsaPrivateKeyLoader.ParseRsaPrivateKey(bytes);
+    public static RSA ParseRsaPrivateKey(ReadOnlySpan<byte> bytes) => PrivateKeyLoader.ParseRsaPrivateKey(bytes);
 
     /// <summary>Parse a DER or PEM certificate (Rust <c>rdp::parse_certificate</c>).</summary>
     public static CertificateInfo ParseCertificate(ReadOnlySpan<byte> bytes) => CertificateLoader.ParseCertificate(bytes);

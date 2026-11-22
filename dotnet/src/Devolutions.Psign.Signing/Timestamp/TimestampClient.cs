@@ -7,16 +7,6 @@ using Devolutions.Psign.Signing.Internal;
 
 namespace Devolutions.Psign.Signing.Timestamp;
 
-/// <summary>Unsigned attribute used to attach an RFC 3161 token (Rust <c>Rfc3161TimestampAttribute</c>).</summary>
-public enum Rfc3161TimestampAttribute
-{
-    /// <summary>Microsoft Authenticode <c>1.3.6.1.4.1.311.3.3.1</c>.</summary>
-    MicrosoftAuthenticode,
-
-    /// <summary>CMS / PKCS#9 <c>id-aa-timeStampToken</c> (<c>1.2.840.113549.1.9.16.2.14</c>).</summary>
-    CmsTimeStampToken,
-}
-
 /// <summary>
 /// RFC 3161 TSA HTTP client (port of the <c>timestamp-http</c> helpers in Rust <c>psign-digest-cli</c>
 /// (<c>rfc3161-timestamp-http-post</c>, <c>post_rfc3161_timestamp_request</c>, <c>timestamp_pkcs7_der_rfc3161</c>) and

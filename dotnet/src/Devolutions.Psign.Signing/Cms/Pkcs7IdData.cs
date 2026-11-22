@@ -9,10 +9,10 @@ namespace Devolutions.Psign.Signing.Cms;
 /// <summary>Unsigned attribute used to attach an RFC 3161 token (Rust <c>Rfc3161TimestampAttribute</c>).</summary>
 public enum Rfc3161TimestampAttribute
 {
-    /// <summary>Microsoft <c>1.3.6.1.4.1.311.3.3.1</c> (App Installer companion signatures).</summary>
+    /// <summary>Microsoft Authenticode <c>1.3.6.1.4.1.311.3.3.1</c> (Authenticode / App Installer companion signatures).</summary>
     MicrosoftAuthenticode,
 
-    /// <summary>CMS <c>id-aa-timeStampToken</c> <c>1.2.840.113549.1.9.16.2.14</c> (NuGet signatures).</summary>
+    /// <summary>CMS / PKCS#9 <c>id-aa-timeStampToken</c> <c>1.2.840.113549.1.9.16.2.14</c> (NuGet signatures).</summary>
     CmsTimeStampToken,
 }
 

@@ -183,13 +183,13 @@ public class RdpSigningParityTests
         };
         foreach (var input in inputs)
         {
-            using var key = RsaPrivateKeyLoader.ParseRsaPrivateKey(input);
+            using var key = PrivateKeyLoader.ParseRsaPrivateKey(input);
             Assert.Equal(expected, key.ExportParameters(false).Modulus);
         }
 
-        Assert.Equal("parse DER RSA private key", Assert.Throws<PsignException>(() => RsaPrivateKeyLoader.ParseRsaPrivateKey([1, 2, 3])).Message);
+        Assert.Equal("parse DER RSA private key", Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey([1, 2, 3])).Message);
         var wrongLabel = Encoding.UTF8.GetBytes(new string(PemEncoding.Write("PUBLIC KEY", rsa.ExportSubjectPublicKeyInfo())));
-        Assert.Equal("parse PKCS#8 RSA private key PEM", Assert.Throws<PsignException>(() => RsaPrivateKeyLoader.ParseRsaPrivateKey(wrongLabel)).Message);
+        Assert.Equal("parse PKCS#8 RSA private key PEM", Assert.Throws<PsignException>(() => PrivateKeyLoader.ParseRsaPrivateKey(wrongLabel)).Message);
     }
 
     [Fact]
