@@ -10,6 +10,7 @@ internal static class PortableCli
         var portable = new CommandSpec(PsignTool.BinName, "Portable Authenticode digest, verification, trust, signing, and package helpers.");
         PeCommands.Register(portable);
         FormatCommands.Register(portable);
+        ScriptCommands.Register(portable);
         return portable;
     }
 }
