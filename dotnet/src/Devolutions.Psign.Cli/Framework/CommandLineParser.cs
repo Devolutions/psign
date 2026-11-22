@@ -81,6 +81,8 @@ public sealed class ParsedCommand
         }
     }
 
+    internal bool IsExplicitHere(string id) => _explicit.Contains(id);
+
     internal void AddFlag(string id)
     {
         _flags[id] = _flags.TryGetValue(id, out var n) ? n + 1 : 1;
@@ -421,8 +423,22 @@ public static class CommandLineParser
     private static string UnexpectedArgument(string arg) =>
         $"unexpected argument '{arg}' found\n\n  tip: to pass '{arg}' as a value, use '-- {arg}'";
 
+    /// <summary>clap rejects repeated <c>SetTrue</c> / <c>Set</c> arguments.</summary>
+    private static void RejectRepeat(ParsedCommand parsed, OptionSpec opt, string usage)
+    {
+        if (opt.Kind is OptionKind.Flag or OptionKind.Value && parsed.IsExplicitHere(opt.Id))
+        {
+            throw new UsageException($"the argument '{opt.Display}' cannot be used multiple times", usage);
+        }
+    }
+
     private static int Consume(ParsedCommand parsed, OptionSpec opt, IReadOnlyList<string> args, int i, string? inline, string shown, string usage)
     {
+        if (opt.Kind == OptionKind.Value)
+        {
+            RejectRepeat(parsed, opt, usage);
+        }
+
         switch (opt.Kind)
         {
             case OptionKind.Flag:
@@ -432,6 +448,7 @@ public static class CommandLineParser
                     throw new UsageException($"unexpected value '{inline}' for '{shown}' found; no more were expected", usage);
                 }
 
+                RejectRepeat(parsed, opt, usage);
                 parsed.AddFlag(opt.Id);
                 return i + 1;
             default:
