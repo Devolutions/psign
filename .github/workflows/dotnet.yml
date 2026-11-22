@@ -41,9 +41,11 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2.9.1
 
-      - name: Build Rust psign-tool and portable FFI (differential test oracles)
+      - name: Build Rust psign-tool, psign-server, psign-depgraph and portable FFI (differential test oracles)
         run: |
           cargo build -p psign --bin psign-tool --locked
+          cargo build -p psign --features timestamp-server --bin psign-server --locked
+          cargo build -p psign --bin psign-depgraph --locked
           cargo build -p psign-portable-ffi --features "azure-kv-sign artifact-signing-rest" --locked
 
       - name: Restore
@@ -77,11 +79,14 @@ jobs:
           dotnet pack dotnet/src/Devolutions.Psign.Verification/Devolutions.Psign.Verification.csproj -c Release -o dotnet/artifacts
           dotnet pack dotnet/src/Devolutions.Psign.Signing/Devolutions.Psign.Signing.csproj -c Release -o dotnet/artifacts
           dotnet pack dotnet/src/Devolutions.Psign.Cli/Devolutions.Psign.Cli.csproj -c Release -o dotnet/artifacts
+          dotnet pack dotnet/src/Devolutions.Psign.Server/Devolutions.Psign.Server.csproj -c Release -o dotnet/artifacts
 
-      - name: Smoke-test managed dotnet tool
+      - name: Smoke-test managed dotnet tools
         run: |
           dotnet tool install --tool-path ./dotnet/tool-smoke --add-source ./dotnet/artifacts Devolutions.Psign.Cli
           ./dotnet/tool-smoke/psign-tool portable pe-digest tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi
+          dotnet tool install --tool-path ./dotnet/tool-smoke --add-source ./dotnet/artifacts Devolutions.Psign.Server
+          ./dotnet/tool-smoke/psign-server --version
 
       - name: Upload packages
         uses: actions/upload-artifact@v7

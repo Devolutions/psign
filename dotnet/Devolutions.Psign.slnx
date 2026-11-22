@@ -4,6 +4,8 @@
     <Project Path="src/Devolutions.Psign.Verification/Devolutions.Psign.Verification.csproj" />
     <Project Path="src/Devolutions.Psign.Signing/Devolutions.Psign.Signing.csproj" />
     <Project Path="src/Devolutions.Psign.Cli/Devolutions.Psign.Cli.csproj" />
+    <Project Path="src/Devolutions.Psign.Server/Devolutions.Psign.Server.csproj" />
+    <Project Path="src/Devolutions.Psign.DepGraph/Devolutions.Psign.DepGraph.csproj" />
     <Project Path="src/Devolutions.Psign.Tests/Devolutions.Psign.Tests.csproj" />
   </Folder>
 </Solution>

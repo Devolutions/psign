@@ -15,6 +15,11 @@ The Rust implementation remains the reference: the C# port is tested differentia
 | `Devolutions.Psign.Verification` | **Signature validation only**: CMS signature checks, chain building to explicit anchors or the Microsoft AuthRoot CTL (downloaded and cached like the Rust tool), RFC 3161 timestamps, revocation helpers, Azure Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code. | Core |
 | `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
 | `Devolutions.Psign.Cli` | The managed `psign-tool` dotnet tool (portable backend only). | all |
+| `Devolutions.Psign.Server` | The managed `psign-server` dotnet tool: local loopback test services (RFC 3161 TSA, code-signing PKI with AIA / CRL / OCSP, Azure Key Vault-compatible signing, Azure Artifact Signing / Trusted Signing data plane). | Core |
+
+Not packaged: `psign-depgraph` (`src/Devolutions.Psign.DepGraph`), the managed port of the Rust binary manifest /
+dependency graph generator used by the parity harness (`parity-output/binary-manifest.json`,
+`parity-output/dependency-graph.json`).
 
 A validation-only consumer references just `Devolutions.Psign.Verification` (which brings `Devolutions.Psign.Core`).
 
@@ -30,6 +35,8 @@ dotnet/
     Devolutions.Psign.Verification/
     Devolutions.Psign.Signing/
     Devolutions.Psign.Cli/          # psign-tool (managed)
+    Devolutions.Psign.Server/       # psign-server (managed local test services)
+    Devolutions.Psign.DepGraph/     # psign-depgraph (managed binary manifest / dependency graph generator)
     Devolutions.Psign.Tests/        # xUnit, uses ../tests/fixtures and the Rust tool for differential tests
   Devolutions.Psign.PowerShell/     # existing PowerShell module host (uses the native psign-core FFI)
 ```
@@ -46,7 +53,27 @@ Differential tests run against the Rust `psign-tool` when it is available (`targ
 
 ```powershell
 cargo build -p psign --bin psign-tool --locked
+cargo build -p psign --features timestamp-server --bin psign-server --locked
+cargo build -p psign --bin psign-depgraph --locked
 dotnet test dotnet/src/Devolutions.Psign.Tests
+```
+
+The `psign-server` / `psign-depgraph` parity tests locate the Rust binaries through `PSIGN_RUST_SERVER` /
+`PSIGN_RUST_DEPGRAPH` or `target/{debug,release}` and are skipped when they are missing.
+
+## Local test services (`psign-server`)
+
+The managed `psign-server` is argv- and wire-compatible with the Rust `psign-server` (clap help / errors, startup lines,
+HTTP status codes, headers and bodies). Deterministic responses are byte-identical; generated certificates, keys and
+signatures use fresh RSA keys on every start, exactly like the Rust server, so they match structurally.
+
+```powershell
+dotnet pack dotnet/src/Devolutions.Psign.Server -c Release -o dist/nuget
+dotnet tool install -g Devolutions.Psign.Server --add-source dist/nuget
+psign-server timestamp-server --listen 127.0.0.1:0 --gen-time 20240102030405Z --cert-output tsa-root.der
+psign-server pki-server --root-cert-output root.der --leaf-cert-output leaf.der --leaf-key-output leaf.pk8 --ocsp-status revoked
+psign-server azure-key-vault-server --certificate-name my-cert --root-cert-output kv-root.der
+psign-server artifact-signing-server --response-mode body-id --expect-correlation-id cid-1
 ```
 
 ## Managed CLI
