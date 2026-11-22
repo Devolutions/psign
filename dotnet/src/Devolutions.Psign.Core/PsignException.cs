@@ -31,7 +31,7 @@ public class PsignException : Exception
                 continue;
             }
 
-            parts.Add(cur.Message);
+            parts.Add(cur is IOException or UnauthorizedAccessException ? IoErrorText.Message(cur) : cur.Message);
         }
 
         return string.Join(": ", parts);

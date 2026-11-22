@@ -38,6 +38,12 @@ internal static class CliHarness
 
                 using var capture = Output.Capture();
                 int code = PsignTool.Run(args);
+                if (!OperatingSystem.IsWindows())
+                {
+                    // Unix truncates process exit statuses to 8 bits (e.g. AzureSignTool HRESULT codes).
+                    code &= 0xFF;
+                }
+
                 return new CliResult(code, capture.StdoutBytes, capture.Stderr);
             }
             finally
