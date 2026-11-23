@@ -42,7 +42,7 @@ public sealed class CodePlan
         var nodes = new JsonArray();
         foreach (var n in Nodes)
         {
-            nodes.Add(new JsonObject
+            nodes.Add((JsonNode)new JsonObject
             {
                 ["id"] = n.Id,
                 ["path"] = n.Path,
@@ -57,7 +57,7 @@ public sealed class CodePlan
         var edges = new JsonArray();
         foreach (var e in Edges)
         {
-            edges.Add(new JsonObject { ["before"] = e.Before, ["after"] = e.After });
+            edges.Add((JsonNode)new JsonObject { ["before"] = e.Before, ["after"] = e.After });
         }
 
         var root = new JsonObject

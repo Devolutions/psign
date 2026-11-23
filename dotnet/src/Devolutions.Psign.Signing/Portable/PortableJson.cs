@@ -218,7 +218,7 @@ internal static class SerdeWrite
         var array = new JsonArray();
         foreach (var v in values)
         {
-            array.Add(JsonValue.Create(v));
+            array.Add((JsonNode?)JsonValue.Create(v));
         }
 
         return array;

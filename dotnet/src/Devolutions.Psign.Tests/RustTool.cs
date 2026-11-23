@@ -54,9 +54,16 @@ internal static class RustTool
     /// Run the Rust tool (<c>PSIGN_TOOL_MODE=portable</c> plus <paramref name="env"/> overrides, <c>null</c> removes a
     /// variable) and return the raw stdout bytes and the UTF-8 decoded stderr. Skips the test when the tool is unavailable.
     /// </summary>
-    public static (int ExitCode, byte[] Stdout, string Stderr) RunBytes(IReadOnlyDictionary<string, string?> env, params string[] args)
+    public static (int ExitCode, byte[] Stdout, string Stderr) RunBytes(IReadOnlyDictionary<string, string?> env, params string[] args) =>
+        RunProcessBytes(Require(), new Dictionary<string, string?>(env) { ["PSIGN_TOOL_MODE"] = env.TryGetValue("PSIGN_TOOL_MODE", out var mode) ? mode : "portable" }, args);
+
+    /// <summary>
+    /// Run <paramref name="exe"/> with <paramref name="env"/> overrides (<c>null</c> removes a variable) and return the raw
+    /// stdout bytes and the UTF-8 decoded stderr.
+    /// </summary>
+    public static (int ExitCode, byte[] Stdout, string Stderr) RunProcessBytes(string exe, IReadOnlyDictionary<string, string?> env, params string[] args)
     {
-        var psi = new ProcessStartInfo(Require())
+        var psi = new ProcessStartInfo(exe)
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -68,7 +75,6 @@ internal static class RustTool
             psi.ArgumentList.Add(a);
         }
 
-        psi.Environment["PSIGN_TOOL_MODE"] = "portable";
         foreach (var (k, v) in env)
         {
             if (v is null)

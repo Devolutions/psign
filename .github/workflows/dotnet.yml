@@ -57,6 +57,35 @@ jobs:
       - name: Test (with Rust differential tests)
         run: dotnet test dotnet/src/Devolutions.Psign.Tests/Devolutions.Psign.Tests.csproj -c Release --no-build
 
+      - name: Publish NativeAOT psign-tool, psign-server and psign-depgraph
+        shell: bash
+        run: |
+          case "$RUNNER_OS-$RUNNER_ARCH" in
+            Linux-X64) rid=linux-x64 ;;
+            Linux-ARM64) rid=linux-arm64 ;;
+            Windows-X64) rid=win-x64 ;;
+            Windows-ARM64) rid=win-arm64 ;;
+            macOS-X64) rid=osx-x64 ;;
+            macOS-ARM64) rid=osx-arm64 ;;
+            *) echo "unsupported runner $RUNNER_OS-$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          aot="$RUNNER_TEMP/psign-aot"
+          # Trim / AOT warnings fail the publish so new reflection or dynamic-code use is caught here.
+          for project in Cli Server DepGraph; do
+            dotnet publish "dotnet/src/Devolutions.Psign.$project/Devolutions.Psign.$project.csproj" -c Release -r "$rid" \
+              -p:PublishAot=true -p:TreatWarningsAsErrors=true -o "$aot/$project"
+          done
+          {
+            echo "PSIGN_MANAGED_TOOL=$aot/Cli/psign-tool$ext"
+            echo "PSIGN_MANAGED_SERVER=$aot/Server/psign-server$ext"
+            echo "PSIGN_MANAGED_DEPGRAPH=$aot/DepGraph/psign-depgraph$ext"
+          } >> "$GITHUB_ENV"
+
+      - name: Test NativeAOT binaries (same differential suite, managed tools run out of process)
+        run: dotnet test dotnet/src/Devolutions.Psign.Tests/Devolutions.Psign.Tests.csproj -c Release --no-build
+
   pack:
     name: Pack NuGet packages
     runs-on: ubuntu-latest

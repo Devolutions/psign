@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Devolutions.Psign.Core.Json;
 
@@ -17,13 +18,13 @@ namespace Devolutions.Psign.Core.Json;
 /// </para>
 /// <para>
 /// This is the only serde_json-compatible writer in the port; typed report models go through
-/// <see cref="ToStringPretty{T}"/> (System.Text.Json attributes for names / order, this writer for the text).
+/// <see cref="ToStringPretty{T}"/> (System.Text.Json attributes for names / order, this writer for the text). The
+/// model contract comes from a source-generated <see cref="JsonTypeInfo{T}"/>, so the writer stays trimming and
+/// NativeAOT safe.
 /// </para>
 /// </summary>
 public static class RustJson
 {
-    private static readonly JsonSerializerOptions ModelOptions = new();
-
     /// <summary>Serialize like <c>serde_json::to_string_pretty</c>.</summary>
     public static string Pretty(JsonNode? node, bool sortKeys = false)
     {
@@ -42,9 +43,10 @@ public static class RustJson
 
     /// <summary>
     /// Serialize a typed model like <c>serde_json::to_string_pretty</c>: property names and order come from the
-    /// System.Text.Json contract (<c>[JsonPropertyName]</c>, <c>[JsonPropertyOrder]</c>, converters, ignore conditions).
+    /// System.Text.Json contract (<c>[JsonPropertyName]</c>, <c>[JsonPropertyOrder]</c>, converters, ignore conditions)
+    /// described by <paramref name="typeInfo"/>, typically from a source-generated <c>JsonSerializerContext</c>.
     /// </summary>
-    public static string ToStringPretty<T>(T value) => Pretty(JsonSerializer.SerializeToNode(value, ModelOptions));
+    public static string ToStringPretty<T>(T value, JsonTypeInfo<T> typeInfo) => Pretty(JsonSerializer.SerializeToNode(value, typeInfo));
 
     /// <summary>Encode <paramref name="s"/> as a serde_json string literal (quotes included).</summary>
     public static string String(string s)

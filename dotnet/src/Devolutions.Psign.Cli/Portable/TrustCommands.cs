@@ -148,8 +148,8 @@ internal static class TrustCommands
             {
                 var bytes = Output.ReadFile(p.Pos("path")!);
                 var json = p.Value("input") == "pkcs7"
-                    ? RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(bytes))
-                    : RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(bytes));
+                    ? RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(bytes), VerificationJsonContext.Default.InspectPkcs7Report)
+                    : RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(bytes), VerificationJsonContext.Default.InspectPeFileReport);
                 Output.Line(json);
                 return 0;
             };
@@ -161,7 +161,7 @@ internal static class TrustCommands
             c.Handler = p =>
             {
                 var bytes = Output.ReadFile(p.Pos("path")!);
-                Output.Line(RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(bytes)));
+                Output.Line(RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(bytes), VerificationJsonContext.Default.InspectPkcs7Report));
                 return 0;
             };
         });
@@ -205,9 +205,9 @@ internal static class TrustCommands
 
         var json = input switch
         {
-            "pkcs7" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromPkcs7Der(bytes)),
-            "cert" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromCertBytes(bytes)),
-            _ => RustJson.ToStringPretty(ArtifactSigning.IdentitiesFromPe(bytes)),
+            "pkcs7" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromPkcs7Der(bytes), VerificationJsonContext.Default.ArtifactSigningIdentity),
+            "cert" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromCertBytes(bytes), VerificationJsonContext.Default.ArtifactSigningIdentity),
+            _ => RustJson.ToStringPretty(ArtifactSigning.IdentitiesFromPe(bytes), VerificationJsonContext.Default.ListArtifactSigningSignerIdentity),
         };
         Output.Line(json);
         return 0;

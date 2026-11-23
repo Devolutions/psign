@@ -5,6 +5,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- NativeAOT / trimming safe: enables the trim, AOT and single-file analyzers. -->
+    <IsAotCompatible>true</IsAotCompatible>
     <AssemblyName>psign-server</AssemblyName>
     <RootNamespace>Devolutions.Psign.Server</RootNamespace>
     <AssemblyTitle>psign local test services (managed)</AssemblyTitle>

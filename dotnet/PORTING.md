@@ -66,6 +66,12 @@ name in the file / class name so reviewers can map files 1:1 (for example `msi_d
   certificate store or `X509Chain` with the system trust: portable trust uses explicit anchors only.
 - Targets: libraries `net8.0;net10.0`, CLI/tests `net10.0`. Guard newer APIs with `#if NET9_0_OR_GREATER`.
 - Nullable enabled, file-scoped namespaces, 4-space indent, braces on new lines.
+- NativeAOT / trimming: every project under `src/` except the tests sets `IsAotCompatible`, and the build must stay free
+  of `IL2xxx` / `IL3xxx` warnings (CI publishes the three tools with `PublishAot=true -p:TreatWarningsAsErrors=true`).
+  No reflection-based System.Text.Json: build output with `JsonNode` + `RustJson`, or add the model type to a
+  source-generated context (`Verification/VerificationJsonContext`) and pass its `JsonTypeInfo<T>`. When adding a
+  `JsonObject` to a `JsonArray`, cast to `JsonNode` so the non-generic `Add` is used. No `Type.GetType`, `Activator`,
+  `dynamic`, `Reflection.Emit` or `MakeGenericType`. (The PowerShell module is exempt: it is loaded by PowerShell.)
 
 ## Build / test
 

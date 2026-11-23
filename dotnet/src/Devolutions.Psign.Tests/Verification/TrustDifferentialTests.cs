@@ -213,7 +213,7 @@ public class TrustDifferentialTests
     {
         var path = Fixtures.Path(rel);
         var rust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", path);
-        var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(path)));
+        var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(path)), VerificationJsonContext.Default.InspectPeFileReport);
         Assert.Equal(rust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), cs);
     }
 
@@ -230,7 +230,7 @@ public class TrustDifferentialTests
     {
         var path = Fixtures.Path(rel);
         var rust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", path, "--input", "pkcs7");
-        var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(File.ReadAllBytes(path)));
+        var cs = RustJson.ToStringPretty(AuthenticodeInspector.InspectAuthenticodePkcs7Der(File.ReadAllBytes(path)), VerificationJsonContext.Default.InspectPkcs7Report);
         Assert.Equal(rust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), cs);
     }
 
@@ -247,9 +247,9 @@ public class TrustDifferentialTests
         var bytes = File.ReadAllBytes(path);
         string cs = input switch
         {
-            "pe" => RustJson.ToStringPretty(ArtifactSigning.IdentitiesFromPe(bytes)),
-            "pkcs7" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromPkcs7Der(bytes)),
-            _ => RustJson.ToStringPretty(ArtifactSigning.IdentityFromCertBytes(bytes)),
+            "pe" => RustJson.ToStringPretty(ArtifactSigning.IdentitiesFromPe(bytes), VerificationJsonContext.Default.ListArtifactSigningSignerIdentity),
+            "pkcs7" => RustJson.ToStringPretty(ArtifactSigning.IdentityFromPkcs7Der(bytes), VerificationJsonContext.Default.ArtifactSigningIdentity),
+            _ => RustJson.ToStringPretty(ArtifactSigning.IdentityFromCertBytes(bytes), VerificationJsonContext.Default.ArtifactSigningIdentity),
         };
         Assert.Equal(rust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), cs);
     }

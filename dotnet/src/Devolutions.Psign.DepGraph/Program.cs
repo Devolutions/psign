@@ -101,7 +101,7 @@ internal static class Program
         var nodeArray = new JsonArray();
         foreach (var n in nodes)
         {
-            nodeArray.Add(new JsonObject
+            nodeArray.Add((JsonNode)new JsonObject
             {
                 ["path"] = n.Path,
                 ["sha256"] = n.Sha256,

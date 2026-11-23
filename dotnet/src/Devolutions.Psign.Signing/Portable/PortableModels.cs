@@ -809,7 +809,7 @@ public sealed class PortableNewFileCatalogResponse
         var items = new JsonArray();
         foreach (var item in CatalogItems)
         {
-            items.Add(item.ToJsonNode());
+            items.Add((JsonNode)item.ToJsonNode());
         }
 
         return new JsonObject
@@ -850,13 +850,13 @@ public sealed class PortableTestFileCatalogResponse
         var catalogItems = new JsonArray();
         foreach (var item in CatalogItems)
         {
-            catalogItems.Add(item.ToJsonNode());
+            catalogItems.Add((JsonNode)item.ToJsonNode());
         }
 
         var pathItems = new JsonArray();
         foreach (var item in PathItems)
         {
-            pathItems.Add(item.ToJsonNode());
+            pathItems.Add((JsonNode)item.ToJsonNode());
         }
 
         return new JsonObject

@@ -53,14 +53,20 @@ internal static class RustBinaries
         return DepGraphPath.Value!;
     }
 
-    /// <summary>The managed <c>psign-server</c> apphost (or dll) copied next to the tests.</summary>
-    public static string ManagedServer => Managed("psign-server");
+    /// <summary>The managed <c>psign-server</c> apphost (or dll) copied next to the tests, or <c>PSIGN_MANAGED_SERVER</c>.</summary>
+    public static string ManagedServer => Managed("PSIGN_MANAGED_SERVER", "psign-server");
 
-    /// <summary>The managed <c>psign-depgraph</c> apphost (or dll) copied next to the tests.</summary>
-    public static string ManagedDepGraph => Managed("psign-depgraph");
+    /// <summary>The managed <c>psign-depgraph</c> apphost (or dll) copied next to the tests, or <c>PSIGN_MANAGED_DEPGRAPH</c>.</summary>
+    public static string ManagedDepGraph => Managed("PSIGN_MANAGED_DEPGRAPH", "psign-depgraph");
 
-    private static string Managed(string name)
+    private static string Managed(string envVar, string name)
     {
+        // An external build (for example a NativeAOT publish) overrides the copy next to the tests.
+        if (Environment.GetEnvironmentVariable(envVar) is { Length: > 0 } external && File.Exists(external))
+        {
+            return external;
+        }
+
         var apphost = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? name + ".exe" : name);
         return File.Exists(apphost) ? apphost : Path.Combine(AppContext.BaseDirectory, name + ".dll");
     }

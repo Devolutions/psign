@@ -231,7 +231,7 @@ public class GeneratedPkiDifferentialTests
         CompareMatrix(nested, pki);
 
         var inspectRust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", nested);
-        var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(nested)));
+        var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(File.ReadAllBytes(nested)), VerificationJsonContext.Default.InspectPeFileReport);
         Assert.Equal(inspectRust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), inspectCs);
     }
 
@@ -256,7 +256,7 @@ public class GeneratedPkiDifferentialTests
         CompareMatrix(nested, pki);
 
         var inspectRust = RustTool.RunOk(RustTool.NoAutoTrust, "portable", "inspect-authenticode", nested);
-        var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(image));
+        var inspectCs = RustJson.ToStringPretty(AuthenticodeInspector.InspectPeAuthenticode(image), VerificationJsonContext.Default.InspectPeFileReport);
         Assert.Equal(inspectRust.TrimEnd('\r', '\n').Replace("\r\n", "\n"), inspectCs);
     }
 

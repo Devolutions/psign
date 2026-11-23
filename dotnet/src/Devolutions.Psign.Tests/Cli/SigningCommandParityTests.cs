@@ -676,9 +676,10 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
         AssertSameError("portable", "artifact-signing-root", "--endpoint", "https://wus.codesigning.azure.net", "--account-name", "a", "--profile-name", "p", "--output", x, "--access-token", "t", "--managed-identity");
     }
 
-    [Fact]
+    [SkippableFact]
     public void ArtifactSigningRootUsesMockTransport()
     {
+        CliHarness.RequireInProcess();
         var mock = new MockHttpHandler();
         mock.Map("GET", "^https://wus\\.codesigning\\.azure\\.net/codesigningaccounts/acct/certificateprofiles/prof/sign/rootcert\\?api-version=2022-06-15-preview$")
             .MatchHeader("Authorization", "Bearer root-token")

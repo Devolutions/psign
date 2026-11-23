@@ -61,6 +61,19 @@ dotnet test dotnet/src/Devolutions.Psign.Tests
 The `psign-server` / `psign-depgraph` parity tests locate the Rust binaries through `PSIGN_RUST_SERVER` /
 `PSIGN_RUST_DEPGRAPH` or `target/{debug,release}` and are skipped when they are missing.
 
+### NativeAOT
+
+The libraries and the three tools are NativeAOT compatible (`IsAotCompatible`, no trim / AOT warnings). Publish a
+native executable with:
+
+```powershell
+dotnet publish dotnet/src/Devolutions.Psign.Cli -c Release -r win-x64 -p:PublishAot=true -o out/psign-tool
+```
+
+The same differential suite can run against native builds: set `PSIGN_MANAGED_TOOL`, `PSIGN_MANAGED_SERVER` and
+`PSIGN_MANAGED_DEPGRAPH` to the published executables and the tests run them out of process instead of calling the CLI
+in-process. CI does this on Linux, Windows and macOS.
+
 ## Local test services (`psign-server`)
 
 The managed `psign-server` is argv- and wire-compatible with the Rust `psign-server` (clap help / errors, startup lines,

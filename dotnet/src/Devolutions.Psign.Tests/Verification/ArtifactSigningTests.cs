@@ -150,7 +150,7 @@ public class ArtifactSigningTests
     [Fact]
     public void ArtifactSigningPolicyJsonUsesSnakeCase()
     {
-        var json = RustJson.ToStringPretty(new ArtifactSigningIdentity { Kind = ArtifactSigningCertificateKind.PrivateTrustCiPolicy, PublisherId = "1", IdentityEku = "x" });
+        var json = RustJson.ToStringPretty(new ArtifactSigningIdentity { Kind = ArtifactSigningCertificateKind.PrivateTrustCiPolicy, PublisherId = "1", IdentityEku = "x" }, VerificationJsonContext.Default.ArtifactSigningIdentity);
         Assert.Contains("\"kind\": \"private_trust_ci_policy\"", json);
     }
 }

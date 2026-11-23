@@ -164,7 +164,7 @@ public static class AuthRootCache
         AuthRootMeta? meta;
         try
         {
-            meta = JsonSerializer.Deserialize<AuthRootMeta>(File.ReadAllText(metaPath));
+            meta = JsonSerializer.Deserialize(File.ReadAllText(metaPath), VerificationJsonContext.Default.AuthRootMeta);
         }
         catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -247,7 +247,7 @@ public static class AuthRootCache
         };
         try
         {
-            File.WriteAllText(metaPath, RustJson.ToStringPretty(meta));
+            File.WriteAllText(metaPath, RustJson.ToStringPretty(meta, VerificationJsonContext.Default.AuthRootMeta));
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

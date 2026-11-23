@@ -17,7 +17,22 @@ internal static class CliHarness
 
     private static IReadOnlyDictionary<string, string?> NoEnv => RustTool.NoEnv;
 
-    /// <summary>Run the managed <c>psign-tool</c> in-process.</summary>
+    /// <summary>
+    /// Optional external managed <c>psign-tool</c> (for example a NativeAOT publish) set with <c>PSIGN_MANAGED_TOOL</c>;
+    /// when set, <see cref="RunManaged(IReadOnlyDictionary{string, string?}, string[])"/> runs it out of process instead
+    /// of calling the CLI in-process.
+    /// </summary>
+    private static readonly string? ExternalManagedTool =
+        Environment.GetEnvironmentVariable("PSIGN_MANAGED_TOOL") is { Length: > 0 } tool && File.Exists(tool) ? tool : null;
+
+    /// <summary>
+    /// Skip a test that injects in-process hooks (for example a mock HTTP handler) when the managed CLI runs out of
+    /// process through <c>PSIGN_MANAGED_TOOL</c>.
+    /// </summary>
+    public static void RequireInProcess() =>
+        Skip.If(ExternalManagedTool is not null, "injects in-process hooks; PSIGN_MANAGED_TOOL runs the managed CLI out of process");
+
+    /// <summary>Run the managed <c>psign-tool</c> in-process (or <c>PSIGN_MANAGED_TOOL</c> out of process).</summary>
     public static CliResult RunManaged(params string[] args) => RunManaged(NoEnv, args);
 
     /// <summary>
@@ -26,6 +41,12 @@ internal static class CliHarness
     /// </summary>
     public static CliResult RunManaged(IReadOnlyDictionary<string, string?> env, params string[] args)
     {
+        if (ExternalManagedTool is not null)
+        {
+            var (exitCode, stdout, stderr) = RustTool.RunProcessBytes(ExternalManagedTool, env, args);
+            return new CliResult(exitCode, stdout, stderr);
+        }
+
         lock (Gate)
         {
             var saved = env.Keys.ToDictionary(k => k, Environment.GetEnvironmentVariable);
