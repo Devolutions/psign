@@ -176,42 +176,36 @@ jobs:
       matrix:
         include:
           - name: linux-x64
-            rid: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: psign-tool-linux-x64.zip
             binary: psign-tool
 
           - name: linux-arm64
-            rid: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             archive: psign-tool-linux-arm64.zip
             binary: psign-tool
 
           - name: windows-x64
-            rid: win-x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: psign-tool-windows-x64.zip
             binary: psign-tool.exe
 
           - name: windows-arm64
-            rid: win-arm64
             os: windows-2022
             target: aarch64-pc-windows-msvc
             archive: psign-tool-windows-arm64.zip
             binary: psign-tool.exe
 
           - name: macos-x64
-            rid: osx-x64
             os: macos-15
             target: x86_64-apple-darwin
             archive: psign-tool-macos-x64.zip
             binary: psign-tool
 
           - name: macos-arm64
-            rid: osx-arm64
             os: macos-15
             target: aarch64-apple-darwin
             archive: psign-tool-macos-arm64.zip
@@ -263,45 +257,6 @@ jobs:
           )
 
           cargo @cargoArgs
-
-      - name: Build psign-core shared library
-        shell: pwsh
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: |
-          $target = '${{ matrix.target }}'
-          cargo build --locked --release -p psign-portable-ffi --features azure-kv-sign,artifact-signing-rest --target $target
-
-      - name: Stage psign-core native library
-        shell: pwsh
-        env:
-          RID: ${{ matrix.rid }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          $sourceName = if ($env:TARGET -like '*windows-msvc') {
-            'psign_core.dll'
-          } elseif ($env:TARGET -like '*apple-darwin') {
-            'libpsign_core.dylib'
-          } else {
-            'libpsign_core.so'
-          }
-
-          $destName = if ($env:TARGET -like '*windows-msvc') {
-            'psign-core.dll'
-          } elseif ($env:TARGET -like '*apple-darwin') {
-            'libpsign-core.dylib'
-          } else {
-            'libpsign-core.so'
-          }
-
-          $sourcePath = Join-Path (Join-Path (Join-Path 'target' $env:TARGET) 'release') $sourceName
-          if (-not (Test-Path -LiteralPath $sourcePath)) {
-            throw "psign-core native library not found: $sourcePath"
-          }
-
-          $nativeOut = Join-Path (Join-Path 'psign-core' $env:RID) 'native'
-          New-Item -ItemType Directory -Force -Path $nativeOut | Out-Null
-          Copy-Item -Force -LiteralPath $sourcePath -Destination (Join-Path $nativeOut $destName)
 
       - name: Verify Windows version info
         if: contains(matrix.target, 'windows-msvc')
@@ -367,22 +322,6 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
-      - name: Upload psign-core native library
-        if: ${{ !contains(matrix.target, 'windows-msvc') }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: psign-core-${{ matrix.rid }}
-          path: psign-core/${{ matrix.rid }}/native/*
-          if-no-files-found: error
-
-      - name: Upload unsigned Windows psign-core native library
-        if: ${{ contains(matrix.target, 'windows-msvc') }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: unsigned-psign-core-${{ matrix.rid }}
-          path: psign-core/${{ matrix.rid }}/native/*
-          if-no-files-found: error
-
   sign_windows:
     name: Sign and package Windows artifacts
     runs-on: ubuntu-latest
@@ -406,18 +345,6 @@ jobs:
         with:
           name: psign-tool-windows-arm64.zip-unsigned-bin
           path: work/win-arm64
-
-      - name: Download unsigned Windows x64 psign-core
-        uses: actions/download-artifact@v8
-        with:
-          name: unsigned-psign-core-win-x64
-          path: work/psign-core-win-x64
-
-      - name: Download unsigned Windows arm64 psign-core
-        uses: actions/download-artifact@v8
-        with:
-          name: unsigned-psign-core-win-arm64
-          path: work/psign-core-win-arm64
 
       - name: Download Linux x64 psign-tool
         uses: actions/download-artifact@v8
@@ -523,9 +450,7 @@ jobs:
 
           $targets = @(
             'work/win-x64/psign-tool.exe',
-            'work/win-arm64/psign-tool.exe',
-            'work/psign-core-win-x64/psign-core.dll',
-            'work/psign-core-win-arm64/psign-core.dll'
+            'work/win-arm64/psign-tool.exe'
           )
 
           foreach ($target in $targets) {
@@ -571,20 +496,6 @@ jobs:
         with:
           name: psign-tool-windows-arm64.zip
           path: psign-tool-windows-arm64.zip
-          if-no-files-found: error
-
-      - name: Upload artifact psign-core-win-x64
-        uses: actions/upload-artifact@v7
-        with:
-          name: psign-core-win-x64
-          path: work/psign-core-win-x64/psign-core.dll
-          if-no-files-found: error
-
-      - name: Upload artifact psign-core-win-arm64
-        uses: actions/upload-artifact@v7
-        with:
-          name: psign-core-win-arm64
-          path: work/psign-core-win-arm64/psign-core.dll
           if-no-files-found: error
 
   pack_dotnet_tool:
@@ -650,11 +561,10 @@ jobs:
           if-no-files-found: error
 
   pack_powershell_module:
-    name: Pack PowerShell module from prebuilt psign-core libraries
+    name: Pack PowerShell module
     runs-on: ubuntu-latest
     needs:
       - preflight
-      - sign_windows
     environment: ${{ needs.preflight.outputs.publish_env }}
 
     steps:
@@ -662,12 +572,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.build_ref }}
-
-      - name: Download psign-core native artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: psign-core-*
-          path: dist/native
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v5
@@ -737,8 +641,6 @@ jobs:
 
           $packageArgs = @{
             Configuration = 'Release'
-            NativeArtifactsRoot = 'dist/native'
-            SkipNativeBuild = $true
             OutputDirectory = 'dist/powershell'
             ModuleArchivePath = $archivePath
           }

@@ -1,6 +1,6 @@
 # Portable PowerShell module
 
-`Devolutions.Psign` is a PowerShell 7.4 / .NET 8 binary module that exposes portable Authenticode cmdlets over the Rust `psign-core` shared library. The module does not call `WinVerifyTrust`, `CryptUIWizDigitalSign`, `SignerSignEx`, or registered Windows SIP DLLs.
+`Devolutions.Psign` is a PowerShell 7.4 / .NET 8 binary module that exposes portable Authenticode cmdlets over the pure C# psign stack (`Devolutions.Psign.Core`, `Devolutions.Psign.Verification`, `Devolutions.Psign.Signing` under `dotnet/`). It loads no native library, so the same module payload runs on Windows, Linux, and macOS on any architecture .NET 8 supports. The module does not call `WinVerifyTrust`, `CryptUIWizDigitalSign`, `SignerSignEx`, or registered Windows SIP DLLs.
 
 ## Cmdlets
 
@@ -109,17 +109,9 @@ pwsh -File .\PowerShell\tests\Invoke-PortableSignatureTests.ps1 -Configuration R
 pwsh -File .\PowerShell\package.ps1 -Configuration Release
 ```
 
-The build stages the native library under the module RID layout, for example `runtimes\win-x64\native\psign-core.dll`, so .NET can load it via the module resolver. The package script validates the module manifest, publishes to a temporary local repository, saves the generated module package, imports it, and confirms both cmdlets are exported.
+The build publishes `dotnet/Devolutions.Psign.PowerShell` and its managed dependencies (`Devolutions.Psign.Core.dll`, `Devolutions.Psign.Verification.dll`, `Devolutions.Psign.Signing.dll`) into `lib\net8.0`. No Rust toolchain is needed and there is no per-RID `runtimes` folder. The cmdlets call `PortableCoreJson` in-process with the same JSON request / response contract as the Rust `psign-core` FFI ([portable-core-ffi.md](portable-core-ffi.md)); the C# port is differential-tested against the Rust implementation (see `dotnet/PORTING.md`). The package script validates the module manifest, publishes to a temporary local repository, saves the generated module package, imports it, and confirms the cmdlets are exported.
 
-Release packaging can import prebuilt `psign-core-<rid>` native artifacts instead of rebuilding the current RID locally:
-
-```powershell
-pwsh -File .\PowerShell\package.ps1 -Configuration Release -NativeArtifactsRoot .\dist\native -SkipNativeBuild
-```
-
-The native artifact root should contain directories such as `psign-core-win-x64`, `psign-core-linux-x64`, and `psign-core-osx-arm64`, each containing the packaged native library name for that RID.
-
-Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies with `Set-PsignSignature`, then verifies them through the built `Devolutions.Psign` module, while preserving the separately signed Windows native `psign-core.dll` artifacts imported from the native signing job. The packaging helper accepts Azure Key Vault or Azure Artifact Signing parameters; the release workflow currently supplies Azure Key Vault secrets. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
+Release packaging can also sign the staged module payload before creating the `.nupkg`. The release workflow Authenticode-signs the module manifest, root script module, format file, and managed assemblies with `Set-PsignSignature`, then verifies them through the built `Devolutions.Psign` module. The packaging helper accepts Azure Key Vault or Azure Artifact Signing parameters; the release workflow currently supplies Azure Key Vault secrets. The release ZIP remains only a transport archive for those signed files; it is not signed as a custom ZIP Authenticode package.
 
 ## Migrating from built-in Authenticode cmdlets
 

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>Devolutions.Psign.Tests</AssemblyName>
+    <RootNamespace>Devolutions.Psign.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit" Version="2.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.*" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.*" />
+    <!-- Independent MS-CFB reader used to cross-check Core/Msi/CfbFile output. -->
+    <PackageReference Include="OpenMcdf" Version="3.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Devolutions.Psign.Core\Devolutions.Psign.Core.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.Verification\Devolutions.Psign.Verification.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.Signing\Devolutions.Psign.Signing.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.Cli\Devolutions.Psign.Cli.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.Server\Devolutions.Psign.Server.csproj" />
+    <ProjectReference Include="..\Devolutions.Psign.DepGraph\Devolutions.Psign.DepGraph.csproj" />
+  </ItemGroup>
+
+</Project>

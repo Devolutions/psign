@@ -2,6 +2,8 @@
 
 This repository is a **Rust port** of the Windows SDK **`signtool.exe`** (Authenticode sign / verify / timestamp / remove, plus related flows). Portable digest logic mirrors inbox SIP hashing where implemented; the full CLI depends on Win32 (**`WinVerifyTrust`**, **`SignerSignEx3`**, CryptSIP).
 
+The project is **dual-language**: `dotnet/` holds a pure C# implementation of the whole **portable** stack (no P/Invoke), tested byte-for-byte against the Rust tool. Behaviour changes to the portable Rust code should be mirrored in C# (see **`dotnet/PORTING.md`**).
+
 Canonical repository: <https://github.com/Devolutions/psign>.
 
 ## Workspace layout
@@ -17,6 +19,7 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 | Azure Key Vault REST | `crates/psign-azure-kv-rest` | Portable blocking client for Key Vault certificate metadata and `keys/sign`. |
 | Win32 implementation | `src/win/` | Verify, sign, timestamp, catalog, detached PKCS#7, etc. |
 | argv / response files | `src/native_argv.rs`, `src/response_argv.rs` | Shared by unified CLI and portable-mode builds. |
+| C# implementation | `dotnet/` (`Devolutions.Psign.slnx`) | `Devolutions.Psign.Core` (formats, digests, CMS read model), `Devolutions.Psign.Verification` (validation-only NuGet), `Devolutions.Psign.Signing`, `Devolutions.Psign.Cli` (managed `psign-tool`), `Devolutions.Psign.Tests` (xUnit + Rust differential tests). `dotnet/Devolutions.Psign.PowerShell` (the `Devolutions.Psign` PowerShell module, built by `PowerShell/build.ps1`) runs on `Devolutions.Psign.Signing` with no native library. |
 | CI / parity scripts | `scripts/`, `.github/workflows/` | Windows parity harnesses, Unix portable validation, corpus builders, and dependency graph generation. |
 
 **Important:** **`default-members`** include the root **`psign`** package plus all workspace crates under **`crates/`**. A bare **`cargo build`** at the repo root builds the unified **`psign-tool`** executable from **`src/main.rs`**; portable functionality is invoked through **`psign-tool portable ...`**.
@@ -30,6 +33,16 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --locked
 cargo test --workspace --locked
 ```
+
+For C# changes (and Rust changes to portable behaviour), also run:
+
+```text
+cargo build -p psign --bin psign-tool --locked
+dotnet build dotnet/Devolutions.Psign.slnx
+dotnet test dotnet/src/Devolutions.Psign.Tests
+```
+
+The differential tests use `target/debug/psign-tool` (or `PSIGN_RUST_TOOL`); tests that compare against the Rust FFI need `PSIGN_RUST_FFI` pointing at a `psign_core` library built with `cargo build -p psign-portable-ffi --features "azure-kv-sign artifact-signing-rest"`. Missing tools make those tests skip.
 
 On Linux/macOS, match **`ci-unix`** by running **`bash scripts/linux-portable-validation.sh`**. It covers fmt check, metadata **`--locked`**, strict clippy for portable crates and feature combinations (**`artifact-signing-rest`**, **`azure-kv-sign-portable`**, **`timestamp-http`**), REST crate tests, **`cli_pe_digest`**, and **`psign --lib`**.
 
@@ -54,6 +67,7 @@ On Linux/macOS, match **`ci-unix`** by running **`bash scripts/linux-portable-va
 | **`docs/authroot-linux-verify.md`** | Anchor dir + AuthRoot CAB usage on Linux. |
 | **`docs/plan-linux-authenticode-trust-verify.md`** | Technical plan (CTL, test matrix, risks). |
 | **`docs/psa-interoperability.md`** | Interop notes for PowerShell OpenAuthenticode and portable CMS behavior. |
+| **`dotnet/README.md`**, **`dotnet/PORTING.md`** | C# packages, layout, build/test, and porting conventions (project boundaries, parity rules, shared helpers). |
 | **`docs/psign-cli-matrix.json`** | Machine-checked native ↔ Rust CLI mapping (with **`psign-cli-matrix.md`** summary). |
 
 Do **not** commit **`parity-output/`** or **`reversing/`** — they are **gitignored** (local parity JSON, **`psign-depgraph`** output, optional vendor DLL copies).

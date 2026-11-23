@@ -6,6 +6,11 @@ differential parity tests against the native tool where CI fixtures allow.
 
 Canonical repository: <https://github.com/Devolutions/psign>.
 
+psign is dual-language: besides the Rust implementation, [`dotnet/`](dotnet/README.md) contains a pure C#
+implementation of the whole portable stack (digests, verification, trust, signing, remote signers, and the managed
+`psign-tool` CLI), published as NuGet packages. `Devolutions.Psign.Verification` is a validation-only package with no
+signing code. The C# code is tested byte-for-byte against the Rust tool.
+
 ## CLI surface
 
 - `verify`, `remove`, `catdb`: Windows-compatible `signtool.exe` flows backed by WinTrust and CryptSIP where native APIs are required.

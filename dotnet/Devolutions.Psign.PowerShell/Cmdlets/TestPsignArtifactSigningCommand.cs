@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -66,7 +66,7 @@ public sealed class TestPsignArtifactSigningCommand : PSCmdlet
     {
         try
         {
-            PortableSignature signature = PsignNative.GetSignature(new PortableGetSignatureRequest
+            PortableSignature signature = PsignPortable.GetSignature(new PortableGetSignatureRequest
             {
                 Path = path,
                 AsOf = AsOf?.ToUniversalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),

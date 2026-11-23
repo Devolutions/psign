@@ -236,6 +236,17 @@ Update-RequiredRegex `
         "$($match.Groups[1].Value)$Version$($match.Groups[3].Value)"
     }
 
+# Version of every C# package and assembly under dotnet/ (Core, Verification, Signing, Cli, Server, PowerShell module host).
+$dotnetBuildProps = Join-Path $repoRoot "dotnet\Directory.Build.props"
+Update-RequiredRegex `
+    -Path $dotnetBuildProps `
+    -Pattern '(?m)^(\s*<Version Condition="''\$\((?:Version)\)'' == ''''">)([^<]+)(</Version>)' `
+    -Description "C# (dotnet/) fallback version" `
+    -Replacement {
+        param($match)
+        "$($match.Groups[1].Value)$Version$($match.Groups[3].Value)"
+    }
+
 $readmePath = Join-Path $repoRoot "README.md"
 Update-RequiredRegex `
     -Path $readmePath `
