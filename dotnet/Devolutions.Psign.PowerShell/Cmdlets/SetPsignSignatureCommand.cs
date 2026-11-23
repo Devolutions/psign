@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Provider;
 using Devolutions.Psign.PowerShell.Utilities;
 
@@ -213,7 +213,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
                 return;
             }
 
-            PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
+            PortableSignResponse response = PsignPortable.Sign(new PortableSignRequest
             {
                 Path = tempPath,
                 AppendSignature = AppendSignature.IsPresent,
@@ -294,7 +294,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
             FileAttributes? restoreAttributes = PrepareWritableTarget(path, target);
             try
             {
-                PortableSignResponse response = PsignNative.Sign(new PortableSignRequest
+                PortableSignResponse response = PsignPortable.Sign(new PortableSignRequest
                 {
                     Path = path,
                     AppendSignature = AppendSignature.IsPresent,

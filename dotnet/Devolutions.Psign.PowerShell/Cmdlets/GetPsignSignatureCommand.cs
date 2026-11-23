@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Trust;
 using Devolutions.Psign.PowerShell.Utilities;
 
@@ -113,7 +113,7 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
                 return;
             }
 
-            WriteObject(PsignNative.GetSignature(CreateRequest(path)));
+            WriteObject(PsignPortable.GetSignature(CreateRequest(path)));
         }
         catch (Exception ex)
         {
@@ -129,7 +129,7 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
         try
         {
             File.WriteAllBytes(tempPath, Content);
-            PortableSignature signature = PsignNative.GetSignature(CreateRequest(tempPath));
+            PortableSignature signature = PsignPortable.GetSignature(CreateRequest(tempPath));
             signature.SourcePathOrExtension = sourcePathOrExtension;
             WriteObject(signature);
         }

@@ -4,10 +4,6 @@ param(
 
     [string] $OutputDirectory = (Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts') 'powershell'),
 
-    [string] $NativeArtifactsRoot,
-
-    [switch] $SkipNativeBuild,
-
     [string] $ModuleArchivePath,
 
     [switch] $SignModule,
@@ -58,12 +54,6 @@ $repoName = "DevolutionsPsignLocal$([System.Guid]::NewGuid().ToString('N'))"
 
 $buildArgs = @{
     Configuration = $Configuration
-}
-if ($NativeArtifactsRoot) {
-    $buildArgs.NativeArtifactsRoot = $NativeArtifactsRoot
-}
-if ($SkipNativeBuild) {
-    $buildArgs.SkipNativeBuild = $true
 }
 & (Join-Path $PSScriptRoot 'build.ps1') @buildArgs
 
@@ -145,12 +135,12 @@ try {
         $savedModuleRoot = Split-Path -Parent $savedManifest
         & (Join-Path $PSScriptRoot 'sign-module.ps1') -ModuleRoot $savedModuleRoot -VerifyOnly | Out-Host
     }
-    $nativeProbe = New-TemporaryFile
+    $probeFile = New-TemporaryFile
     try {
-        $null = Get-PsignSignature -LiteralPath $nativeProbe.FullName -ErrorAction Stop
+        $null = Get-PsignSignature -LiteralPath $probeFile.FullName -ErrorAction Stop
     }
     finally {
-        Remove-Item -LiteralPath $nativeProbe.FullName -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $probeFile.FullName -Force -ErrorAction SilentlyContinue
     }
     if ($ModuleArchivePath) {
         if (Test-Path -LiteralPath $ModuleArchivePath) {

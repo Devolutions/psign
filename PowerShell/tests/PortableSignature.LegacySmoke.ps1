@@ -11,11 +11,11 @@ $env:PSIGN_NO_AUTO_TRUST = '1'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildScript = Join-Path (Join-Path $repo 'PowerShell') 'build.ps1'
 if (-not $env:PSIGN_PWSH_TEST_SKIP_BUILD) {
-    # If the module is already loaded in this process, the native DLL is locked
+    # If the module is already loaded in this process, its assemblies are locked
     # and cannot be overwritten by a rebuild. Skip the build in that case.
     $alreadyLoaded = Get-Module Devolutions.Psign -ErrorAction SilentlyContinue
     if ($alreadyLoaded) {
-        Write-Host "Skipping build: module already loaded in this session (native DLL locked)."
+        Write-Host "Skipping build: module already loaded in this session (module assemblies locked)."
     } else {
         & $buildScript -Configuration $Configuration
     }

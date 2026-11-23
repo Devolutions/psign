@@ -1,6 +1,6 @@
 # Portable core FFI
 
-`psign-portable-ffi` exposes the reusable portable Authenticode core as a native shared library for managed callers such as a PowerShell 7.4 / .NET 8 binary module. The packaged shared library name is `psign-core`: `psign-core.dll` on Windows, `libpsign-core.so` on Linux, and `libpsign-core.dylib` on macOS. Cargo builds the internal target as `psign_core` because Rust library target names cannot contain hyphens; module packaging stages it under the hyphenated `psign-core` file names.
+`psign-portable-ffi` exposes the reusable portable Authenticode core as a native shared library for native or P/Invoke callers (for example patched PowerShell hosts). The `Devolutions.Psign` PowerShell module no longer loads it: it calls the managed equivalent, `Devolutions.Psign.Signing.Portable.PortableCoreJson`, which accepts the same operations and JSON. The packaged shared library name is `psign-core`: `psign-core.dll` on Windows, `libpsign-core.so` on Linux, and `libpsign-core.dylib` on macOS. Cargo builds the internal target as `psign_core` because Rust library target names cannot contain hyphens; release packaging stages it under the hyphenated `psign-core` file names.
 
 The ABI is intentionally small and JSON-based:
 

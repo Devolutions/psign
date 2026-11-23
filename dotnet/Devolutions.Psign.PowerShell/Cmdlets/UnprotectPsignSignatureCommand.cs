@@ -2,7 +2,7 @@ using System.Management.Automation;
 using System.Text;
 using System.Text.RegularExpressions;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
@@ -133,7 +133,7 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
                 return;
             }
 
-            PortableClearSignatureResponse response = PsignNative.ClearSignature(new PortableClearSignatureRequest
+            PortableClearSignatureResponse response = PsignPortable.ClearSignature(new PortableClearSignatureRequest
             {
                 Path = path,
             });

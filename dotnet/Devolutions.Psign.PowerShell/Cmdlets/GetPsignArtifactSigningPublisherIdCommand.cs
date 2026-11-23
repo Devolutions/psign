@@ -1,7 +1,7 @@
 using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -55,7 +55,7 @@ public sealed class GetPsignArtifactSigningPublisherIdCommand : PSCmdlet
     {
         try
         {
-            PortableSignature signature = PsignNative.GetSignature(new PortableGetSignatureRequest { Path = path });
+            PortableSignature signature = PsignPortable.GetSignature(new PortableGetSignatureRequest { Path = path });
             if (signature.ArtifactSigning is null)
             {
                 WriteNotArtifactSigningError(signature.SignerCertificate is null
@@ -78,7 +78,7 @@ public sealed class GetPsignArtifactSigningPublisherIdCommand : PSCmdlet
     {
         try
         {
-            PortableArtifactSigningIdentityResponse response = PsignNative.GetArtifactSigningIdentity(
+            PortableArtifactSigningIdentityResponse response = PsignPortable.GetArtifactSigningIdentity(
                 new PortableArtifactSigningIdentityRequest
                 {
                     CertificateDerBase64 = Convert.ToBase64String(certificate.Export(X509ContentType.Cert)),

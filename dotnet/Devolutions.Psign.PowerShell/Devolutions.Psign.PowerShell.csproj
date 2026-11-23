@@ -5,14 +5,18 @@
     <RootNamespace>Devolutions.Psign.PowerShell</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Deterministic>true</Deterministic>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
-    <NoWarn>$(NoWarn);CA2255</NoWarn>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Management.Automation" Version="7.4.6" PrivateAssets="all" ExcludeAssets="runtime" />
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The cmdlets run on the pure C# portable stack; no native psign-core library is loaded. -->
+    <ProjectReference Include="..\src\Devolutions.Psign.Signing\Devolutions.Psign.Signing.csproj" />
   </ItemGroup>
 </Project>

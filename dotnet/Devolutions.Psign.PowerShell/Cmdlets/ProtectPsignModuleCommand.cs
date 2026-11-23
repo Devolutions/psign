@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Utilities;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -174,7 +174,7 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
             string fullPath = System.IO.Path.Combine(moduleDir, relativePath);
             try
             {
-                var response = PsignNative.Sign(CreateSignRequest(fullPath, certInfo));
+                var response = PsignPortable.Sign(CreateSignRequest(fullPath, certInfo));
                 results.Add(new PsignModuleFileSignResult
                 {
                     RelativePath = relativePath,

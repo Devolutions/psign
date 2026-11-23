@@ -38,7 +38,7 @@ dotnet/
     Devolutions.Psign.Server/       # psign-server (managed local test services)
     Devolutions.Psign.DepGraph/     # psign-depgraph (managed binary manifest / dependency graph generator)
     Devolutions.Psign.Tests/        # xUnit, uses ../tests/fixtures and the Rust tool for differential tests
-  Devolutions.Psign.PowerShell/     # existing PowerShell module host (uses the native psign-core FFI)
+  Devolutions.Psign.PowerShell/     # Devolutions.Psign PowerShell module cmdlets (managed, on Devolutions.Psign.Signing)
 ```
 
 ## Build and test

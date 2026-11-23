@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Provider;
 using Devolutions.Psign.PowerShell.Trust;
 using Devolutions.Psign.PowerShell.Utilities;
@@ -376,7 +376,7 @@ public sealed class TestPsignModuleCommand : PSCmdlet
         PortableSignature sig;
         try
         {
-            sig = PsignNative.GetSignature(CreateVerifyRequest(fullPath));
+            sig = PsignPortable.GetSignature(CreateVerifyRequest(fullPath));
         }
         catch (Exception ex)
         {

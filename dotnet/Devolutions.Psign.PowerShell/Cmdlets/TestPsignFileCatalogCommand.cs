@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Management.Automation;
 using System.Security.Cryptography.X509Certificates;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 using Devolutions.Psign.PowerShell.Trust;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
@@ -67,7 +67,7 @@ public sealed class TestPsignFileCatalogCommand : PSCmdlet
 
         try
         {
-            PortableTestFileCatalogResponse response = PsignNative.TestFileCatalog(CreateRequest(catalogPath));
+            PortableTestFileCatalogResponse response = PsignPortable.TestFileCatalog(CreateRequest(catalogPath));
             WriteObject(Detailed.IsPresent ? response : response.Status);
         }
         catch (Exception ex)

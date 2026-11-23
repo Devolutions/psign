@@ -1,6 +1,6 @@
 using System.Management.Automation;
 using Devolutions.Psign.PowerShell.Models;
-using Devolutions.Psign.PowerShell.Native;
+using Devolutions.Psign.PowerShell.Portable;
 
 namespace Devolutions.Psign.PowerShell.Cmdlets;
 
@@ -29,7 +29,7 @@ public sealed class NewPsignFileCatalogCommand : PSCmdlet
 
         try
         {
-            PortableNewFileCatalogResponse response = PsignNative.NewFileCatalog(new PortableNewFileCatalogRequest
+            PortableNewFileCatalogResponse response = PsignPortable.NewFileCatalog(new PortableNewFileCatalogRequest
             {
                 CatalogFilePath = catalogPath,
                 Paths = paths,
