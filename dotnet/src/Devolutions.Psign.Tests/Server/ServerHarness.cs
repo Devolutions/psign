@@ -404,19 +404,30 @@ internal static class DerShape
                 case 0x17 or 0x18 when allowTimeDifference:
                     continue;
                 case 0x04:
+                {
+                    // Key identifiers / certificate hashes, and RSA-2048 SignerInfo signatures, are random per run.
+                    bool opaqueLength = ca.Length is 20 or 32 or 256;
                     if (Elements(ca) is { Count: > 0 } && Elements(cb) is { Count: > 0 })
                     {
-                        Compare(ca, cb, p, diffs, allowTimeDifference);
+                        // Random bytes occasionally parse as DER too (for example a key identifier starting 5e 12 ...),
+                        // so a structural mismatch inside an opaque-length value is not a difference.
+                        var inner = new List<string>();
+                        Compare(ca, cb, p, inner, allowTimeDifference);
+                        if (inner.Count > 0 && !opaqueLength)
+                        {
+                            diffs.AddRange(inner);
+                        }
+
                         continue;
                     }
 
-                    // Key identifiers / certificate hashes, and RSA-2048 SignerInfo signatures.
-                    if (ca.Length is 20 or 32 or 256)
+                    if (opaqueLength)
                     {
                         continue;
                     }
 
                     break;
+                }
                 case 0x80 when ca.Length == 20:
                     // AuthorityKeyIdentifier.keyIdentifier [0] IMPLICIT.
                     continue;
