@@ -109,6 +109,22 @@ public sealed class DepGraphParityTests
     }
 
     [SkippableFact]
+    public void DotDotAfterSymlinkResolvesFromLinkTarget()
+    {
+        // POSIX canonicalization resolves `link` before applying `..`, so `link/../root.exe` names real/root.exe, not
+        // ./root.exe. (Win32 collapses `..` lexically, which the Windows code path already mirrors.)
+        Skip.If(OperatingSystem.IsWindows(), "POSIX symlink resolution order");
+        RustBinaries.RequireDepGraph();
+        var source = Fixtures.Path("generated-signed/pe/tiny64-pe-alias.exe");
+        AssertSame(["--signtool", "link/../root.exe"], cwd =>
+        {
+            var inner = Directory.CreateDirectory(Path.Combine(cwd, "real", "inner")).FullName;
+            File.Copy(source, Path.Combine(cwd, "real", "root.exe"));
+            File.CreateSymbolicLink(Path.Combine(cwd, "link"), inner);
+        });
+    }
+
+    [SkippableFact]
     public void NonPeRootMatches() =>
         AssertSame(["--signtool", "notes.txt"], cwd => File.WriteAllText(Path.Combine(cwd, "notes.txt"), "this is not a portable executable at all\n"));
 

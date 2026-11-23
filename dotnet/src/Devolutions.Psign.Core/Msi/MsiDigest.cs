@@ -186,8 +186,11 @@ public static class MsiDigest
 
         public CfbDirEntry Root => Cfb.Root;
 
-        /// <summary>Open <paramref name="data"/>; <paramref name="writable"/> works on a private copy of the bytes.</summary>
-        public static Package Open(byte[] data, bool writable = false, string errorPrefix = "open as OLE compound file")
+        /// <summary>
+        /// Open <paramref name="data"/>; <paramref name="writable"/> works on a private copy of the bytes. A <c>null</c>
+        /// <paramref name="errorPrefix"/> reports the compound-file error without context (Rust <c>CompoundFile::open(..)?</c>).
+        /// </summary>
+        public static Package Open(byte[] data, bool writable = false, string? errorPrefix = "open as OLE compound file")
         {
             try
             {
@@ -195,7 +198,13 @@ public static class MsiDigest
             }
             catch (Exception e) when (e is PsignException or ArgumentException or IndexOutOfRangeException or OverflowException)
             {
-                throw new PsignException(errorPrefix, e is PsignException ? e : new PsignException(e.Message));
+                var inner = e as PsignException ?? new PsignException(e.Message);
+                if (errorPrefix is null)
+                {
+                    throw inner;
+                }
+
+                throw new PsignException(errorPrefix, inner);
             }
         }
 
@@ -361,7 +370,8 @@ public static class MsiDigest
     /// </summary>
     public static void VerifyDigestConsistency(byte[] data)
     {
-        var pkg = Package.Open(data);
+        // Rust `verify_msi_digest_consistency` opens with a bare `?`: no "open as OLE compound file" context.
+        var pkg = Package.Open(data, errorPrefix: null);
         if (pkg.FindRootChild(DigitalSignatureEntry) is null)
         {
             throw new PsignException($"MSI is missing {DigitalSignatureEntryDebug} stream");

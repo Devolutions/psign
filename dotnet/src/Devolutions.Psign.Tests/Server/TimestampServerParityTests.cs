@@ -202,4 +202,20 @@ public sealed class TimestampServerParityTests
         Assert.Equal(rustErr, managedErr);
         Assert.StartsWith("request failed: ", managedErr);
     }
+
+    [Fact]
+    public void OverflowingContentLengthIsRejectedAndServerKeepsServing()
+    {
+        // The Rust server panics on `body_start + content_len` overflow; the managed one logs the request failure and
+        // serves the next request.
+        var huge = Encoding.ASCII.GetBytes("POST / HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n");
+        using var server = ServerProcess.Start(RustBinaries.ManagedServer, 1, ["timestamp-server", "--max-requests", "2"]);
+        Assert.Empty(RawHttp.Exchange(server.Port, huge));
+        var (head, body) = RawHttp.Split(RawHttp.Exchange(server.Port, Post(TsRequest())));
+        Assert.StartsWith("HTTP/1.1 200", head);
+        Assert.NotEmpty(body);
+        var (code, err) = server.WaitForExit();
+        Assert.Equal(0, code);
+        Assert.Contains("request failed: HTTP Content-Length 18446744073709551615 is too large", err);
+    }
 }

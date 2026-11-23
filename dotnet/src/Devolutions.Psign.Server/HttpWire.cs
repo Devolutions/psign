@@ -143,6 +143,14 @@ internal static class HttpWire
         }
 
         long bodyStart = headerEnd + 4;
+
+        // The Rust server overflows `body_start + content_len` here and panics, taking the process down. Reject a
+        // body that cannot fit in a managed array instead, so the serve loop logs the request failure and continues.
+        if (contentLen > (ulong)(Array.MaxLength - bodyStart))
+        {
+            throw new PsignException($"HTTP Content-Length {contentLen} is too large");
+        }
+
         while ((ulong)buf.Count < (ulong)bodyStart + contentLen)
         {
             int n = Receive(socket, tmp, "read HTTP body");

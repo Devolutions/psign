@@ -473,8 +473,16 @@ internal sealed class CfbFile
             difat.RemoveAt(difat.Count - 1);
         }
 
-        // FAT.
+        // FAT. Rust concatenates every DIFAT-listed sector, strips trailing 0 / DIFAT / FAT / FREE entries beyond the
+        // sector count, then rejects a FAT that is still longer than the sector count. The DIFAT may list the same
+        // sector many times, so materialising that concatenation lets a small file demand gigabytes. Keep only the
+        // first numSectors entries and track the last entry beyond them that the trim would keep (a duplicated sector
+        // has identical content, so it is read once); the outcome and error text match the Rust crate.
+        int entriesPerSector = sectorLen / 4;
         var fat = new List<uint>();
+        var lastKeptEntryInSector = new Dictionary<uint, int>();
+        long fatLen = 0;
+        long lastKeptBeyondSectors = -1;
         foreach (uint sectorIndex in difat)
         {
             if (sectorIndex >= numSectors)
@@ -482,29 +490,38 @@ internal sealed class CfbFile
                 throw Error($"DIFAT refers to sector {sectorIndex}, but sector count is only {numSectors}");
             }
 
-            long offset = file.SectorOffset(sectorIndex);
-            for (int i = 0; i < sectorLen / 4; i++)
+            if (fatLen < numSectors || !lastKeptEntryInSector.TryGetValue(sectorIndex, out int lastKept))
             {
-                fat.Add(file.ReadU32At(offset + (4 * i)));
+                lastKept = -1;
+                long offset = file.SectorOffset(sectorIndex);
+                for (int i = 0; i < entriesPerSector; i++)
+                {
+                    uint entry = file.ReadU32At(offset + (4 * i));
+                    if (fatLen + i < numSectors)
+                    {
+                        fat.Add(entry);
+                    }
+
+                    if (entry is not (0 or DifatSector or FatSector or FreeSector))
+                    {
+                        lastKept = i;
+                    }
+                }
+
+                lastKeptEntryInSector[sectorIndex] = lastKept;
             }
+
+            if (lastKept >= 0 && fatLen + lastKept >= numSectors)
+            {
+                lastKeptBeyondSectors = Math.Max(lastKeptBeyondSectors, fatLen + lastKept);
+            }
+
+            fatLen += entriesPerSector;
         }
 
-        while (fat.Count > numSectors)
+        if (lastKeptBeyondSectors >= numSectors)
         {
-            uint last = fat[^1];
-            if (last is 0 or DifatSector or FatSector or FreeSector)
-            {
-                fat.RemoveAt(fat.Count - 1);
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        while (fat.Count > numSectors && fat[^1] == FreeSector)
-        {
-            fat.RemoveAt(fat.Count - 1);
+            throw Error($"Malformed FAT (FAT has {lastKeptBeyondSectors + 1} entries, but file has only {numSectors} sectors)");
         }
 
         while (fat.Count < numSectors)
@@ -1820,21 +1837,34 @@ internal sealed class CfbFile
             throw Error($"stream {Debug(entry.Name)} is too large");
         }
 
-        var buf = new byte[len];
         if (len == 0)
         {
-            return buf;
+            return [];
         }
 
+        // Walk (and validate) the sector chain before allocating: the declared length is untrusted, and a chain
+        // shorter than it fails exactly like the Rust read does once it runs past the last sector.
         if (len < MiniStreamCutoff)
         {
-            new MiniChain(this, entry.StartSector).ReadExact(buf);
-        }
-        else
-        {
-            new Chain(this, entry.StartSector, SectorInit.Zero).ReadExact(buf);
+            var miniChain = new MiniChain(this, entry.StartSector);
+            if ((long)len > miniChain.Len)
+            {
+                throw Error("failed to fill whole buffer");
+            }
+
+            var miniBuf = new byte[len];
+            miniChain.ReadExact(miniBuf);
+            return miniBuf;
         }
 
+        var chain = new Chain(this, entry.StartSector, SectorInit.Zero);
+        if ((long)len > chain.Len)
+        {
+            throw Error("failed to fill whole buffer");
+        }
+
+        var buf = new byte[len];
+        chain.ReadExact(buf);
         return buf;
     }
 

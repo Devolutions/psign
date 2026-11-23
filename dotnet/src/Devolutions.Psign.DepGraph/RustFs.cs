@@ -149,8 +149,12 @@ internal static class RustFs
     /// </summary>
     public static string Canonicalize(string path)
     {
-        string full = Path.GetFullPath(StripVerbatim(path));
-        return Windows ? CanonicalizeWindows(full, 0) : CanonicalizeUnix(full, 0);
+        // Win32 path parsing collapses `..` lexically before CreateFileW resolves links, so GetFullPath first matches
+        // Rust there. POSIX realpath resolves each component in order (`link/..` is the link target's parent), so the
+        // Unix walk must see `.` / `..` itself.
+        return Windows
+            ? CanonicalizeWindows(Path.GetFullPath(StripVerbatim(path)), 0)
+            : CanonicalizeUnix(Path.IsPathRooted(path) ? path : Path.Combine(Directory.GetCurrentDirectory(), path));
     }
 
     private static string StripVerbatim(string path)
@@ -204,30 +208,62 @@ internal static class RustFs
         return @"\\?\" + current;
     }
 
-    private static string CanonicalizeUnix(string full, int depth)
+    private static string CanonicalizeUnix(string absolute)
     {
-        if (depth > 40)
-        {
-            throw new IOException("Too many levels of symbolic links (os error 40)");
-        }
-
-        var components = full.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var pending = new Stack<string>();
+        PushComponents(pending, absolute);
         string current = "/";
-        for (int i = 0; i < components.Length; i++)
+        int links = 0;
+        while (pending.Count > 0)
         {
-            var info = FindEntry(current, components[i], last: i == components.Length - 1);
-            if (info.LinkTarget is not null)
+            string name = pending.Pop();
+            if (name == ".")
             {
-                var target = info.ResolveLinkTarget(returnFinalTarget: true)?.FullName
-                    ?? throw new FileNotFoundException();
-                var rest = string.Join('/', components[(i + 1)..]);
-                return CanonicalizeUnix(Path.GetFullPath(rest.Length == 0 ? target : Path.Combine(target, rest)), depth + 1);
+                continue;
+            }
+
+            if (name == "..")
+            {
+                current = Path.GetDirectoryName(current) ?? "/";
+                continue;
+            }
+
+            var info = FindEntry(current, name, last: pending.Count == 0);
+            if (info.LinkTarget is { } target)
+            {
+                if (++links > 40)
+                {
+                    throw new IOException("Too many levels of symbolic links (os error 40)");
+                }
+
+                // A relative target is resolved from the link's (already canonical) directory.
+                if (target.StartsWith('/'))
+                {
+                    current = "/";
+                }
+
+                PushComponents(pending, target);
+                continue;
+            }
+
+            if (info is FileInfo && pending.Count > 0)
+            {
+                throw new DirectoryNotFoundException();
             }
 
             current = Path.Combine(current, info.Name);
         }
 
         return current;
+    }
+
+    private static void PushComponents(Stack<string> pending, string path)
+    {
+        var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (int i = parts.Length - 1; i >= 0; i--)
+        {
+            pending.Push(parts[i]);
+        }
     }
 
     private static FileSystemInfo FindEntry(string directory, string name, bool last)
