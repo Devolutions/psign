@@ -332,9 +332,18 @@ pub fn pe_replace_authenticode_pkcs7_certificate_at(
             ));
         }
         let len = u32::from_le_bytes(table[offset..offset + 4].try_into().unwrap()) as usize;
-        if len < 8 || offset + len > table.len() {
+        if len < 8 || offset.checked_add(len).is_none_or(|end| end > table.len()) {
             return Err(anyhow!(
                 "invalid WIN_CERTIFICATE length {len} at table offset {offset}"
+            ));
+        }
+        let aligned_len = (len + 7) & !7;
+        if offset
+            .checked_add(aligned_len)
+            .is_none_or(|end| end > table.len())
+        {
+            return Err(anyhow!(
+                "WIN_CERTIFICATE aligned length {aligned_len} exceeds certificate table at offset {offset}"
             ));
         }
         let cert_type = u16::from_le_bytes(table[offset + 6..offset + 8].try_into().unwrap());
@@ -343,13 +352,13 @@ pub fn pe_replace_authenticode_pkcs7_certificate_at(
                 rebuilt.extend_from_slice(&replacement);
                 replaced = true;
             } else {
-                rebuilt.extend_from_slice(&table[offset..offset + len]);
+                rebuilt.extend_from_slice(&table[offset..offset + aligned_len]);
             }
             pkcs7_seen += 1;
         } else {
-            rebuilt.extend_from_slice(&table[offset..offset + len]);
+            rebuilt.extend_from_slice(&table[offset..offset + aligned_len]);
         }
-        offset += len;
+        offset += aligned_len;
     }
     if !replaced {
         return Err(anyhow!(

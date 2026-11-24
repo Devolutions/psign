@@ -21,7 +21,6 @@ internal sealed class CodeExecutor
     private const string MsixSignaturePart = "AppxSignature.p7x";
 
     private readonly CodeSigner _signer;
-    private readonly IReadOnlyList<string> _chainPaths;
     private readonly IReadOnlyList<string> _nestedExcludes;
     private readonly bool _skipSigned;
     private readonly bool _overwrite;
@@ -31,7 +30,6 @@ internal sealed class CodeExecutor
     private CodeExecutor(CodeSigner signer, CodeOptions options, IReadOnlyList<string> nestedExcludes, AuthenticodeHashKind digest)
     {
         _signer = signer;
-        _chainPaths = options.ChainCerts;
         _nestedExcludes = nestedExcludes;
         _skipSigned = options.SkipSigned;
         _overwrite = options.Overwrite;
@@ -109,12 +107,13 @@ internal sealed class CodeExecutor
             }
         }
 
-        return new CodeCommandResult(string.Join("\n", lines) + "\n", exitCode);
+        return new CodeCommandResult(lines.Count == 0 ? string.Empty : string.Join("\n", lines) + "\n", exitCode);
     }
 
     private static bool IsExecutionError(Exception e) =>
         e is PsignException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
-            or System.Formats.Asn1.AsnContentException or InvalidDataException or HttpRequestException or FormatException;
+            or System.Formats.Asn1.AsnContentException or InvalidDataException or HttpRequestException or FormatException
+            or ArgumentException or NotSupportedException;
 
     /// <summary>Rust <c>nuget_hash_algorithm</c> / <c>signing_digest_algorithm</c> / <c>vsix_hash_algorithm</c> (identical mapping).</summary>
     private static AuthenticodeHashKind PackageDigest(CodeDigestAlgorithm digest) => digest switch
@@ -252,7 +251,13 @@ internal sealed class CodeExecutor
                     var output = OutputPathForNode(node);
                     EnsureParentDir(output);
                     var bytes = RustIo.Read(input, $"read {input}");
-                    var signed = Ctx($"sign ClickOnce deploy payload {input}", () => SignClickOnceDeployBytes(bytes, node.Path));
+                    if (_skipSigned && PeHasSignature(bytes))
+                    {
+                        RustIo.Write(output, bytes, $"write skipped ClickOnce deploy payload {output}");
+                        return $"skipped {node.Path} -> {output} (already signed)";
+                    }
+
+                    var signed = Ctx($"sign ClickOnce deploy payload {input}", () => SignClickOnceDeployBytes(bytes, node.Path, skipSigned: false));
                     RustIo.Write(output, signed, $"write signed ClickOnce deploy payload {output}");
                     return $"signed {node.Path} -> {output} (ClickOnce .deploy payload)";
                 }
@@ -296,6 +301,11 @@ internal sealed class CodeExecutor
             return input;
         }
 
+        if (!_overwrite && PackageHasSignature(input, CodeFormat.Vsix))
+        {
+            throw new PsignException($"package {label} already contains OPC signature parts; pass --overwrite to replace them");
+        }
+
         var updated = SignNestedPackageEntries(input, label, vsixDigest, publisher);
         var algorithm = VsixHashAlgorithmExtensions.FromHashKind(vsixDigest);
         var template = Ctx($"create VSIX signature for {label}", () => VsixPackage.SignatureTemplate(updated, algorithm, VsixSigningTime.Now));
@@ -322,8 +332,13 @@ internal sealed class CodeExecutor
     }
 
     /// <summary>Rust <c>sign_clickonce_deploy_bytes</c>.</summary>
-    private byte[] SignClickOnceDeployBytes(byte[] input, string label)
+    private byte[] SignClickOnceDeployBytes(byte[] input, string label, bool skipSigned)
     {
+        if (skipSigned && PeHasSignature(input))
+        {
+            return input;
+        }
+
         if (_digest != AuthenticodeHashKind.Sha256)
         {
             throw new PsignException("ClickOnce .deploy payload signing currently supports only SHA-256");
@@ -431,8 +446,8 @@ internal sealed class CodeExecutor
 
             var name = CodeZip.NormalizeZipName(file.Name);
             var compression = file.CompressionMethod;
-            var format = CodeFormats.Detect(name);
             var bytes = archive.Read(file);
+            var format = CodeFormats.Detect(name, bytes, haveBytes: true);
             var nestedLabel = $"{label}!{name}";
             var slashLabel = nestedLabel.Replace('!', '/');
             if (_nestedExcludes.Any(p => CodePatterns.GlobMatch(p, name) || CodePatterns.GlobMatch(p, slashLabel)))
@@ -475,12 +490,15 @@ internal sealed class CodeExecutor
                         break;
                     }
 
-                case CodeFormat.ClickOnceApplication or CodeFormat.Vsto or CodeFormat.Manifest
-                    when !(_skipSigned && ClickOnceManifest.HasSignature(bytes)):
-                    updates.Add(new ZipEntryUpdate(name, SignClickOnceManifestBytes(bytes, nestedLabel, vsixDigest), compression));
+                case CodeFormat.ClickOnceApplication or CodeFormat.Vsto or CodeFormat.Manifest:
+                    if (!(_skipSigned && ClickOnceManifest.HasSignature(bytes)))
+                    {
+                        updates.Add(new ZipEntryUpdate(name, SignClickOnceManifestBytes(bytes, nestedLabel, vsixDigest), compression));
+                    }
+
                     break;
                 case CodeFormat.Deploy:
-                    updates.Add(new ZipEntryUpdate(name, SignClickOnceDeployBytes(bytes, nestedLabel), compression));
+                    updates.Add(new ZipEntryUpdate(name, SignClickOnceDeployBytes(bytes, nestedLabel, _skipSigned), compression));
                     break;
                 case CodeFormat.Pe or CodeFormat.Winmd:
                     updates.Add(new ZipEntryUpdate(name, SignPeBytes(bytes, nestedLabel, _skipSigned), compression));
@@ -513,9 +531,8 @@ internal sealed class CodeExecutor
     /// <summary>Rust <c>sign_pkcs7_id_data</c>.</summary>
     private byte[] SignPkcs7IdData(byte[] content, Pkcs7ContentMode mode, Rfc3161TimestampAttribute timestampAttribute, Pkcs7SignedAttributeProfile profile)
     {
-        var chain = CodeSigner.LoadChainCerts(_chainPaths);
         var econtent = Pkcs7IdData.EContentDer(content);
-        var pkcs7 = _signer.SignPkcs7(Oids.Pkcs7Data, econtent, _digest, chain, mode, profile);
+        var pkcs7 = _signer.SignPkcs7(Oids.Pkcs7Data, econtent, _digest, [], mode, profile);
         return _timestamp.Pkcs7IfRequested(pkcs7, timestampAttribute);
     }
 

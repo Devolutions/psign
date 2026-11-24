@@ -518,7 +518,7 @@ public static class MsixDigest
                     throw new PsignException("AppxBlockMap.xml File outside BlockMap");
                 }
 
-                if (e.Kind == XmlEventKind.Start && current is not null)
+                if (current is not null)
                 {
                     throw new PsignException("nested AppxBlockMap.xml File elements are invalid");
                 }
@@ -986,7 +986,7 @@ public static class MsixDigest
         return loc;
     }
 
-    private static (long Pos, Zip64Eocd Eocd) FindZip64Eocd(byte[] buf, ulong nominalOffset, long searchUpper)
+    private static (long Pos, Zip64Eocd Eocd) FindZip64Eocd(byte[] buf, ulong nominalOffset, long searchUpper, long limitEnd)
     {
         if (nominalOffset > long.MaxValue)
         {
@@ -1019,7 +1019,7 @@ public static class MsixDigest
                 ulong cdOffset = ReadU64(buf, pos + 48);
                 ulong tailLen = recordSize - 44;
                 long tailStart = pos + 12 + 44;
-                if (tailLen > (ulong)buf.Length || tailStart + (long)tailLen > buf.Length)
+                if (tailLen > (ulong)limitEnd || tailStart + (long)tailLen > limitEnd)
                 {
                     throw new PsignException("zip64 tail out of range");
                 }
@@ -1056,8 +1056,13 @@ public static class MsixDigest
         {
             var loc = ParseZip64Locator(buf, (int)locatorSeek);
             locator = loc;
-            long searchUpper = Math.Max(0, cdePos - 60);
-            var (zpos, z64) = FindZip64Eocd(buf, loc.EndOfCentralDirectoryOffset, searchUpper);
+            if (locatorSeek < 56)
+            {
+                throw new PsignException("could not find ZIP64 end-of-central-directory");
+            }
+
+            long searchUpper = locatorSeek - 56;
+            var (zpos, z64) = FindZip64Eocd(buf, loc.EndOfCentralDirectoryOffset, searchUpper, locatorSeek);
             if (z64.NumberOfFilesOnThisDisk != z64.NumberOfFiles)
             {
                 throw new PsignException("multi-disk ZIP64 entry counts are not valid APPX/MSIX packages");
@@ -1280,6 +1285,7 @@ public static class MsixDigest
         using var hasher = new IncrementalHashWrapper(kind);
         ulong cdSize = 0;
         ushort noEntries = 0;
+        Span<byte> leBuf = stackalloc byte[8];
 
         for (int i = 0; i < archive.Count; i++)
         {
@@ -1339,29 +1345,35 @@ public static class MsixDigest
             var pay = new List<byte>();
             if (uncompZ64)
             {
-                pay.AddRange(BitConverter.GetBytes(uncompU64));
+                BinaryPrimitives.WriteUInt64LittleEndian(leBuf, uncompU64);
+                pay.AddRange(leBuf);
             }
 
             if (compZ64)
             {
-                pay.AddRange(BitConverter.GetBytes(compU64));
+                BinaryPrimitives.WriteUInt64LittleEndian(leBuf, compU64);
+                pay.AddRange(leBuf);
             }
 
             if (offZ64)
             {
-                pay.AddRange(BitConverter.GetBytes(offU64));
+                BinaryPrimitives.WriteUInt64LittleEndian(leBuf, offU64);
+                pay.AddRange(leBuf);
             }
 
             if (diskZ64)
             {
-                pay.AddRange(BitConverter.GetBytes(diskU32));
+                BinaryPrimitives.WriteUInt32LittleEndian(leBuf, diskU32);
+                pay.AddRange(leBuf[..4]);
             }
 
             var syn = new List<byte>();
             if (pay.Count > 0)
             {
-                syn.AddRange(BitConverter.GetBytes(Zip64ExtraId));
-                syn.AddRange(BitConverter.GetBytes((ushort)pay.Count));
+                BinaryPrimitives.WriteUInt16LittleEndian(leBuf, Zip64ExtraId);
+                syn.AddRange(leBuf[..2]);
+                BinaryPrimitives.WriteUInt16LittleEndian(leBuf, (ushort)pay.Count);
+                syn.AddRange(leBuf[..2]);
                 syn.AddRange(pay);
             }
 
@@ -1491,8 +1503,9 @@ public static class MsixDigest
         var seenFolded = new Dictionary<string, string>(StringComparer.Ordinal);
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
 
-        foreach (var name in archive.FileNames)
+        foreach (var entry in archive.Entries)
         {
+            var name = entry.Name;
             if (name.EndsWith('/') || name.EndsWith('\\'))
             {
                 continue;
@@ -2363,6 +2376,12 @@ public static class MsixDigest
         if (pieceLen != expectedPiece)
         {
             throw new PsignException($"PKCS#7 APPX digest width {pieceLen} does not match AppxBlockMap HashMethod ({expectedPiece})");
+        }
+
+        if (sig.IndirectData.HashKind is { } sigHashKind && sigHashKind != kind)
+        {
+            throw new PsignException(
+                $"PKCS#7 Authenticode DigestInfo algorithm ({sigHashKind.Name()}) does not match AppxBlockMap HashMethod ({kind.Name()})");
         }
 
         var bmRaw = ReadZipEntryRaw(archive, BlockMap);

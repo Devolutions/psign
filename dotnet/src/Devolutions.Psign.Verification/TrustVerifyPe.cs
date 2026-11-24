@@ -217,17 +217,25 @@ public static class TrustVerifyPe
     private static void VerifyOnePkcs7(byte[] peBytes, int index, byte[] pkcs7Der, AnchorStore anchors, List<CertificateInfo> anchorCerts, TrustVerifyPeOptions opts, TrustVerifyPeReport report)
     {
         var normalized = Pkcs7Wire.NormalizeForAuthenticode(pkcs7Der);
-        byte[] embedded;
+        AuthenticodeSignature sig;
         try
         {
-            embedded = AuthenticodeSignature.Parse(normalized).Digest;
+            sig = AuthenticodeSignature.Parse(normalized);
         }
         catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException or FormatException)
         {
             throw new PsignException($"authenticode-rs PKCS#7 parse (digest probe): {e.Message}");
         }
 
-        var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var embedded = sig.Digest;
+        var kind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (embedded.Length != kind.DigestLength())
+        {
+            throw new PsignException(
+                $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+        }
+
         var peDigest = PeAuthenticode.Digest(peBytes, kind);
         if (!peDigest.AsSpan().SequenceEqual(embedded))
         {

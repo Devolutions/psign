@@ -241,7 +241,7 @@ public static class TestPki
 
         var now = UtcNow();
         var notBefore = now - NotBeforeClockSkew;
-        var notAfter = now + TimeSpan.FromDays(spec.ValidityDays);
+        var notAfter = AddValidityDays(now, spec.ValidityDays);
 
         var extensions = new List<byte[]>
         {
@@ -457,7 +457,13 @@ public static class TestPki
             throw new PsignException("malformed SubjectPublicKeyInfo");
         }
 
-        return children[1].Value(spki)[1..].ToArray();
+        var bitString = children[1].Value(spki);
+        if (bitString.Length == 0 || bitString[0] != 0)
+        {
+            throw new PsignException("malformed SubjectPublicKeyInfo");
+        }
+
+        return bitString[1..].ToArray();
     }
 
     private static byte[] ExtractOrComputeCaSki(CertificateInfo ca)
@@ -506,9 +512,21 @@ public static class TestPki
 
         var desiredNotBefore = now - NotBeforeClockSkew;
         var notBefore = desiredNotBefore > caNotBefore ? desiredNotBefore : caNotBefore;
-        var desiredNotAfter = now + TimeSpan.FromDays(validityDays);
+        var desiredNotAfter = AddValidityDays(now, validityDays);
         var notAfter = desiredNotAfter < caNotAfter ? desiredNotAfter : caNotAfter;
         return (notBefore, notAfter);
+    }
+
+    private static DateTimeOffset AddValidityDays(DateTimeOffset start, uint validityDays)
+    {
+        try
+        {
+            return start.AddDays(validityDays);
+        }
+        catch (ArgumentOutOfRangeException e)
+        {
+            throw new PsignException($"validity_days ({validityDays}) exceeds maximum representable certificate date", e);
+        }
     }
 
     private static byte[] BuildAndSign(byte[] issuer, byte[] subject, DateTimeOffset notBefore, DateTimeOffset notAfter, byte[] spki, List<byte[]> extensions, RSA signer)

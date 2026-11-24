@@ -36,21 +36,21 @@ public static class Base64Standard
     public static byte[] Decode(ReadOnlySpan<byte> input)
     {
         int rem = input.Length % 4;
-        if (rem == 1)
-        {
-            byte last = input[^1];
-            if (last != Pad && DecodeTable[last] == Invalid)
-            {
-                throw InvalidByte(input.Length - 1, last);
-            }
-        }
-
         int prefixLen = Math.Max(0, input.Length - rem - (rem == 0 ? 4 : 0));
         for (int i = 0; i < prefixLen; i++)
         {
             if (DecodeTable[input[i]] == Invalid)
             {
                 throw InvalidByte(i, input[i]);
+            }
+        }
+
+        if (rem == 1)
+        {
+            byte last = input[^1];
+            if (last != Pad && DecodeTable[last] == Invalid)
+            {
+                throw InvalidByte(input.Length - 1, last);
             }
         }
 
@@ -126,6 +126,7 @@ public static class Base64Standard
         Span<byte> chunk = stackalloc byte[4];
         int chunkLen = 0;
         int padding = 0;
+        bool finished = false;
         foreach (char ch in text)
         {
             if (ch is ' ' or '\t' or '\n' or '\r' or '\f')
@@ -133,29 +134,64 @@ public static class Base64Standard
                 continue;
             }
 
+            if (finished)
+            {
+                throw new PsignException("invalid base64 padding in XMLDSig value");
+            }
+
             byte value;
             if (ch is >= 'A' and <= 'Z')
             {
+                if (padding > 0)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 value = (byte)(ch - 'A');
             }
             else if (ch is >= 'a' and <= 'z')
             {
+                if (padding > 0)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 value = (byte)(ch - 'a' + 26);
             }
             else if (ch is >= '0' and <= '9')
             {
+                if (padding > 0)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 value = (byte)(ch - '0' + 52);
             }
             else if (ch == '+')
             {
+                if (padding > 0)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 value = 62;
             }
             else if (ch == '/')
             {
+                if (padding > 0)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 value = 63;
             }
             else if (ch == '=')
             {
+                if (chunkLen < 2)
+                {
+                    throw new PsignException("invalid base64 padding in XMLDSig value");
+                }
+
                 padding++;
                 value = 0;
             }
@@ -176,6 +212,10 @@ public static class Base64Standard
                 if (padding == 0)
                 {
                     output.Add((byte)((chunk[2] << 6) | chunk[3]));
+                }
+                else
+                {
+                    finished = true;
                 }
 
                 chunkLen = 0;

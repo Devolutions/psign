@@ -48,7 +48,20 @@ public static class PrivateKeyLoader
     public static RSA ParseRsaPrivateKey(ReadOnlySpan<byte> bytes) => ParseRsaPrivateKeyMaterial(bytes).CreateRsa();
 
     /// <summary>Read and parse an RSA private key file.</summary>
-    public static RSA LoadRsaPrivateKeyFile(string path) => ParseRsaPrivateKey(File.ReadAllBytes(path));
+    public static RSA LoadRsaPrivateKeyFile(string path)
+    {
+        byte[] bytes;
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            throw new PsignException($"read private key '{path}'", e);
+        }
+
+        return ParseRsaPrivateKey(bytes);
+    }
 
     /// <summary>
     /// Read a PEM unencrypted PKCS#8 key file (Rust <c>cert_store::load_pkcs8_key_pem</c>); errors mention the expected
@@ -61,7 +74,7 @@ public static class PrivateKeyLoader
         {
             pem = File.ReadAllText(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"read private key '{path}'", e);
         }

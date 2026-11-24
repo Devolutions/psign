@@ -140,17 +140,16 @@ public static class NuGetPackage
     /// </summary>
     public static byte[] SignedPackageUnsignedBytes(byte[] bytes)
     {
-        int searchFrom = Math.Max(0, bytes.Length - (22 + ushort.MaxValue));
-        int eocd = LastIndexOf(bytes, searchFrom, [0x50, 0x4b, 0x05, 0x06]);
+        int eocd = FindValidEocd(bytes);
         if (eocd < 0)
         {
-            throw new PsignException("ZIP end of central directory not found");
-        }
+            int anyEocd = LastIndexOf(bytes, Math.Max(0, bytes.Length - (22 + ushort.MaxValue)), [0x50, 0x4b, 0x05, 0x06]);
+            if (anyEocd >= 0)
+            {
+                throw new PsignException("ZIP end of central directory has trailing data");
+            }
 
-        int commentLen = Le16(bytes, eocd + 20);
-        if (eocd + 22 + commentLen != bytes.Length)
-        {
-            throw new PsignException("ZIP end of central directory has trailing data");
+            throw new PsignException("ZIP end of central directory not found");
         }
 
         int diskEntries = Le16(bytes, eocd + 8);
@@ -178,7 +177,7 @@ public static class NuGetPackage
 
             int nameLen = Le16(bytes, (int)pos + 28);
             int len = 46 + nameLen + Le16(bytes, (int)pos + 30) + Le16(bytes, (int)pos + 32);
-            if (pos + 46 + nameLen > bytes.Length)
+            if (pos + len > bytes.Length)
             {
                 throw new PsignException("truncated ZIP central directory record");
             }
@@ -205,7 +204,7 @@ public static class NuGetPackage
         }
 
         long signatureLocalOffset = records[signatureIndex].LocalOffset;
-        if (records.Take(signatureIndex).Any(r => r.LocalOffset >= signatureLocalOffset))
+        if (signatureLocalOffset > cdOffset || records.Take(signatureIndex).Any(r => r.LocalOffset >= signatureLocalOffset))
         {
             throw new PsignException($"{PackageSignatureFileName} must be the last local file entry");
         }
@@ -509,7 +508,7 @@ public static class NuGetPackage
     /// </summary>
     public static void NormalizeNuGetZipMetadata(byte[] bytes)
     {
-        int eocd = LastIndexOf(bytes, 0, [0x50, 0x4b, 0x05, 0x06]);
+        int eocd = FindValidEocd(bytes);
         if (eocd < 0)
         {
             throw new PsignException("ZIP central directory end not found");
@@ -668,6 +667,29 @@ public static class NuGetPackage
         }
 
         return sb.Append('"').ToString();
+    }
+
+    private static int FindValidEocd(byte[] bytes)
+    {
+        if (bytes.Length < 22)
+        {
+            return -1;
+        }
+
+        int searchFrom = Math.Max(0, bytes.Length - (22 + ushort.MaxValue));
+        for (int i = bytes.Length - 22; i >= searchFrom; i--)
+        {
+            if (bytes[i] == 0x50 && bytes[i + 1] == 0x4b && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06)
+            {
+                int commentLen = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(i + 20));
+                if (i + 22 + commentLen == bytes.Length)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
     }
 
     private static int LastIndexOf(byte[] bytes, int from, ReadOnlySpan<byte> pattern)

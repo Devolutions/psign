@@ -1,6 +1,4 @@
 using System.Management.Automation;
-using System.Text;
-using System.Text.RegularExpressions;
 using Devolutions.Psign.PowerShell.Models;
 using Devolutions.Psign.PowerShell.Portable;
 
@@ -29,17 +27,6 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
     {
         ".ps1", ".psm1", ".psd1", ".ps1xml", ".psc1", ".cdxml", ".mof",
     };
-
-    // PowerShell SIG block pattern:
-    // Starts with "# SIG # Begin signature block" and ends with "# SIG # End signature block"
-    private static readonly Regex ScriptSigBlockRegex = new(
-        @"(\r?\n)?# SIG # Begin signature block\r?\n[\s\S]*?# SIG # End signature block\r?\n?",
-        RegexOptions.Compiled);
-
-    // XML SIG block: <!-- SIG # Begin signature block --> ... <!-- SIG # End signature block -->
-    private static readonly Regex XmlSigBlockRegex = new(
-        @"(\r?\n)?<!-- SIG # Begin signature block -->\r?\n[\s\S]*?<!-- SIG # End signature block -->\r?\n?",
-        RegexOptions.Compiled);
 
     protected override void ProcessRecord()
     {
@@ -74,15 +61,11 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
 
         try
         {
-            string content = File.ReadAllText(path);
-            bool isXml = ext.Equals(".ps1xml", StringComparison.OrdinalIgnoreCase)
-                      || ext.Equals(".psc1", StringComparison.OrdinalIgnoreCase)
-                      || ext.Equals(".cdxml", StringComparison.OrdinalIgnoreCase);
+            byte[] rawBytes = File.ReadAllBytes(path);
+            var (content, encoding) = Devolutions.Psign.Signing.Remove.ScriptEncodingExtensions.Decode(rawBytes);
+            string? stripped = Devolutions.Psign.Signing.Remove.PortableRemove.RemoveScriptSignatureBlock(content, ext);
 
-            Regex regex = isXml ? XmlSigBlockRegex : ScriptSigBlockRegex;
-            string stripped = regex.Replace(content, string.Empty);
-
-            if (stripped.Length == content.Length)
+            if (stripped is null)
             {
                 WriteObject(new PsignUnprotectResult
                 {
@@ -98,15 +81,14 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
                 return;
             }
 
-            // Preserve original encoding (detect BOM)
-            Encoding encoding = DetectEncoding(path);
-            File.WriteAllText(path, stripped, encoding);
+            byte[] updatedBytes = Devolutions.Psign.Signing.Remove.ScriptEncodingExtensions.Encode(encoding, stripped);
+            File.WriteAllBytes(path, updatedBytes);
 
             WriteObject(new PsignUnprotectResult
             {
                 Path = path,
                 SignatureRemoved = true,
-                BytesRemoved = content.Length - stripped.Length,
+                BytesRemoved = Math.Max(0, rawBytes.Length - updatedBytes.Length),
                 Message = "Signature block removed.",
             });
         }
@@ -149,22 +131,6 @@ public sealed class UnprotectPsignSignatureCommand : PSCmdlet
         {
             WriteError(new ErrorRecord(ex, "UnprotectPsignPeSignatureFailed", ErrorCategory.NotSpecified, path));
         }
-    }
-
-    private static Encoding DetectEncoding(string path)
-    {
-        byte[] bom = new byte[4];
-        using var fs = File.OpenRead(path);
-        int read = fs.Read(bom, 0, 4);
-
-        if (read >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF)
-            return new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
-        if (read >= 2 && bom[0] == 0xFF && bom[1] == 0xFE)
-            return Encoding.Unicode; // UTF-16 LE
-        if (read >= 2 && bom[0] == 0xFE && bom[1] == 0xFF)
-            return Encoding.BigEndianUnicode; // UTF-16 BE
-
-        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     }
 }
 

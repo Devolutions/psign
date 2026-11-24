@@ -9,6 +9,11 @@ internal static class DerPush
 {
     public static void PushLen(List<byte> output, int len)
     {
+        if (len < 0)
+        {
+            throw new PsignException($"DER length cannot be negative: {len}");
+        }
+
         if (len < 0x80)
         {
             output.Add((byte)len);
@@ -24,9 +29,17 @@ internal static class DerPush
             output.Add((byte)(len >> 8));
             output.Add((byte)len);
         }
-        else
+        else if (len <= 0xffffff)
         {
             output.Add(0x83);
+            output.Add((byte)(len >> 16));
+            output.Add((byte)(len >> 8));
+            output.Add((byte)len);
+        }
+        else
+        {
+            output.Add(0x84);
+            output.Add((byte)(len >> 24));
             output.Add((byte)(len >> 16));
             output.Add((byte)(len >> 8));
             output.Add((byte)len);
@@ -73,6 +86,18 @@ internal static class DerPush
         for (int i = 0; ok && i < 14; i++)
         {
             ok = bytes[i] is >= (byte)'0' and <= (byte)'9';
+        }
+
+        if (ok)
+        {
+            int year = ((bytes[0] - '0') * 1000) + ((bytes[1] - '0') * 100) + ((bytes[2] - '0') * 10) + (bytes[3] - '0');
+            int month = ((bytes[4] - '0') * 10) + (bytes[5] - '0');
+            int day = ((bytes[6] - '0') * 10) + (bytes[7] - '0');
+            int hour = ((bytes[8] - '0') * 10) + (bytes[9] - '0');
+            int minute = ((bytes[10] - '0') * 10) + (bytes[11] - '0');
+            int second = ((bytes[12] - '0') * 10) + (bytes[13] - '0');
+            ok = year >= 1 && month is >= 1 and <= 12 && day >= 1 && day <= DateTime.DaysInMonth(year, month)
+                && hour <= 23 && minute <= 59 && second <= 59;
         }
 
         if (!ok)
@@ -174,7 +199,18 @@ internal static class DerPush
                 throw new PsignException("truncated length");
             }
 
-            len = (len << 8) | input[pos++];
+            byte b = input[pos++];
+            if (i == 0 && b == 0)
+            {
+                throw new PsignException("non-minimal DER length");
+            }
+
+            len = (len << 8) | b;
+        }
+
+        if (len < 0x80)
+        {
+            throw new PsignException("non-minimal DER length");
         }
 
         return (pos, len);

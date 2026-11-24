@@ -122,7 +122,7 @@ public static partial class PortableCore
             return false;
         }
 
-        ulong peOffset = BitConverter.ToUInt32(data[0x3c..0x40]);
+        ulong peOffset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data[0x3c..0x40]);
         return peOffset + 4 <= (ulong)data.Length && data.Slice((int)peOffset, 4).SequenceEqual("PE\0\0"u8);
     }
 
@@ -145,8 +145,24 @@ public static partial class PortableCore
     }
 
     /// <summary>Lowercase extension or <c>ps1</c> (Rust <c>script_extension_for</c>).</summary>
-    internal static string ScriptExtensionFor(string path) =>
-        RustPath.Extension(path) is { } ext ? Core.Text.RustText.ToAsciiLowercase(ext) : "ps1";
+    internal static string ScriptExtensionFor(string path)
+    {
+        if (RustPath.Extension(path) is { } ext)
+        {
+            return Core.Text.RustText.ToAsciiLowercase(ext);
+        }
+
+        if (RustPath.FileName(path) is { } fileName)
+        {
+            var bare = Core.Text.RustText.ToAsciiLowercase(fileName.TrimStart('.'));
+            if (PsScript.ExtensionSupported(bare))
+            {
+                return bare;
+            }
+        }
+
+        return "ps1";
+    }
 
     internal static byte[] ReadFile(string path, string? context = null)
     {
@@ -197,10 +213,48 @@ public static partial class PortableCore
 
         try
         {
-            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), comparison);
+            var fullA = Path.GetFullPath(a);
+            var fullB = Path.GetFullPath(b);
+            if (OperatingSystem.IsWindows())
+            {
+                return string.Equals(fullA, fullB, StringComparison.OrdinalIgnoreCase);
+            }
+
+            if (string.Equals(fullA, fullB, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!OperatingSystem.IsMacOS() || !string.Equals(fullA, fullB, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // macOS supports both case-insensitive (default APFS) and case-sensitive volumes.
+            if (!File.Exists(fullA) || !File.Exists(fullB))
+            {
+                return false;
+            }
+
+            var dirA = Path.GetDirectoryName(fullA);
+            var nameA = Path.GetFileName(fullA);
+            if (string.IsNullOrEmpty(dirA) || string.IsNullOrEmpty(nameA))
+            {
+                return false;
+            }
+
+            int matchingEntries = 0;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dirA))
+            {
+                if (string.Equals(Path.GetFileName(entry), nameA, StringComparison.OrdinalIgnoreCase) && ++matchingEntries > 1)
+                {
+                    return false;
+                }
+            }
+
+            return matchingEntries == 1;
         }
-        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or PathTooLongException)
         {
             return false;
         }

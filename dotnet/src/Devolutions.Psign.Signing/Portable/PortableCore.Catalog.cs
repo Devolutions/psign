@@ -123,8 +123,15 @@ public static partial class PortableCore
 
     private sealed record CatalogSubjectPlan(string Path, string MemberName);
 
-    private static string ResolveCatalogOutputPath(string path) =>
-        Directory.Exists(path) ? Path.Join(path, "catalog.cat") : path;
+    private static string ResolveCatalogOutputPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new PsignException("catalog file path must not be empty");
+        }
+
+        return Directory.Exists(path) ? Path.Join(path, "catalog.cat") : path;
+    }
 
     private static uint EffectiveCatalogVersion(uint version) => version switch
     {

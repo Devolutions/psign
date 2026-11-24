@@ -106,6 +106,10 @@ internal static class Pkcs12Reader
         var expected = digestInfo.ReadOctetString();
         var salt = macData.ReadOctetString();
         var iterations = macData.HasData ? (int)Pkcs12Crypto.ReadSmallInteger(macData) : 1;
+        if (iterations <= 0)
+        {
+            throw new PsignException("PKCS#12 MAC iteration count must be positive");
+        }
 
         var mac = Pkcs12Crypto.ComputeMac(hash, Pkcs12Crypto.BmpPassword(password), salt, iterations, authSafeContent);
         if (CryptographicOperations.FixedTimeEquals(mac, expected))
@@ -126,17 +130,23 @@ internal static class Pkcs12Reader
         throw new PsignException("MAC validation failed (wrong password or corrupted data)");
     }
 
+    private const int MaxSafeBagDepth = 16;
+
     private static void ReadSafeContents(byte[] der, string password, List<Pkcs12CertEntry> certs, List<Pkcs12KeyEntry> keys)
     {
         var bags = new AsnReader(der, AsnEncodingRules.BER).ReadSequence();
         while (bags.HasData)
         {
-            ReadSafeBag(bags.ReadSequence(), password, certs, keys);
+            ReadSafeBag(bags.ReadSequence(), password, certs, keys, depth: 0);
         }
     }
 
-    private static void ReadSafeBag(AsnReader bag, string password, List<Pkcs12CertEntry> certs, List<Pkcs12KeyEntry> keys)
+    private static void ReadSafeBag(AsnReader bag, string password, List<Pkcs12CertEntry> certs, List<Pkcs12KeyEntry> keys, int depth)
     {
+        if (depth > MaxSafeBagDepth)
+        {
+            throw new PsignException("PKCS#12 SafeContents nesting depth exceeds limit");
+        }
         var bagId = bag.ReadObjectIdentifier();
         var value = bag.ReadSequence(new Asn1Tag(TagClass.ContextSpecific, 0, true));
         byte[]? localKeyId = null;
@@ -189,7 +199,7 @@ internal static class Pkcs12Reader
                     var nested = value.ReadSequence();
                     while (nested.HasData)
                     {
-                        ReadSafeBag(nested.ReadSequence(), password, certs, keys);
+                        ReadSafeBag(nested.ReadSequence(), password, certs, keys, depth + 1);
                     }
 
                     break;

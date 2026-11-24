@@ -296,7 +296,7 @@ public static partial class PortableCore
         var pkcs7 = WithContext(
             $"create NuGet CMS signature for {request.Path}",
             () => provider.CreateNuGetAuthorSignature(content, request.HashAlgorithm.ToHashKind(), options.Now()));
-        var pkcs7Final = WithContext($"timestamp {request.Path}", () => MaybeTimestampPkcs7(request, pkcs7, options));
+        var pkcs7Final = WithContext($"timestamp {request.Path}", () => MaybeTimestampPkcs7(request, pkcs7, options, Rfc3161TimestampAttribute.CmsTimeStampToken));
         var signed = WithContext(
             $"embed NuGet signature into {request.Path}",
             () => NuGetPackage.EmbedSignature(unsigned, pkcs7Final, overwrite: false, options.ZipClock?.Invoke()));
@@ -306,6 +306,11 @@ public static partial class PortableCore
     private static void SignVsix(PortableSignRequest request, string outputPath, PortableCoreOptions options)
     {
         var data = ReadFile(request.Path);
+        if (VsixPackage.InspectVsix(data).HasOpcSignature)
+        {
+            throw new PsignException($"embed VSIX signature XML into {request.Path}", new PsignException("package already contains OPC signature parts; pass overwrite to replace them"));
+        }
+
         using var provider = LoadSigningProvider(request, options);
         var vsixAlg = VsixHashAlgorithmExtensions.FromHashKind(request.HashAlgorithm.ToHashKind());
         var template = WithContext(
@@ -333,6 +338,11 @@ public static partial class PortableCore
 
     private static void SignClickOnceManifest(PortableSignRequest request, string outputPath, PortableCoreOptions options)
     {
+        if (request.TimestampServer is null && request.TimestampHashAlgorithm is not null)
+        {
+            throw new PsignException("timestamp_hash_algorithm requires timestamp_server");
+        }
+
         var data = ReadFile(request.Path);
         string text;
         try
@@ -355,21 +365,8 @@ public static partial class PortableCore
     }
 
     /// <summary>Remove the first <c>&lt;Signature …&lt;/Signature&gt;</c> span (Rust <c>remove_clickonce_xml_signature</c>).</summary>
-    internal static string RemoveClickOnceXmlSignature(string text)
-    {
-        const string end = "</Signature>";
-        int start = text.IndexOf("<Signature", StringComparison.Ordinal);
-        if (start >= 0)
-        {
-            int rel = text.IndexOf(end, start, StringComparison.Ordinal);
-            if (rel >= 0)
-            {
-                return text[..start] + text[(rel + end.Length)..];
-            }
-        }
-
-        return text;
-    }
+    internal static string RemoveClickOnceXmlSignature(string text) =>
+        Core.ClickOnce.ClickOnceManifest.UnsignedManifestText(text);
 
     /// <summary>Enveloped-signature <c>SignedInfo</c> for a ClickOnce manifest (Rust <c>clickonce_manifest_signed_info_xml_bytes</c>).</summary>
     internal static byte[] ClickOnceManifestSignedInfoXmlBytes(string unsignedManifestText, VsixHashAlgorithm algorithm)
@@ -387,10 +384,39 @@ public static partial class PortableCore
         $"<Signature xmlns=\"http://www.w3.org/2000/09/xmldsig#\">{Encoding.UTF8.GetString(signedInfo)}<SignatureValue>{Convert.ToBase64String(signature)}</SignatureValue>"
         + $"<KeyInfo><X509Data><X509Certificate>{Convert.ToBase64String(certDer)}</X509Certificate></X509Data></KeyInfo></Signature>";
 
-    /// <summary>Insert before the last <c>&lt;/</c> (Rust <c>insert_clickonce_signature_in_manifest</c>).</summary>
+    /// <summary>Insert before the last <c>&lt;/</c> outside XML comments/PIs/CDATA (Rust <c>insert_clickonce_signature_in_manifest</c>).</summary>
     internal static string InsertClickOnceSignatureInManifest(string text, string signatureXml)
     {
-        int close = text.LastIndexOf("</", StringComparison.Ordinal);
+        int close = -1;
+        int pos = 0;
+        while (pos < text.Length)
+        {
+            if (text.AsSpan(pos).StartsWith("<!--", StringComparison.Ordinal))
+            {
+                int end = text.IndexOf("-->", pos + 4, StringComparison.Ordinal);
+                pos = end >= 0 ? end + 3 : text.Length;
+            }
+            else if (text.AsSpan(pos).StartsWith("<![CDATA[", StringComparison.Ordinal))
+            {
+                int end = text.IndexOf("]]>", pos + 9, StringComparison.Ordinal);
+                pos = end >= 0 ? end + 3 : text.Length;
+            }
+            else if (text.AsSpan(pos).StartsWith("<?", StringComparison.Ordinal))
+            {
+                int end = text.IndexOf("?>", pos + 2, StringComparison.Ordinal);
+                pos = end >= 0 ? end + 2 : text.Length;
+            }
+            else if (text.AsSpan(pos).StartsWith("</", StringComparison.Ordinal))
+            {
+                close = pos;
+                pos += 2;
+            }
+            else
+            {
+                pos++;
+            }
+        }
+
         if (close < 0)
         {
             throw new PsignException("ClickOnce manifest does not have a closing root element tag");
@@ -419,7 +445,11 @@ public static partial class PortableCore
 
     // ------------------------------------------------------------------ timestamping
 
-    private static byte[] MaybeTimestampPkcs7(PortableSignRequest request, byte[] pkcs7Der, PortableCoreOptions options)
+    private static byte[] MaybeTimestampPkcs7(
+        PortableSignRequest request,
+        byte[] pkcs7Der,
+        PortableCoreOptions options,
+        Rfc3161TimestampAttribute attribute = Rfc3161TimestampAttribute.MicrosoftAuthenticode)
     {
         if (request.TimestampServer is not { } server)
         {
@@ -448,7 +478,10 @@ public static partial class PortableCore
         }
 
         var token = RequestRfc3161Token(server, alg, sd.SignerInfos[0].Signature, options);
-        var stamped = WithContext("attach RFC3161 timestamp token", () => Pkcs7Builder.AddTimestampToken(sd, 0, token));
+        var stamped = WithContext("attach RFC3161 timestamp token", () =>
+            attribute == Rfc3161TimestampAttribute.MicrosoftAuthenticode
+                ? Pkcs7Builder.AddTimestampToken(sd, 0, token)
+                : Pkcs7Builder.AddPkcs9TimestampToken(sd, 0, token));
         return stamped.Encode();
     }
 
@@ -461,9 +494,10 @@ public static partial class PortableCore
 
     // ------------------------------------------------------------------ provider selection
 
-    private static bool HasAzureKeyVaultProvider(PortableSignRequest r) => r.AzureKeyVaultUrl is not null;
+    private static bool HasAzureKeyVaultProvider(PortableSignRequest r) => r.AzureKeyVaultUrl is not null || r.AzureKeyVaultCertificate is not null;
 
-    private static bool HasArtifactSigningProvider(PortableSignRequest r) => r.ArtifactSigningEndpoint is not null || r.ArtifactSigningAccountName is not null;
+    private static bool HasArtifactSigningProvider(PortableSignRequest r) =>
+        r.ArtifactSigningEndpoint is not null || r.ArtifactSigningAccountName is not null || r.ArtifactSigningProfileName is not null;
 
     private static bool HasLocalSigningMaterial(PortableSignRequest r) =>
         r.CertificatePath is not null || r.CertificateDerBase64 is not null || r.PfxPath is not null || r.PrivateKeyPath is not null || r.PrivateKeyDerBase64 is not null;
@@ -624,7 +658,7 @@ public static partial class PortableCore
             ProfileName = profileName,
             ApiVersion = ArtifactSigningClient.DefaultApiVersion,
             CorrelationId = TextOpt(request.ArtifactSigningCorrelationId),
-            Authority = null,
+            Authority = TextOpt(request.AzureAuthority),
             Auth = auth,
             EndpointBaseUrl = endpoint.TrimEnd('/'),
         };

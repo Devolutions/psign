@@ -171,7 +171,22 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
 
         foreach (var (relativePath, role) in filesToSign)
         {
-            string fullPath = System.IO.Path.Combine(moduleDir, relativePath);
+            string fullPath = System.IO.Path.GetFullPath(System.IO.Path.Combine(moduleDir, relativePath));
+            if (!IsPathInsideDirectory(moduleDir, fullPath))
+            {
+                results.Add(new PsignModuleFileSignResult
+                {
+                    RelativePath = relativePath,
+                    Role = role,
+                    Status = SignatureStatus.UnknownError,
+                    Success = false,
+                    ErrorMessage = $"Manifest path '{relativePath}' escapes module directory.",
+                });
+                failed++;
+                WriteWarning($"Skipping path outside module directory: {relativePath}");
+                continue;
+            }
+
             try
             {
                 var response = PsignPortable.Sign(CreateSignRequest(fullPath, certInfo));
@@ -324,7 +339,8 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
         if (manifestPath is not null)
             return System.IO.Path.GetFileNameWithoutExtension(manifestPath);
 
-        return System.IO.Path.GetFileName(moduleDir);
+        string trimmed = moduleDir.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        return System.IO.Path.GetFileName(trimmed);
     }
 
     private List<(string RelativePath, ModuleFileRole Role)> DiscoverSignableFiles(string moduleDir, string? manifestPath)
@@ -439,7 +455,11 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
             var (cert, pkDer) = Provider.CertStorePathHelper.LoadCertificateAndKey(
                 CertStoreDirectory, MachineStore.IsPresent ? "LocalMachine" : "CurrentUser",
                 StoreName, Thumbprint);
-            certDerBase64 = Convert.ToBase64String(cert.Export(X509ContentType.Cert));
+            using (cert)
+            {
+                certDerBase64 = Convert.ToBase64String(cert.Export(X509ContentType.Cert));
+            }
+
             if (pkDer is not null)
             {
                 privateKeyDerBase64 = Convert.ToBase64String(pkDer);
@@ -495,12 +515,75 @@ public sealed class ProtectPsignModuleCommand : PSCmdlet
         };
     }
 
+    private static bool IsPathInsideDirectory(string baseDir, string candidateFullPath)
+    {
+        StringComparison comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        string resolvedBase = ResolveFinalPath(baseDir)
+            .TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar)
+            + System.IO.Path.DirectorySeparatorChar;
+        string resolvedCandidate = ResolveFinalPath(candidateFullPath);
+        return resolvedCandidate.StartsWith(resolvedBase, comparison);
+    }
+
+    private static string ResolveFinalPath(string path)
+    {
+        string full = System.IO.Path.GetFullPath(path);
+        var stack = new Stack<string>();
+        string? current = full;
+        while (!string.IsNullOrEmpty(current))
+        {
+            try
+            {
+                if (File.Exists(current))
+                {
+                    var target = File.ResolveLinkTarget(current, returnFinalTarget: true);
+                    current = target is not null ? System.IO.Path.GetFullPath(target.FullName) : current;
+                    break;
+                }
+
+                if (Directory.Exists(current))
+                {
+                    var target = Directory.ResolveLinkTarget(current, returnFinalTarget: true);
+                    current = target is not null ? System.IO.Path.GetFullPath(target.FullName) : current;
+                    break;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                break;
+            }
+
+            string? parent = System.IO.Path.GetDirectoryName(current);
+            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            stack.Push(System.IO.Path.GetFileName(current));
+            current = parent;
+        }
+
+        string result = current ?? full;
+        while (stack.Count > 0)
+        {
+            result = System.IO.Path.Combine(result, stack.Pop());
+        }
+
+        return System.IO.Path.GetFullPath(result);
+    }
+
     private static string? FindManifest(string moduleDir)
     {
-        string dirName = System.IO.Path.GetFileName(moduleDir);
-        string candidate = System.IO.Path.Combine(moduleDir, dirName + ".psd1");
-        if (File.Exists(candidate))
-            return candidate;
+        string trimmed = moduleDir.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        string dirName = System.IO.Path.GetFileName(trimmed);
+        if (!string.IsNullOrEmpty(dirName))
+        {
+            string candidate = System.IO.Path.Combine(moduleDir, dirName + ".psd1");
+            if (File.Exists(candidate))
+                return candidate;
+        }
 
         string[] manifests = Directory.GetFiles(moduleDir, "*.psd1", SearchOption.TopDirectoryOnly);
         return manifests.Length > 0 ? manifests[0] : null;

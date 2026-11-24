@@ -197,9 +197,11 @@ internal sealed class TimestampAuthority : IDisposable
 
         if (failInfoBit is { } bit)
         {
-            byte b = (byte)(0x80 >> (bit % 8));
-            byte unused = (byte)(7 - (bit % 8));
-            statusInfo.AddRange([0x03, 0x02, unused, b]);
+            int byteIndex = bit / 8;
+            var content = new byte[byteIndex + 2];
+            content[0] = (byte)(7 - (bit % 8));
+            content[1 + byteIndex] = (byte)(0x80 >> (bit % 8));
+            DerPush.PushTlv(statusInfo, 0x03, content);
         }
 
         var body = new List<byte>();

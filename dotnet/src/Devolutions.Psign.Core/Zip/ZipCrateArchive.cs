@@ -273,7 +273,13 @@ public sealed class ZipCrateArchive
 
         ulong nameLen = ReadU16(_buf, hs + 26);
         ulong extraLen = ReadU16(_buf, hs + 28);
-        return hs + 30 + nameLen + extraLen;
+        ulong start = hs + 30 + nameLen + extraLen;
+        if (start < hs || start > (ulong)_buf.Length)
+        {
+            throw ZipFormatException.Eof();
+        }
+
+        return start;
     }
 
     /// <summary>Read and decompress an entry, validating the CRC (Rust <c>by_index(..)?.read_to_end</c>).</summary>
@@ -302,6 +308,11 @@ public sealed class ZipCrateArchive
     private byte[] Decompress(ZipCrateEntry e)
     {
         ulong ds = DataStart(e);
+        if (e.CompressedSize > (ulong)_buf.Length - ds)
+        {
+            throw ZipFormatException.Eof();
+        }
+
         var compressed = Slice(ds, e.CompressedSize);
         byte[] data;
         if (e.CompressionMethod == 0)
@@ -373,15 +384,19 @@ public sealed class ZipCrateArchive
         {
             if (ReadU32(buf, pos) == EocdSig)
             {
-                var d = new Eocd(
-                    ReadU16(buf, pos + 4),
-                    ReadU16(buf, pos + 6),
-                    ReadU16(buf, pos + 8),
-                    ReadU16(buf, pos + 10),
-                    ReadU32(buf, pos + 12),
-                    ReadU32(buf, pos + 16),
-                    ReadExact(buf, pos + 22, ReadU16(buf, pos + 20)));
-                return (pos, d);
+                ushort commentLen = ReadU16(buf, pos + 20);
+                if (pos + headerSize + commentLen == fileLength)
+                {
+                    var d = new Eocd(
+                        ReadU16(buf, pos + 4),
+                        ReadU16(buf, pos + 6),
+                        ReadU16(buf, pos + 8),
+                        ReadU16(buf, pos + 10),
+                        ReadU32(buf, pos + 12),
+                        ReadU32(buf, pos + 16),
+                        ReadExact(buf, pos + 22, commentLen));
+                    return (pos, d);
+                }
             }
 
             if (pos == 0)
@@ -590,6 +605,7 @@ public sealed class ZipCrateArchive
 
                         file.HasAesMode = true;
                         file.CompressionMethod = method;
+                        lenLeft -= 7;
                         break;
                 }
 

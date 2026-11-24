@@ -121,7 +121,9 @@ pub fn decode_rdp_text(bytes: &[u8]) -> String {
     }
     match std::str::from_utf8(bytes) {
         Ok(s) => s.trim_start_matches('\u{feff}').to_owned(),
-        Err(_) => String::from_utf8_lossy(bytes).into_owned(),
+        Err(_) => String::from_utf8_lossy(bytes)
+            .trim_start_matches('\u{feff}')
+            .to_owned(),
     }
 }
 

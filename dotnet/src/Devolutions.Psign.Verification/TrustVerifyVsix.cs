@@ -184,7 +184,7 @@ public static class TrustVerifyVsix
                 throw PsignException.Context($"read VSIX part {name}", e);
             }
 
-            if (name == ContentTypesPart)
+            if (PartKey(name) == PartKey(ContentTypesPart))
             {
                 rawContentTypes = bytes;
                 continue;
@@ -246,8 +246,10 @@ public static class TrustVerifyVsix
                 continue;
             }
 
-            int dot = k.LastIndexOf('.');
-            string ext = dot < 0 ? string.Empty : k[(dot + 1)..];
+            int slash = k.LastIndexOf('/');
+            string leaf = slash >= 0 ? k[(slash + 1)..] : k;
+            int dot = leaf.LastIndexOf('.');
+            string ext = dot < 0 ? string.Empty : leaf[(dot + 1)..];
             if (defaults.TryGetValue(ext, out var dct))
             {
                 package.ContentTypes[k] = dct;
@@ -492,7 +494,17 @@ public static class TrustVerifyVsix
             throw new PsignException("VSIX SignatureValue does not verify with any KeyInfo X509Certificate");
         }
 
-        var certificates = x509.Select(der => Anchors.ParseCertBytes(der)).ToList();
+        var certificates = new List<CertificateInfo>(x509.Count);
+        foreach (var der in x509)
+        {
+            try
+            {
+                certificates.Add(Anchors.ParseCertBytes(der));
+            }
+            catch (PsignException)
+            {
+            }
+        }
 
         // SignedInfo references: same-document objects.
         var coveredObjects = new List<XmlC14nElement>();

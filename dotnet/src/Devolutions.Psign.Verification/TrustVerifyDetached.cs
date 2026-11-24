@@ -31,7 +31,15 @@ public static class TrustVerifyDetached
         if (sig is not null)
         {
             var embedded = sig.Digest;
-            var computed = HashContentImplicit(content, embedded.Length);
+            var kind = sig.IndirectData.HashKind
+                ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+            if (embedded.Length != kind.DigestLength())
+            {
+                throw new PsignException(
+                    $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+            }
+
+            var computed = kind.Hash(content);
             if (!computed.AsSpan().SequenceEqual(embedded))
             {
                 throw new PsignException(
@@ -67,7 +75,15 @@ public static class TrustVerifyDetached
             throw new PsignException($"detached PKCS#7: CMS detached fallback missing messageDigest: {e.Message}");
         }
 
-        var computedMd = HashContentImplicit(content, md.Length);
+        var mdKind = AuthenticodeHashKinds.FromOid(sd.SignerInfos[0].DigestAlgorithm.Oid)
+            ?? throw new PsignException($"detached PKCS#7: unsupported SignerInfo digestAlgorithm OID {sd.SignerInfos[0].DigestAlgorithm.Oid}");
+        if (md.Length != mdKind.DigestLength())
+        {
+            throw new PsignException(
+                $"detached PKCS#7: PKCS#9 messageDigest length {md.Length} does not match SignerInfo digestAlgorithm {mdKind.Name()}");
+        }
+
+        var computedMd = mdKind.Hash(content);
         if (!computedMd.AsSpan().SequenceEqual(md))
         {
             throw new PsignException(

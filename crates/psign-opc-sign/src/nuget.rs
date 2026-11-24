@@ -18,11 +18,25 @@ fn nuget_zip_options(compression: zip::CompressionMethod, modified: zip::DateTim
         .last_modified_time(modified)
 }
 
+fn find_valid_eocd(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 22 {
+        return None;
+    }
+    let search_from = bytes.len().saturating_sub(22 + u16::MAX as usize);
+    for pos in (search_from..=bytes.len() - 22).rev() {
+        if &bytes[pos..pos + 4] == b"PK\x05\x06" {
+            let comment_len = u16::from_le_bytes([bytes[pos + 20], bytes[pos + 21]]) as usize;
+            if pos + 22 + comment_len == bytes.len() {
+                return Some(pos);
+            }
+        }
+    }
+    None
+}
+
 fn normalize_nuget_zip_metadata(bytes: &mut [u8]) -> Result<()> {
-    let eocd = bytes
-        .windows(4)
-        .rposition(|window| window == [0x50, 0x4b, 0x05, 0x06])
-        .ok_or_else(|| anyhow!("ZIP central directory end not found"))?;
+    let eocd =
+        find_valid_eocd(bytes).ok_or_else(|| anyhow!("ZIP central directory end not found"))?;
     if eocd + 22 > bytes.len() {
         return Err(anyhow!("truncated ZIP central directory end"));
     }
@@ -202,15 +216,16 @@ pub fn signed_package_unsigned_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
     const EOCD_SIG: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
     const CDFH_SIG: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
     let search_from = bytes.len().saturating_sub(22 + u16::MAX as usize);
-    let eocd = bytes[search_from..]
-        .windows(4)
-        .rposition(|w| w == EOCD_SIG)
-        .map(|p| search_from + p)
-        .ok_or_else(|| anyhow!("ZIP end of central directory not found"))?;
+    let eocd = match find_valid_eocd(bytes) {
+        Some(pos) => pos,
+        None => {
+            if bytes[search_from..].windows(4).any(|w| w == EOCD_SIG) {
+                return Err(anyhow!("ZIP end of central directory has trailing data"));
+            }
+            return Err(anyhow!("ZIP end of central directory not found"));
+        }
+    };
     let comment_len = le16(bytes, eocd + 20)?;
-    if eocd + 22 + comment_len != bytes.len() {
-        return Err(anyhow!("ZIP end of central directory has trailing data"));
-    }
     let disk_entries = le16(bytes, eocd + 8)?;
     let total_entries = le16(bytes, eocd + 10)?;
     let cd_size = le32(bytes, eocd + 12)?;
@@ -235,6 +250,9 @@ pub fn signed_package_unsigned_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
         }
         let name_len = le16(bytes, pos + 28)?;
         let len = 46 + name_len + le16(bytes, pos + 30)? + le16(bytes, pos + 32)?;
+        if pos.checked_add(len).is_none_or(|end| end > bytes.len()) {
+            return Err(anyhow!("truncated ZIP central directory record"));
+        }
         let name = bytes
             .get(pos + 46..pos + 46 + name_len)
             .ok_or_else(|| anyhow!("truncated ZIP central directory record"))?;
@@ -260,9 +278,10 @@ pub fn signed_package_unsigned_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
         ));
     }
     let signature_local_offset = records[signature_index].3;
-    if records[..signature_index]
-        .iter()
-        .any(|r| r.3 >= signature_local_offset)
+    if signature_local_offset > cd_offset
+        || records[..signature_index]
+            .iter()
+            .any(|r| r.3 >= signature_local_offset)
     {
         return Err(anyhow!(
             "{PACKAGE_SIGNATURE_FILE_NAME} must be the last local file entry"

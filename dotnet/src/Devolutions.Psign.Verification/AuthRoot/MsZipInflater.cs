@@ -57,12 +57,18 @@ internal sealed class MsZipInflater
     /// <summary>Decompress one MSZIP block (<c>CK</c> + deflate) producing exactly <paramref name="uncompressedSize"/> bytes.</summary>
     public byte[] DecompressBlock(ReadOnlySpan<byte> data, int uncompressedSize)
     {
+        if (uncompressedSize < 0)
+        {
+            throw new InvalidDataException($"MSZIP decompression failed: negative uncompressed size {uncompressedSize}");
+        }
+
         if (data.Length < 2 || data[0] != (byte)'C' || data[1] != (byte)'K')
         {
             throw new InvalidDataException("MSZIP decompression failed: Invalid MSZIP signature");
         }
 
-        var output = new byte[_historyLength + Math.Max(uncompressedSize, 0) + 258 + 0x10000];
+        int maxOutPos = checked(_historyLength + uncompressedSize);
+        var output = new byte[maxOutPos];
         Buffer.BlockCopy(_history, 0, output, 0, _historyLength);
         int outPos = _historyLength;
         var bits = new BitReader(data[2..].ToArray());
@@ -82,7 +88,11 @@ internal sealed class MsZipInflater
                         throw new InvalidDataException("MSZIP decompression failed: stored block length mismatch");
                     }
 
-                    EnsureCapacity(ref output, outPos + len);
+                    if (len > maxOutPos - outPos)
+                    {
+                        throw new InvalidDataException("MSZIP decompression failed: output exceeds expected block size");
+                    }
+
                     for (int i = 0; i < len; i++)
                     {
                         output[outPos++] = (byte)bits.Read(8);
@@ -90,11 +100,11 @@ internal sealed class MsZipInflater
 
                     break;
                 case 1:
-                    outPos = Codes(bits, FixedLit, FixedDist, ref output, outPos);
+                    outPos = Codes(bits, FixedLit, FixedDist, output, outPos, maxOutPos);
                     break;
                 case 2:
                     var (lit, dist) = Dynamic(bits);
-                    outPos = Codes(bits, lit, dist, ref output, outPos);
+                    outPos = Codes(bits, lit, dist, output, outPos, maxOutPos);
                     break;
                 default:
                     throw new InvalidDataException("MSZIP decompression failed: invalid block type");
@@ -121,22 +131,18 @@ internal sealed class MsZipInflater
         return result;
     }
 
-    private static void EnsureCapacity(ref byte[] buf, int needed)
-    {
-        if (needed > buf.Length)
-        {
-            Array.Resize(ref buf, Math.Max(needed, buf.Length * 2));
-        }
-    }
-
-    private static int Codes(BitReader bits, Huffman lit, Huffman dist, ref byte[] output, int outPos)
+    private static int Codes(BitReader bits, Huffman lit, Huffman dist, byte[] output, int outPos, int maxOutPos)
     {
         while (true)
         {
             int sym = lit.Decode(bits);
             if (sym < 256)
             {
-                EnsureCapacity(ref output, outPos + 1);
+                if (outPos >= maxOutPos)
+                {
+                    throw new InvalidDataException("MSZIP decompression failed: output exceeds expected block size");
+                }
+
                 output[outPos++] = (byte)sym;
             }
             else if (sym == 256)
@@ -164,7 +170,11 @@ internal sealed class MsZipInflater
                     throw new InvalidDataException("MSZIP decompression failed: distance too far back");
                 }
 
-                EnsureCapacity(ref output, outPos + len);
+                if (len > maxOutPos - outPos)
+                {
+                    throw new InvalidDataException("MSZIP decompression failed: output exceeds expected block size");
+                }
+
                 for (int i = 0; i < len; i++)
                 {
                     output[outPos] = output[outPos - d];

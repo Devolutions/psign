@@ -288,10 +288,28 @@ internal sealed class PickyAuthenticode
         var spcTlv = Der.First(sd.EncapContent!)!.Value;
         var spcValue = spcTlv.Value(sd.EncapContent!).ToArray();
         var spcParts = Der.Children(sd.EncapContent!, spcTlv)!;
+        if (spcParts.Count != 2 || spcParts[1].Tag != 0x30)
+        {
+            throw new PickyException("(ASN1) couldn't deserialize DigestInfo");
+        }
+
         var digestInfo = spcParts[1].Encoded(sd.EncapContent!).ToArray();
-        var digestInfoParts = Der.Children(digestInfo, Der.First(digestInfo)!.Value)
-            ?? throw new PickyException("(ASN1) couldn't deserialize DigestInfo");
-        var messageDigestAlg = AlgorithmIdentifier.Parse(digestInfoParts[0].Encoded(digestInfo));
+        var digestInfoParts = Der.Children(digestInfo, Der.First(digestInfo)!.Value);
+        if (digestInfoParts is not { Count: 2 } || digestInfoParts[1].Tag != 0x04)
+        {
+            throw new PickyException("(ASN1) couldn't deserialize DigestInfo");
+        }
+
+        AlgorithmIdentifier messageDigestAlg;
+        try
+        {
+            messageDigestAlg = AlgorithmIdentifier.Parse(digestInfoParts[0].Encoded(digestInfo));
+        }
+        catch (PsignException e)
+        {
+            throw new PickyException($"(ASN1) couldn't deserialize DigestInfo: {e.Message}");
+        }
+
         var actualFileHash = digestInfoParts[1].Value(digestInfo).ToArray();
 
         var digestAlgorithm = sd.DigestAlgorithms[0];
@@ -371,9 +389,10 @@ internal sealed class PickyAuthenticode
             }
 
             var unsigned = SignedData.SignerInfos[0].UnsignedAttributes;
-            if (unsigned is { Count: > 0 } && unsigned[0].Oid == Oids.MsRfc3161TimestampToken && unsigned[0].Values.Count > 0)
+            var rfc3161Attr = unsigned?.FirstOrDefault(a => a.Oid == Oids.MsRfc3161TimestampToken && a.Values.Count > 0);
+            if (rfc3161Attr is not null)
             {
-                var token = TryParseSignedDataContentInfo(unsigned[0].Values[0]);
+                var token = TryParseSignedDataContentInfo(rfc3161Attr.Values[0]);
                 var tsCerts = token?.GetCertificates() ?? [];
                 if (HasTimeStamping(tsCerts) && !lifetime)
                 {

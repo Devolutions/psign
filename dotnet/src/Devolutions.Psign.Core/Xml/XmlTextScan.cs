@@ -57,7 +57,45 @@ public static class XmlTextScan
             }
 
             char first = text[start + 1];
-            if (first is '/' or '!' or '?')
+            if (first == '!')
+            {
+                if (text.AsSpan(start).StartsWith("<!--", StringComparison.Ordinal))
+                {
+                    int commentEnd = text.IndexOf("-->", start + 4, StringComparison.Ordinal);
+                    if (commentEnd < 0)
+                    {
+                        throw new PsignException("ClickOnce XML comment is not closed");
+                    }
+
+                    cursor = commentEnd + 3;
+                    continue;
+                }
+
+                if (text.AsSpan(start).StartsWith("<![CDATA[", StringComparison.Ordinal))
+                {
+                    int cdataEnd = text.IndexOf("]]>", start + 9, StringComparison.Ordinal);
+                    if (cdataEnd < 0)
+                    {
+                        throw new PsignException("ClickOnce XML CDATA is not closed");
+                    }
+
+                    cursor = cdataEnd + 3;
+                    continue;
+                }
+
+                int declEnd = text.IndexOf('>', start + 2);
+                cursor = declEnd < 0 ? text.Length : declEnd + 1;
+                continue;
+            }
+
+            if (first == '?')
+            {
+                int piEnd = text.IndexOf("?>", start + 2, StringComparison.Ordinal);
+                cursor = piEnd < 0 ? text.Length : piEnd + 2;
+                continue;
+            }
+
+            if (first == '/')
             {
                 cursor = start + 1;
                 continue;
@@ -144,8 +182,32 @@ public static class XmlTextScan
             }
 
             char first = text[start + 1];
-            if (first is '?' or '!')
+            if (first == '?')
             {
+                int piEnd = text.IndexOf("?>", start + 2, StringComparison.Ordinal);
+                if (piEnd < 0)
+                {
+                    throw new PsignException("ClickOnce XML declaration/comment is not closed");
+                }
+
+                cursor = piEnd + 2;
+                continue;
+            }
+
+            if (first == '!')
+            {
+                if (text.AsSpan(start).StartsWith("<!--", StringComparison.Ordinal))
+                {
+                    int commentEnd = text.IndexOf("-->", start + 4, StringComparison.Ordinal);
+                    if (commentEnd < 0)
+                    {
+                        throw new PsignException("ClickOnce XML declaration/comment is not closed");
+                    }
+
+                    cursor = commentEnd + 3;
+                    continue;
+                }
+
                 int declEnd = text.IndexOf('>', start);
                 if (declEnd < 0)
                 {
@@ -317,18 +379,33 @@ public static class XmlTextScan
     /// </summary>
     public static string ReplaceOrInsertXmlAttr(string tag, string attr, string escapedValue)
     {
-        string needle = $"{attr}=\"";
-        int idx = tag.IndexOf(needle, StringComparison.Ordinal);
-        if (idx >= 0)
+        foreach (char quote in new[] { '"', '\'' })
         {
-            int valueStart = idx + needle.Length;
-            int valueEnd = tag.IndexOf('"', valueStart);
-            if (valueEnd < 0)
+            string needle = $"{attr}={quote}";
+            int searchFrom = 0;
+            while (true)
             {
-                throw new PsignException($"App Installer {attr} attribute is not closed");
-            }
+                int idx = tag.IndexOf(needle, searchFrom, StringComparison.Ordinal);
+                if (idx < 0)
+                {
+                    break;
+                }
 
-            return tag[..valueStart] + escapedValue + tag[valueEnd..];
+                bool boundaryOk = idx == 0 || IsAsciiWhitespace(tag[idx - 1]);
+                int valueStart = idx + needle.Length;
+                if (boundaryOk)
+                {
+                    int valueEnd = tag.IndexOf(quote, valueStart);
+                    if (valueEnd < 0)
+                    {
+                        throw new PsignException($"App Installer {attr} attribute is not closed");
+                    }
+
+                    return tag[..idx] + attr + "=\"" + escapedValue + "\"" + tag[(valueEnd + 1)..];
+                }
+
+                searchFrom = valueStart;
+            }
         }
 
         int insertAt = tag.LastIndexOf("/>", StringComparison.Ordinal);

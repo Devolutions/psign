@@ -40,7 +40,7 @@ internal sealed class ModuleManifestInfo
 
         foreach (var kvp in hashtable.KeyValuePairs)
         {
-            string key = kvp.Item1.SafeGetValue()?.ToString() ?? string.Empty;
+            string key = TrySafeGetString(kvp.Item1) ?? string.Empty;
 
             switch (key.ToUpperInvariant())
             {
@@ -54,7 +54,6 @@ internal sealed class ModuleManifestInfo
                 case "NESTEDMODULES":
                     info.NestedModules = ExtractStringArray(kvp.Item2);
                     break;
-                case "TYPOSTOPROCESS":
                 case "TYPESTOPROCESS":
                     info.TypesToProcess = ExtractStringArray(kvp.Item2);
                     break;
@@ -73,13 +72,38 @@ internal sealed class ModuleManifestInfo
         return info;
     }
 
+    private static string? TrySafeGetString(ExpressionAst expr)
+    {
+        if (expr is HashtableAst ht)
+        {
+            foreach (var kvp in ht.KeyValuePairs)
+            {
+                if (string.Equals(TrySafeGetString(kvp.Item1), "ModuleName", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ExtractString(kvp.Item2);
+                }
+            }
+
+            return null;
+        }
+
+        try
+        {
+            return expr.SafeGetValue()?.ToString();
+        }
+        catch (InvalidOperationException)
+        {
+            return expr.Extent.Text.Trim('\'', '"');
+        }
+    }
+
     private static string? ExtractString(StatementAst valueAst)
     {
         var pipeline = valueAst as PipelineAst;
         if (pipeline?.PipelineElements.Count == 1 &&
             pipeline.PipelineElements[0] is CommandExpressionAst cmdExpr)
         {
-            return cmdExpr.Expression.SafeGetValue()?.ToString();
+            return TrySafeGetString(cmdExpr.Expression);
         }
         return valueAst.ToString().Trim('\'', '"');
     }
@@ -104,13 +128,14 @@ internal sealed class ModuleManifestInfo
         if (cmdExpr.Expression is ArrayLiteralAst arrayLiteral)
         {
             return arrayLiteral.Elements
-                .Select(e => e.SafeGetValue()?.ToString() ?? e.ToString().Trim('\'', '"'))
+                .Select(TrySafeGetString)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!)
                 .ToArray();
         }
 
         // Single string value
-        string? single = cmdExpr.Expression.SafeGetValue()?.ToString();
+        string? single = TrySafeGetString(cmdExpr.Expression);
         if (!string.IsNullOrWhiteSpace(single))
             return [single];
 
@@ -129,12 +154,13 @@ internal sealed class ModuleManifestInfo
                 if (cmdExpr.Expression is ArrayLiteralAst arrayLit)
                 {
                     results.AddRange(arrayLit.Elements
-                        .Select(e => e.SafeGetValue()?.ToString() ?? e.ToString().Trim('\'', '"'))
-                        .Where(s => !string.IsNullOrWhiteSpace(s)));
+                        .Select(TrySafeGetString)
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s!));
                 }
                 else
                 {
-                    string? val = cmdExpr.Expression.SafeGetValue()?.ToString();
+                    string? val = TrySafeGetString(cmdExpr.Expression);
                     if (!string.IsNullOrWhiteSpace(val))
                         results.Add(val);
                 }

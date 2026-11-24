@@ -97,15 +97,23 @@ pub fn acquire_kv_access_token(params: &KvAuthParams<'_>) -> Result<String> {
     let authority = params
         .authority
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or("https://login.microsoftonline.com");
-    let token_url = format!("{authority}/{tenant}/oauth2/v2.0/token");
+        .unwrap_or("https://login.microsoftonline.com")
+        .trim()
+        .trim_end_matches('/');
+    let mut token_url =
+        Url::parse(authority).map_err(|e| anyhow!("invalid OAuth authority URL: {e}"))?;
+    token_url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("OAuth authority URL cannot be a base"))?
+        .pop_if_empty()
+        .extend([tenant, "oauth2", "v2.0", "token"]);
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| anyhow!("HTTP client: {e}"))?;
     let rsp = client
-        .post(&token_url)
+        .post(token_url)
         .form(&[
             ("client_id", client_id),
             ("client_secret", secret),

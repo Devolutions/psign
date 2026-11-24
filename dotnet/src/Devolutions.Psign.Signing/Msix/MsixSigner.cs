@@ -149,16 +149,26 @@ public static class MsixSigner
         {
             package = File.ReadAllBytes(path);
         }
-        catch (IOException e)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             throw new PsignException($"read {path}", e);
         }
 
         if (skipSigned && MsixDigest.MsixSignaturePartPresent(package))
         {
-            if (!string.Equals(Path.GetFullPath(outputPath), Path.GetFullPath(path), StringComparison.Ordinal))
+            var pathCmp = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            if (!string.Equals(Path.GetFullPath(outputPath), Path.GetFullPath(path), pathCmp))
             {
-                File.Copy(path, outputPath, overwrite: true);
+                try
+                {
+                    File.Copy(path, outputPath, overwrite: true);
+                }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                {
+                    throw new PsignException($"write {outputPath}", e);
+                }
             }
 
             return true;
@@ -174,7 +184,15 @@ public static class MsixSigner
             throw new PsignException($"sign MSIX/AppX {path}", e);
         }
 
-        File.WriteAllBytes(outputPath, signed);
+        try
+        {
+            File.WriteAllBytes(outputPath, signed);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            throw new PsignException($"write {outputPath}", e);
+        }
+
         return false;
     }
 

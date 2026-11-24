@@ -387,8 +387,8 @@ pub fn bundle_manifest_for_stored_children(
                 if element.local_name().as_ref() == b"Package" =>
             {
                 let mut file_name = None;
-                let mut declared_offset: Option<(Vec<u8>, String)> = None;
-                let mut declared_size: Option<(Vec<u8>, String)> = None;
+                let mut declared_offset: Option<(Vec<u8>, Vec<u8>, String)> = None;
+                let mut declared_size: Option<(Vec<u8>, Vec<u8>, String)> = None;
                 let mut replacement = element.to_owned();
                 replacement.clear_attributes();
                 for attribute in element.attributes() {
@@ -406,13 +406,21 @@ pub fn bundle_manifest_for_stored_children(
                             let val = attribute
                                 .decode_and_unescape_value(reader.decoder())?
                                 .into_owned();
-                            declared_offset = Some((attribute.key.as_ref().to_vec(), val));
+                            declared_offset = Some((
+                                attribute.key.as_ref().to_vec(),
+                                attribute.value.as_ref().to_vec(),
+                                val,
+                            ));
                         }
                         b"Size" => {
                             let val = attribute
                                 .decode_and_unescape_value(reader.decoder())?
                                 .into_owned();
-                            declared_size = Some((attribute.key.as_ref().to_vec(), val));
+                            declared_size = Some((
+                                attribute.key.as_ref().to_vec(),
+                                attribute.value.as_ref().to_vec(),
+                                val,
+                            ));
                         }
                         _ => replacement.push_attribute(attribute),
                     }
@@ -426,15 +434,15 @@ pub fn bundle_manifest_for_stored_children(
                 } else {
                     let expects_embedded = declared_offset
                         .as_ref()
-                        .is_some_and(|(_, val)| !val.trim().is_empty() && val.trim() != "0");
+                        .is_some_and(|(_, _, val)| !val.trim().is_empty() && val.trim() != "0");
                     if expects_embedded {
                         bail!("bundle child `{file_name}` is missing from ZIP");
                     }
-                    if let Some((key, val)) = &declared_offset {
-                        replacement.push_attribute((key.as_slice(), val.as_bytes()));
+                    if let Some((key, raw, _)) = &declared_offset {
+                        replacement.push_attribute((key.as_slice(), raw.as_slice()));
                     }
-                    if let Some((key, val)) = &declared_size {
-                        replacement.push_attribute((key.as_slice(), val.as_bytes()));
+                    if let Some((key, raw, _)) = &declared_size {
+                        replacement.push_attribute((key.as_slice(), raw.as_slice()));
                     }
                 }
                 Some(if matches!(event, Event::Start(_)) {
@@ -556,6 +564,7 @@ pub fn set_unsigned_msix_family_publisher_bytes(
 pub fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>> {
     let mut source = ZipArchive::new(Cursor::new(package)).context("open staged MSIX ZIP")?;
     let mut entries = Vec::with_capacity(source.len());
+    let mut replaced = false;
     for i in 0..source.len() {
         let mut entry = source
             .by_index_raw(i)
@@ -563,6 +572,7 @@ pub fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>
         let name = entry.name().to_owned();
         if name == "AppxSignature.p7x" {
             entries.push(AppxZipEntry::stored(name, p7x.to_vec()));
+            replaced = true;
             continue;
         }
         let method = match entry.compression() {
@@ -575,6 +585,9 @@ pub fn replace_msix_signature_part(package: &[u8], p7x: &[u8]) -> Result<Vec<u8>
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
         entries.push(AppxZipEntry::raw(name, method, crc32, size, data)?);
+    }
+    if !replaced {
+        bail!("staged MSIX package is missing AppxSignature.p7x placeholder");
     }
     write_appx_zip(&entries)
 }

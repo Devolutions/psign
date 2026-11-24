@@ -187,6 +187,18 @@ internal static class SigningCommands
             throw new PsignException("portable sign-pe accepts only one signing source: --cert/--key, --azure-key-vault-*, or --artifact-signing-*");
         }
 
+        var url = p.Value("timestamp-url");
+        var tsDigest = p.Value("timestamp-digest");
+        if (url is not null && tsDigest is null)
+        {
+            throw new PsignException("portable sign-pe requires --timestamp-digest with --timestamp-url");
+        }
+
+        if (url is null && tsDigest is not null)
+        {
+            throw new PsignException("portable sign-pe requires --timestamp-url with --timestamp-digest");
+        }
+
         var chainCerts = p.Values("chain-cert");
         byte[] pkcs7;
         if (hasArtifact)
@@ -213,15 +225,10 @@ internal static class SigningCommands
             }
         }
 
-        var url = p.Value("timestamp-url");
-        var tsDigest = p.Value("timestamp-digest");
-        pkcs7 = (url, tsDigest) switch
+        if (url is not null && tsDigest is not null)
         {
-            ({ } u, { } d) => Ctx($"RFC3161 timestamp portable Authenticode signature for {path}", () => TimestampPkcs7(pkcs7, u, AuthenticodeHashKinds.Parse(d))),
-            (not null, null) => throw new PsignException("portable sign-pe requires --timestamp-digest with --timestamp-url"),
-            (null, not null) => throw new PsignException("portable sign-pe requires --timestamp-url with --timestamp-digest"),
-            _ => pkcs7,
-        };
+            pkcs7 = Ctx($"RFC3161 timestamp portable Authenticode signature for {path}", () => TimestampPkcs7(pkcs7, url, AuthenticodeHashKinds.Parse(tsDigest)));
+        }
         var signed = Ctx($"embed Authenticode signature in {path}", () => PeEmbed.AppendPkcs7Certificate(pe, pkcs7));
         Output.WriteFile(output, signed);
         Output.Line($"sign-pe: ok output={output} digest={DigestDebug(kind)} pkcs7_len={pkcs7.Length}");
@@ -573,6 +580,16 @@ internal static class SigningCommands
         var path = p.Pos("path")!;
         int index = p.Int("index");
         int signerIndex = p.Int("signer-index");
+        if (index < 0)
+        {
+            throw new PsignException($"--index must be non-negative, got {index}");
+        }
+
+        if (signerIndex < 0)
+        {
+            throw new PsignException($"--signer-index must be non-negative, got {signerIndex}");
+        }
+
         var output = p.Required("output");
         var pe = Output.ReadFile(path);
         var pkcs7Der = Ctx($"extract PE PKCS#7 row {index} from {path}", () => PeAuthenticode.NthPkcs7(pe, index));
@@ -642,7 +659,7 @@ internal static class SigningCommands
                 var url = p.Required("url");
                 var kind = AuthenticodeHashKinds.Parse(p.Required("algorithm"));
                 var preimage = ScriptCommands.LoadTimestampImprintPreimage(p.Value("digest-hex"), p.Value("digest-file"), kind);
-                ulong? nonce = p.Value("nonce") is { } n ? ulong.Parse(n, NumberStyles.None, CultureInfo.InvariantCulture) : null;
+                ulong? nonce = ScriptCommands.ParseOptionalNonce(p.Value("nonce"), "--nonce");
                 var der = Rfc3161.BuildTimestampRequestBytes(new Rfc3161TimestampRequestPlan { DigestAlgOid = kind.Oid(), Nonce = nonce, CertReq = p.Flag("cert-req") }, preimage)
                     ?? throw new PsignException("unsupported digest OID / preimage length for RFC3161 TimeStampReq");
                 byte[] body;

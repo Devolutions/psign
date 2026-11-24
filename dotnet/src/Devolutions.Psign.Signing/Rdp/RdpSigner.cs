@@ -10,13 +10,21 @@ using Devolutions.Psign.Signing.Keys;
 namespace Devolutions.Psign.Signing.Rdp;
 
 /// <summary>Local signing identity for RDP files: signer certificate, extra certificates, and the signer.</summary>
-public sealed class RdpSigningIdentity
+public sealed class RdpSigningIdentity : IDisposable
 {
+    private readonly IDisposable? _owned;
+
     public RdpSigningIdentity(CertificateInfo signerCertificate, IReadOnlyList<CertificateInfo> chainCertificates, IDigestSigner signer)
+        : this(signerCertificate, chainCertificates, signer, owned: null)
+    {
+    }
+
+    public RdpSigningIdentity(CertificateInfo signerCertificate, IReadOnlyList<CertificateInfo> chainCertificates, IDigestSigner signer, IDisposable? owned)
     {
         SignerCertificate = signerCertificate;
         ChainCertificates = chainCertificates;
         Signer = signer;
+        _owned = owned;
     }
 
     public CertificateInfo SignerCertificate { get; }
@@ -24,6 +32,8 @@ public sealed class RdpSigningIdentity
     public IReadOnlyList<CertificateInfo> ChainCertificates { get; }
 
     public IDigestSigner Signer { get; }
+
+    public void Dispose() => _owned?.Dispose();
 
     /// <summary>
     /// Load <c>--cert</c> / <c>--key</c> / <c>--chain-cert</c> files with the Rust error contexts
@@ -53,21 +63,29 @@ public sealed class RdpSigningIdentity
             throw new PsignException($"parse RSA private key {keyPath}", e);
         }
 
-        var chain = new List<CertificateInfo>();
-        foreach (var path in chainCertPaths)
+        try
         {
-            var bytes = RdpSigner.ReadFile(path);
-            try
+            var chain = new List<CertificateInfo>();
+            foreach (var path in chainCertPaths)
             {
-                chain.Add(CertificateLoader.ParseCertificate(bytes));
+                var bytes = RdpSigner.ReadFile(path);
+                try
+                {
+                    chain.Add(CertificateLoader.ParseCertificate(bytes));
+                }
+                catch (PsignException e)
+                {
+                    throw new PsignException($"parse chain certificate {path}", e);
+                }
             }
-            catch (PsignException e)
-            {
-                throw new PsignException($"parse chain certificate {path}", e);
-            }
-        }
 
-        return new RdpSigningIdentity(signerCert, chain, new RsaDigestSigner(key));
+            return new RdpSigningIdentity(signerCert, chain, new RsaDigestSigner(key), key);
+        }
+        catch
+        {
+            key.Dispose();
+            throw;
+        }
     }
 }
 
@@ -222,19 +240,12 @@ public static class RdpSigner
 
         byte[]? externalPkcs7 = options.SignaturePkcs7Path is null ? null : ReadFile(options.SignaturePkcs7Path);
 
-        RdpSigningIdentity? identity;
-        if (options.CertPath is not null && options.KeyPath is not null)
+        using RdpSigningIdentity? identity = (options.CertPath, options.KeyPath, externalPkcs7) switch
         {
-            identity = RdpSigningIdentity.FromFiles(options.CertPath, options.KeyPath, options.ChainCertPaths);
-        }
-        else if (options.CertPath is null && options.KeyPath is null && externalPkcs7 is not null)
-        {
-            identity = null;
-        }
-        else
-        {
-            throw new PsignException("rdp requires either --cert and --key, or --signature-pkcs7");
-        }
+            (not null, not null, _) => RdpSigningIdentity.FromFiles(options.CertPath, options.KeyPath, options.ChainCertPaths),
+            (null, null, not null) => null,
+            _ => throw new PsignException("rdp requires either --cert and --key, or --signature-pkcs7"),
+        };
 
         foreach (var path in files)
         {
@@ -308,7 +319,14 @@ public static class RdpSigner
         var result = new byte[length];
         for (int i = 0; i < length; i++)
         {
-            byte? b = clean.Length == length * 2 ? RustText.ParseHexPair(clean[2 * i], clean[(2 * i) + 1]) : null;
+            char hi = clean[2 * i];
+            char lo = clean[(2 * i) + 1];
+            if (!RustText.IsAsciiHexDigit(hi) || !RustText.IsAsciiHexDigit(lo))
+            {
+                throw new PsignException($"{label} thumbprint contains invalid hex");
+            }
+
+            byte? b = clean.Length == length * 2 ? RustText.ParseHexPair(hi, lo) : null;
             result[i] = b ?? throw new PsignException($"{label} thumbprint contains invalid hex");
         }
 
@@ -330,10 +348,13 @@ public static class RdpSigner
     /// </summary>
     public static void ValidateSigningCertificate(CertificateInfo cert, DateTimeOffset now)
     {
-        var usages = cert.ExtendedKeyUsages;
-        if (usages is { Count: > 0 } && !RdpSigningEkus.Any(oid => usages.Contains(oid)))
+        if (cert.GetExtension(Oids.ExtendedKeyUsage) is not null)
         {
-            throw new PsignException("certificate is not valid for RDP signing; expected serverAuth, codeSigning, or RDP signing EKU");
+            var usages = cert.ExtendedKeyUsages;
+            if (usages is null || (usages.Count > 0 && !RdpSigningEkus.Any(oid => usages.Contains(oid))))
+            {
+                throw new PsignException("certificate is not valid for RDP signing; expected serverAuth, codeSigning, or RDP signing EKU");
+            }
         }
 
         if (now < cert.NotBefore || now > cert.NotAfter)

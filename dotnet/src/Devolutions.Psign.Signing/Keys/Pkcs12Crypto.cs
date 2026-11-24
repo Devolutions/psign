@@ -98,6 +98,11 @@ internal static class Pkcs12Crypto
     /// <summary>RFC 7292 appendix B.2 key derivation.</summary>
     public static byte[] Derive(HashAlgorithmName hash, ReadOnlySpan<byte> password, ReadOnlySpan<byte> salt, int iterations, byte id, int length)
     {
+        if (iterations <= 0)
+        {
+            throw new PsignException("PKCS#12 KDF iteration count must be positive");
+        }
+
         var (u, v) = HashSizes(hash);
         var d = new byte[v];
         Array.Fill(d, id);
@@ -209,11 +214,20 @@ internal static class Pkcs12Crypto
                     var kp = kdf.ReadSequence();
                     var salt = kp.ReadOctetString();
                     var iterations = (int)ReadSmallInteger(kp);
+                    if (iterations <= 0)
+                    {
+                        throw new PsignException("PBKDF2 iteration count must be positive");
+                    }
+
                     int? keyLength = null;
                     var prf = HashAlgorithmName.SHA1;
                     if (kp.HasData && kp.PeekTag().HasSameClassAndValue(Asn1Tag.Integer))
                     {
                         keyLength = (int)ReadSmallInteger(kp);
+                        if (keyLength <= 0)
+                        {
+                            throw new PsignException("PBKDF2 keyLength must be positive");
+                        }
                     }
 
                     if (kp.HasData)
@@ -241,7 +255,12 @@ internal static class Pkcs12Crypto
                         Pkcs12Oids.DesCbc => (8, DES.Create),
                         _ => throw new PsignException($"unsupported PBES2 encryption scheme {encOid}"),
                     };
-                    var key = Rfc2898DeriveBytes.Pbkdf2(Utf8Password(password), salt, iterations, prf, keyLength ?? cipherKeyLen);
+                    if (keyLength is { } kl && kl != cipherKeyLen)
+                    {
+                        throw new PsignException($"PBKDF2 keyLength ({kl}) does not match encryption scheme {encOid} key size ({cipherKeyLen})");
+                    }
+
+                    var key = Rfc2898DeriveBytes.Pbkdf2(Utf8Password(password), salt, iterations, prf, cipherKeyLen);
                     using var cipher = factory();
                     return DecryptCbc(cipher, key, iv, ciphertext);
                 }
@@ -323,12 +342,12 @@ internal static class Pkcs12Crypto
 
     private static byte[] DecryptCbc(SymmetricAlgorithm cipher, byte[] key, byte[] iv, byte[] ciphertext)
     {
-        cipher.Key = key;
         try
         {
+            cipher.Key = key;
             return cipher.DecryptCbc(ciphertext, iv, PaddingMode.PKCS7);
         }
-        catch (CryptographicException e)
+        catch (Exception e) when (e is CryptographicException or ArgumentException)
         {
             throw new PsignException("PKCS#12 decryption failed (wrong password?)", e);
         }

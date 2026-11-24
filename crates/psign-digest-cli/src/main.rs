@@ -878,7 +878,37 @@ fn find_xml_start_tag_by_local_name(
         let Some(first) = text[start + 1..].chars().next() else {
             return Ok(None);
         };
-        if matches!(first, '/' | '!' | '?') {
+        if first == '!' {
+            if text[start..].starts_with("<!--") {
+                let comment_end = text[start + 4..]
+                    .find("-->")
+                    .map(|offset| start + 4 + offset)
+                    .ok_or_else(|| anyhow!("ClickOnce XML comment is not closed"))?;
+                cursor = comment_end + 3;
+                continue;
+            }
+            if text[start..].starts_with("<![CDATA[") {
+                let cdata_end = text[start + 9..]
+                    .find("]]>")
+                    .map(|offset| start + 9 + offset)
+                    .ok_or_else(|| anyhow!("ClickOnce XML CDATA is not closed"))?;
+                cursor = cdata_end + 3;
+                continue;
+            }
+            cursor = text[start + 2..]
+                .find('>')
+                .map(|offset| start + 2 + offset + 1)
+                .unwrap_or(text.len());
+            continue;
+        }
+        if first == '?' {
+            cursor = text[start + 2..]
+                .find("?>")
+                .map(|offset| start + 2 + offset + 2)
+                .unwrap_or(text.len());
+            continue;
+        }
+        if first == '/' {
             cursor = start + 1;
             continue;
         }
@@ -979,18 +1009,25 @@ fn find_xml_root_start_tag(text: &str) -> Result<XmlStartTagSpan> {
 }
 
 fn resolve_clickonce_manifest_path(base_directory: &Path, manifest_path: &str) -> Result<PathBuf> {
-    let relative = Path::new(manifest_path);
+    if manifest_path.starts_with('/')
+        || manifest_path.starts_with('\\')
+        || manifest_path.as_bytes().get(1) == Some(&b':')
+    {
+        return Err(anyhow!(
+            "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
+        ));
+    }
     let mut safe = PathBuf::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            std::path::Component::CurDir => {}
-            _ => {
-                return Err(anyhow!(
-                    "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
-                ));
-            }
+    for component in manifest_path.split(['/', '\\']) {
+        if component.is_empty() || component == "." {
+            continue;
         }
+        if component == ".." || component.contains(':') {
+            return Err(anyhow!(
+                "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
+            ));
+        }
+        safe.push(component);
     }
     if safe.as_os_str().is_empty() {
         return Err(anyhow!("ClickOnce manifest path is empty"));
@@ -1133,14 +1170,17 @@ fn sign_clickonce_manifest_path(
         .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
     let unsigned = unsigned_clickonce_manifest_text(&text)?;
     let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    rdp::parse_certificate(&cert_bytes)
+    let signer_cert = rdp::parse_certificate(&cert_bytes)
         .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+    let cert_der = signer_cert
+        .to_der()
+        .context("encode signer certificate DER")?;
     let key_bytes = std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
     let private_key = rdp::parse_rsa_private_key(&key_bytes)
         .with_context(|| format!("parse RSA private key {}", key.display()))?;
     let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
     let signature = sign_clickonce_signed_info(digest, private_key, &signed_info)?;
-    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
+    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_der);
     let signed_manifest = insert_clickonce_signature_xml(&unsigned, &signature_xml)?;
     std::fs::write(output, signed_manifest)
         .with_context(|| format!("write ClickOnce manifest {}", output.display()))?;
@@ -1172,11 +1212,14 @@ fn sign_clickonce_manifest_from_external_signature_path(
         .with_context(|| format!("read ClickOnce manifest {}", path.display()))?;
     let unsigned = unsigned_clickonce_manifest_text(&text)?;
     let cert_bytes = std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
-    rdp::parse_certificate(&cert_bytes)
+    let signer_cert = rdp::parse_certificate(&cert_bytes)
         .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+    let cert_der = signer_cert
+        .to_der()
+        .context("encode signer certificate DER")?;
     let signature = std::fs::read(signature).with_context(|| format!("read {}", signature.display()))?;
     let signed_info = clickonce_manifest_signed_info_xml(&unsigned, digest);
-    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_bytes);
+    let signature_xml = clickonce_manifest_signature_xml(&signed_info, &signature, &cert_der);
     let signed_manifest = insert_clickonce_signature_xml(&unsigned, &signature_xml)?;
     std::fs::write(output, signed_manifest)
         .with_context(|| format!("write ClickOnce manifest {}", output.display()))?;
@@ -1265,14 +1308,46 @@ fn base64_decode(text: &str) -> Result<Vec<u8>> {
     let mut chunk = [0u8; 4];
     let mut chunk_len = 0usize;
     let mut padding = 0usize;
+    let mut finished = false;
     for ch in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
+        if finished {
+            return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+        }
         let value = match ch {
-            b'A'..=b'Z' => ch - b'A',
-            b'a'..=b'z' => ch - b'a' + 26,
-            b'0'..=b'9' => ch - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
+            b'A'..=b'Z' => {
+                if padding > 0 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
+                ch - b'A'
+            }
+            b'a'..=b'z' => {
+                if padding > 0 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
+                ch - b'a' + 26
+            }
+            b'0'..=b'9' => {
+                if padding > 0 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
+                ch - b'0' + 52
+            }
+            b'+' => {
+                if padding > 0 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
+                62
+            }
+            b'/' => {
+                if padding > 0 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
+                63
+            }
             b'=' => {
+                if chunk_len < 2 {
+                    return Err(anyhow!("invalid base64 padding in XMLDSig value"));
+                }
                 padding += 1;
                 0
             }
@@ -1287,6 +1362,8 @@ fn base64_decode(text: &str) -> Result<Vec<u8>> {
             }
             if padding == 0 {
                 out.push((chunk[2] << 6) | chunk[3]);
+            } else {
+                finished = true;
             }
             chunk_len = 0;
             padding = 0;
@@ -1595,17 +1672,29 @@ fn update_attr_for_local_tags(
 }
 
 fn replace_or_insert_xml_attr(tag: &str, attr: &str, escaped_value: &str) -> Result<String> {
-    let needle = format!("{attr}=\"");
-    if let Some(value_start) = tag.find(&needle).map(|idx| idx + needle.len()) {
-        let value_end = tag[value_start..]
-            .find('"')
-            .map(|offset| value_start + offset)
-            .ok_or_else(|| anyhow!("App Installer {attr} attribute is not closed"))?;
-        let mut out = String::with_capacity(tag.len() + escaped_value.len());
-        out.push_str(&tag[..value_start]);
-        out.push_str(escaped_value);
-        out.push_str(&tag[value_end..]);
-        return Ok(out);
+    for quote in ['"', '\''] {
+        let needle = format!("{attr}={quote}");
+        let mut search_from = 0;
+        while let Some(rel) = tag[search_from..].find(&needle) {
+            let idx = search_from + rel;
+            let boundary_ok = idx == 0 || tag.as_bytes()[idx - 1].is_ascii_whitespace();
+            let value_start = idx + needle.len();
+            if boundary_ok {
+                let value_end = tag[value_start..]
+                    .find(quote)
+                    .map(|offset| value_start + offset)
+                    .ok_or_else(|| anyhow!("App Installer {attr} attribute is not closed"))?;
+                let mut out = String::with_capacity(tag.len() + escaped_value.len());
+                out.push_str(&tag[..idx]);
+                out.push_str(attr);
+                out.push_str("=\"");
+                out.push_str(escaped_value);
+                out.push('"');
+                out.push_str(&tag[value_end + 1..]);
+                return Ok(out);
+            }
+            search_from = value_start;
+        }
     }
 
     let insert_at = tag
@@ -6199,8 +6288,11 @@ where
             use std::io::Write;
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
             let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            rdp::parse_certificate(&cert_bytes)
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
                 .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let cert_der = signer_cert
+                .to_der()
+                .context("encode signer certificate DER")?;
             let key_bytes =
                 std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
@@ -6213,7 +6305,7 @@ where
                 .with_context(|| format!("vsix-signature-xml {}", path.display()))?;
             let signature = sign_xml_signed_info(algorithm, private_key, &template.signed_info)?;
             let xml = template
-                .signature_xml(&signature, Some(&cert_bytes))
+                .signature_xml(&signature, Some(&cert_der))
                 .into_bytes();
             match output {
                 Some(path) => {
@@ -6247,11 +6339,14 @@ where
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
             let cert_bytes =
                 std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            rdp::parse_certificate(&cert_bytes)
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
                 .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let cert_der = signer_cert
+                .to_der()
+                .context("encode signer certificate DER")?;
             let signature_bytes = std::fs::read(&signature)
                 .with_context(|| format!("read {}", signature.display()))?;
-            let xml = vsix::signature_xml_path(&path, algorithm, &signature_bytes, Some(&cert_bytes))
+            let xml = vsix::signature_xml_path(&path, algorithm, &signature_bytes, Some(&cert_der))
                 .with_context(|| {
                     format!("vsix-signature-xml-from-signature {}", path.display())
                 })?;
@@ -6276,8 +6371,11 @@ where
         } => {
             let algorithm = vsix::VsixHashAlgorithm::from(algorithm);
             let cert_bytes = std::fs::read(&cert).with_context(|| format!("read {}", cert.display()))?;
-            rdp::parse_certificate(&cert_bytes)
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
                 .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let cert_der = signer_cert
+                .to_der()
+                .context("encode signer certificate DER")?;
             let key_bytes =
                 std::fs::read(&key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
@@ -6287,7 +6385,7 @@ where
             .with_context(|| format!("vsix-sign {}", path.display()))?;
             let signature = sign_xml_signed_info(algorithm, private_key, &template.signed_info)?;
             let xml = template
-                .signature_xml(&signature, Some(&cert_bytes))
+                .signature_xml(&signature, Some(&cert_der))
                 .into_bytes();
             let xml = vsix_timestamp_if_requested(xml, timestamp_url, timestamp_digest)?;
             vsix::embed_signature_xml_path(&path, &output, &xml, overwrite)

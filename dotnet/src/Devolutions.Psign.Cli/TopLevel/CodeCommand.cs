@@ -160,9 +160,20 @@ internal static class CodeCommand
             return null;
         }
 
-        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+        var digits = value.StartsWith('+') ? value[1..] : value;
+        if (digits.Length == 0)
+        {
+            throw new PsignException($"invalid value '{value}' for '--max-concurrency <MAX_CONCURRENCY>': cannot parse integer from empty string");
+        }
+
+        if (!digits.All(char.IsAsciiDigit))
         {
             throw new PsignException($"invalid value '{value}' for '--max-concurrency <MAX_CONCURRENCY>': invalid digit found in string");
+        }
+
+        if (!int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+        {
+            throw new PsignException($"invalid value '{value}' for '--max-concurrency <MAX_CONCURRENCY>': number too large to fit in target type");
         }
 
         return n;

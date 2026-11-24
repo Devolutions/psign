@@ -188,8 +188,9 @@ internal static class NuGetCommands
             {
                 var path = p.Pos("path")!;
                 var alg = Alg(p);
-                var signatureDer = Wrap($"nupkg-verify-signature {path}", () => NuGetPackage.ExtractSignaturePath(path));
-                var content = Wrap($"nupkg-verify-signature {path}", () => NuGetPackage.SignedPackageSignatureContentPath(path, alg));
+                var package = Output.ReadFile(path);
+                var signatureDer = Wrap($"nupkg-verify-signature {path}", () => Wrap($"extract NuGet signature from {path}", () => NuGetPackage.ExtractSignature(package)));
+                var content = Wrap($"nupkg-verify-signature {path}", () => Wrap($"compute signed NuGet package signature content for {path}", () => NuGetPackage.SignedPackageSignatureContent(package, alg)));
                 var parsed = Wrap("parse reconstructed NuGet signature content", () => NuGetPackage.ParseSignatureContent(content));
                 var opts = TrustArgs.Options(TrustArgs.From(p));
                 var report = Wrap($"nupkg-verify-signature {path}", () => TrustVerifyDetached.TrustVerifyDetachedBytes(content, signatureDer, opts));

@@ -181,8 +181,7 @@ public static class AuthenticodeInspector
 
                 foreach (var val in attr.Values)
                 {
-                    var payload = ValueOctets(val);
-                    var der = DecodeNestedPkcs7Payload(payload);
+                    var der = DecodeNestedPkcs7Payload(val);
                     if (der is null)
                     {
                         continue;
@@ -209,12 +208,6 @@ public static class AuthenticodeInspector
             Signers = signers,
             NestedSignatures = nested,
         };
-    }
-
-    private static byte[] ValueOctets(byte[] tlv)
-    {
-        var t = Core.Asn1.Der.First(tlv);
-        return t is null ? [] : t.Value.Value(tlv).ToArray();
     }
 
     private static CmsSignedData DecodeSignedData(ReadOnlySpan<byte> pkcs7Der)

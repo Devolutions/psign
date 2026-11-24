@@ -44,7 +44,7 @@ public static class OnlineTrust
 
     internal sealed record ParsedOcspResponse(byte[] TbsResponseDataTlv, RsaPkcs1v15Hash SignatureHash, byte[] Signature, List<ParsedOcspSingleResponse> Responses);
 
-    internal sealed record ParsedCrl(byte[] TbsTlv, RsaPkcs1v15Hash SignatureHash, byte[] Signature, DateTimeOffset ThisUpdate, DateTimeOffset NextUpdate, List<byte[]> RevokedSerialTlvs);
+    internal sealed record ParsedCrl(byte[] TbsTlv, byte[] IssuerTlv, RsaPkcs1v15Hash SignatureHash, byte[] Signature, DateTimeOffset ThisUpdate, DateTimeOffset NextUpdate, List<byte[]> RevokedSerialTlvs);
 
     /// <summary>Map a DER <c>AlgorithmIdentifier</c> to <c>sha{256,384,512}WithRSAEncryption</c> (NULL params or absent).</summary>
     internal static RsaPkcs1v15Hash? RsaHashFromAlgorithmIdentifierTlv(byte[] tlv)
@@ -123,32 +123,7 @@ public static class OnlineTrust
         return output;
     }
 
-    private static CertificateInfo ParseCertBytes(byte[] raw)
-    {
-        int start = 0;
-        while (start < raw.Length && raw[start] is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or 0x0C)
-        {
-            start++;
-        }
-
-        var trimmed = raw.AsSpan(start);
-        if (trimmed.StartsWith("-----BEGIN "u8))
-        {
-            string s;
-            try
-            {
-                s = new UTF8Encoding(false, true).GetString(trimmed);
-            }
-            catch (DecoderFallbackException e)
-            {
-                throw new PsignException($"PEM is not UTF-8: {e.Message}");
-            }
-
-            return Anchors.ParsePemCertificate(s, "PEM parse failed: ");
-        }
-
-        return Anchors.ParseDerCertificate(trimmed, "DER parse failed: ");
-    }
+    private static CertificateInfo ParseCertBytes(byte[] raw) => Anchors.ParseCertBytes(raw);
 
     /// <summary>caIssuers HTTP(S) URIs from the AIA extension.</summary>
     public static List<string> AiaCaIssuersUrls(CertificateInfo cert)
@@ -225,7 +200,7 @@ public static class OnlineTrust
             }
             catch (PsignException e) when (options.RevocationMode == RevocationMode.BestEffort)
             {
-                if (e.Message.Contains("revoked", StringComparison.Ordinal))
+                if (e.Message.StartsWith("certificate is revoked by CRL ", StringComparison.Ordinal))
                 {
                     throw;
                 }
@@ -330,13 +305,35 @@ public static class OnlineTrust
             throw PsignException.Context($"parse CRL from {url}", e);
         }
 
+        if (!crl.IssuerTlv.AsSpan().SequenceEqual(issuer.Subject))
+        {
+            throw new PsignException($"CRL issuer does not match certificate issuer for {url}");
+        }
+
         VerifyCrlSignature(crl, issuer);
         EnsureTimeWindowFresh("CRL", crl.ThisUpdate, crl.NextUpdate);
         var serial = cert.SerialNumberEncoded;
-        if (crl.RevokedSerialTlvs.Any(s => s.AsSpan().SequenceEqual(serial)))
+        var serialVal = new System.Numerics.BigInteger(cert.SerialNumber, isUnsigned: false, isBigEndian: true);
+        if (crl.RevokedSerialTlvs.Any(s => SerialTlvMatches(s, serial, serialVal)))
         {
             throw new PsignException($"certificate is revoked by CRL {url}");
         }
+    }
+
+    private static bool SerialTlvMatches(byte[] tlv, byte[] expectedTlv, System.Numerics.BigInteger expectedValue)
+    {
+        if (tlv.AsSpan().SequenceEqual(expectedTlv))
+        {
+            return true;
+        }
+
+        var parsed = Der.First(tlv);
+        if (parsed is null || parsed.Value.Tag != 0x02 || parsed.Value.ValueLength == 0)
+        {
+            return false;
+        }
+
+        return new System.Numerics.BigInteger(parsed.Value.Value(tlv), isUnsigned: false, isBigEndian: true) == expectedValue;
     }
 
     private static T Ctx<T>(string context, Func<T> f)
@@ -363,6 +360,11 @@ public static class OnlineTrust
         }
 
         var rbTlv = ReadTlv(outer, ref pos);
+        if (pos != outer.Length)
+        {
+            throw new PsignException("OCSPResponse has trailing fields");
+        }
+
         var responseBytes = Ctx("responseBytes", () => ExpectTlv(rbTlv, 0xa0));
         var rb = Ctx("ResponseBytes", () => ExpectTlv(responseBytes, 0x30));
         int rbPos = 0;
@@ -373,6 +375,11 @@ public static class OnlineTrust
         }
 
         var responseTlv = Ctx("ResponseBytes.response", () => ReadTlv(rb, ref rbPos));
+        if (rbPos != rb.Length)
+        {
+            throw new PsignException("ResponseBytes has trailing fields");
+        }
+
         var basicOctets = Ctx("ResponseBytes.response OCTET STRING", () => ExpectTlv(responseTlv, 0x04));
         return ParseBasicOcspResponseDer(basicOctets);
     }
@@ -478,7 +485,7 @@ public static class OnlineTrust
             throw new PsignException("CRL signatureAlgorithm does not match TBSCertList.signature");
         }
 
-        Ctx("TBSCertList.issuer", () => ReadTlv(tbs, ref tbsPos));
+        var issuerTlv = Ctx("TBSCertList.issuer", () => ReadTlv(tbs, ref tbsPos));
         var thisUpdateTlv = Ctx("TBSCertList.thisUpdate", () => ReadTlv(tbs, ref tbsPos));
         var thisUpdate = Ctx("TBSCertList.thisUpdate", () => ParseDerTimeTlv(thisUpdateTlv));
         DateTimeOffset nextUpdate;
@@ -503,11 +510,13 @@ public static class OnlineTrust
                 var entryTlv = ReadTlv(list, ref rpos);
                 var entry = Ctx("RevokedCertificate", () => ExpectTlv(entryTlv, 0x30));
                 int epos = 0;
-                revoked.Add(Ctx("RevokedCertificate.userCertificate", () => ReadTlv(entry, ref epos)));
+                var serialTlv = Ctx("RevokedCertificate.userCertificate", () => ReadTlv(entry, ref epos));
+                Ctx("RevokedCertificate.userCertificate INTEGER", () => ExpectTlv(serialTlv, 0x02));
+                revoked.Add(serialTlv);
             }
         }
 
-        return new ParsedCrl(tbsTlv, signatureHash, signatureBody[1..], thisUpdate, nextUpdate, revoked);
+        return new ParsedCrl(tbsTlv, issuerTlv, signatureHash, signatureBody[1..], thisUpdate, nextUpdate, revoked);
     }
 
     internal static void VerifyCrlSignature(ParsedCrl crl, CertificateInfo issuer) =>
@@ -628,6 +637,11 @@ public static class OnlineTrust
             int adPos = 0;
             var method = Ctx("AccessDescription.accessMethod", () => ReadTlv(ad, ref adPos));
             var location = Ctx("AccessDescription.accessLocation", () => ReadTlv(ad, ref adPos));
+            if (adPos != ad.Length)
+            {
+                throw new PsignException("AccessDescription has trailing fields");
+            }
+
             if (method.AsSpan().SequenceEqual(OcspOidDer) && location is [0x86, ..])
             {
                 var body = Ctx("uniformResourceIdentifier", () => ExpectTlv(location, 0x86));
@@ -676,30 +690,43 @@ public static class OnlineTrust
     internal static List<string> ParseHttpUriGeneralNames(byte[] input)
     {
         var urls = new List<string>();
-        int pos = 0;
-        while (pos < input.Length)
+        CollectHttpUriGeneralNames(input, 0, input.Length, urls, depth: 0);
+        return urls;
+    }
+
+    private static void CollectHttpUriGeneralNames(byte[] input, int start, int end, List<string> urls, int depth)
+    {
+        if (depth > 32)
         {
-            if (input[pos] == 0x86)
-            {
-                var (bodyStart, len) = ReadLen(input, pos + 1);
-                long end = (long)bodyStart + len;
-                if (end <= input.Length)
-                {
-                    var uri = Utf8Strict(input[bodyStart..(int)end], "URI is not UTF-8");
-                    if (uri.StartsWith("http://", StringComparison.Ordinal))
-                    {
-                        urls.Add(uri);
-                    }
-
-                    pos = (int)end;
-                    continue;
-                }
-            }
-
-            pos++;
+            return;
         }
 
-        return urls;
+        int pos = start;
+        while (pos < end)
+        {
+            byte tag = input[pos];
+            var (bodyStart, len) = ReadLen(input, pos + 1);
+            long tlvEnd = (long)bodyStart + len;
+            if (tlvEnd > end)
+            {
+                throw new PsignException("TLV length exceeds input");
+            }
+
+            if (tag == 0x86)
+            {
+                var uri = Utf8Strict(input[bodyStart..(int)tlvEnd], "URI is not UTF-8");
+                if (uri.StartsWith("http://", StringComparison.Ordinal))
+                {
+                    urls.Add(uri);
+                }
+            }
+            else if ((tag & 0x20) != 0)
+            {
+                CollectHttpUriGeneralNames(input, bodyStart, (int)tlvEnd, urls, depth + 1);
+            }
+
+            pos = (int)tlvEnd;
+        }
     }
 
     /// <summary>GET with the online size/time limits (also used by the AuthRoot cache downloader).</summary>
@@ -717,9 +744,11 @@ public static class OnlineTrust
         }
 
         var withoutScheme = url["http://".Length..];
-        int slash = withoutScheme.IndexOf('/');
-        string authority = slash >= 0 ? withoutScheme[..slash] : withoutScheme;
-        string path = slash >= 0 ? withoutScheme[slash..] : "/";
+        int delim = withoutScheme.IndexOfAny(['/', '?', '#']);
+        string authority = delim >= 0 ? withoutScheme[..delim] : withoutScheme;
+        string path = delim < 0
+            ? "/"
+            : withoutScheme[delim] == '/' ? withoutScheme[delim..] : "/" + withoutScheme[delim..];
         string host = authority;
         int port = 80;
         int colon = authority.LastIndexOf(':');
@@ -732,6 +761,16 @@ public static class OnlineTrust
         if (host.Length == 0)
         {
             throw new PsignException($"{Context} URL host is empty");
+        }
+
+        if (options.Timeout <= TimeSpan.Zero)
+        {
+            throw new PsignException($"{Context} timeout must be positive");
+        }
+
+        if (options.MaxDownloadBytes <= 0)
+        {
+            throw new PsignException($"{Context} max download size must be positive");
         }
 
         using var handler = new SocketsHttpHandler
@@ -792,7 +831,7 @@ public static class OnlineTrust
                 while ((n = stream.Read(buf, 0, buf.Length)) > 0)
                 {
                     ms.Write(buf, 0, n);
-                    if (ms.Length > options.MaxDownloadBytes + (64 * 1024))
+                    if (ms.Length > (long)options.MaxDownloadBytes + (64 * 1024))
                     {
                         throw new PsignException($"{Context} HTTP response exceeds configured size limit");
                     }
@@ -882,7 +921,18 @@ public static class OnlineTrust
                 throw new PsignException("truncated length");
             }
 
-            len = (len << 8) | input[pos++];
+            byte b = input[pos++];
+            if (i == 0 && b == 0)
+            {
+                throw new PsignException("non-minimal DER length");
+            }
+
+            len = (len << 8) | b;
+        }
+
+        if (len < 0x80)
+        {
+            throw new PsignException("non-minimal DER length");
         }
 
         return (pos, len);

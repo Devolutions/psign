@@ -62,7 +62,8 @@ public static class ArtifactSigningCertificates
 
         if (text is not null)
         {
-            var compact = new string(text.Where(c => c is not (' ' or '\t' or '\n' or '\r' or '\f')).ToArray());
+            var body = text.TrimStart('\uFEFF');
+            var compact = new string(body.Where(c => c is not (' ' or '\t' or '\n' or '\r' or '\f')).ToArray());
             if (compact.Length > 0 && compact.All(c => char.IsAsciiLetterOrDigit(c) || c is '+' or '/' or '='))
             {
                 byte[] decoded;

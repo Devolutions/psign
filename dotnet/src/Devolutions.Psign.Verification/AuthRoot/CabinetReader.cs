@@ -154,7 +154,12 @@ internal sealed class CabinetReader
             cab._folders.Add(new Folder(firstData, blocks, compression));
         }
 
-        r.Pos = checked((int)firstFileOffset);
+        if (firstFileOffset > (uint)data.Length)
+        {
+            throw new EndOfStreamException("failed to fill whole buffer");
+        }
+
+        r.Pos = (int)firstFileOffset;
         for (int i = 0; i < numFiles; i++)
         {
             uint size = r.U32();
@@ -252,7 +257,12 @@ internal sealed class CabinetReader
         long need = (long)entry.UncompressedOffset + entry.UncompressedSize;
         using var output = new MemoryStream();
         var inflater = new MsZipInflater();
-        var r = new Cursor(_data, checked((int)folder.FirstDataOffset));
+        if (folder.FirstDataOffset > (uint)_data.Length)
+        {
+            throw new EndOfStreamException("failed to fill whole buffer");
+        }
+
+        var r = new Cursor(_data, (int)folder.FirstDataOffset);
         int ctype = folder.CompressionType & 0x000F;
         for (int i = 0; i < folder.NumDataBlocks && output.Length < need; i++)
         {
@@ -283,9 +293,12 @@ internal sealed class CabinetReader
             output.Write(block);
         }
 
+        if (output.Length < need)
+        {
+            throw new EndOfStreamException("failed to fill whole buffer");
+        }
+
         var all = output.GetBuffer();
-        long available = output.Length - entry.UncompressedOffset;
-        int take = (int)Math.Max(0, Math.Min(entry.UncompressedSize, available));
-        return all.AsSpan((int)Math.Min(entry.UncompressedOffset, output.Length), take).ToArray();
+        return all.AsSpan((int)entry.UncompressedOffset, (int)entry.UncompressedSize).ToArray();
     }
 }

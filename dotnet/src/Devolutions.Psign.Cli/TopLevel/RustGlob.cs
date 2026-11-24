@@ -63,10 +63,24 @@ internal static class RustGlob
         public bool Matches(string name)
         {
             var chars = CodePoints(name);
-            return MatchFrom(chars, 0, 0);
+            var memo = new sbyte[(chars.Length + 1) * (Tokens.Count + 1)];
+            return MatchFrom(chars, 0, 0, memo);
         }
 
-        private bool MatchFrom(int[] file, int fi, int ti)
+        private bool MatchFrom(int[] file, int fi, int ti, sbyte[] memo)
+        {
+            int key = (fi * (Tokens.Count + 1)) + ti;
+            if (memo[key] != 0)
+            {
+                return memo[key] > 0;
+            }
+
+            bool matched = MatchFromCore(file, fi, ti, memo);
+            memo[key] = matched ? (sbyte)1 : (sbyte)-1;
+            return matched;
+        }
+
+        private bool MatchFromCore(int[] file, int fi, int ti, sbyte[] memo)
         {
             for (; ti < Tokens.Count; ti++)
             {
@@ -83,7 +97,7 @@ internal static class RustGlob
                                 continue;
                             }
 
-                            if (MatchFrom(file, k, ti + 1))
+                            if (MatchFrom(file, k, ti + 1, memo))
                             {
                                 return true;
                             }
@@ -177,6 +191,8 @@ internal static class RustGlob
         }
 
         var todo = new List<TodoItem>();
+        var visitedRecursiveDirs = new HashSet<string>(
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         FillTodo(todo, dirPatterns, 0, FromPath(scopePath));
 
         while (todo.Count > 0)
@@ -211,7 +227,12 @@ internal static class RustGlob
 
                 if (entry.IsDirectory)
                 {
-                    FillTodo(todo, dirPatterns, next, entry);
+                    var canonical = CanonicalDirKey(entry.Path);
+                    if (visitedRecursiveDirs.Add($"{next}:{canonical}"))
+                    {
+                        FillTodo(todo, dirPatterns, next, entry);
+                    }
+
                     if (next == dirPatterns.Count - 1)
                     {
                         yield return entry.Path;
@@ -291,7 +312,7 @@ internal static class RustGlob
         {
             children = ReadDir(path.Path, curdir);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or NotSupportedException)
         {
             todo.Add(new TodoItem(null, 0, new PsignException($"attempting to read `{path.Path}` resulted in an error: {IoErrorText.Message(e)}")));
             return;
@@ -336,6 +357,24 @@ internal static class RustGlob
         }
 
         return list;
+    }
+
+    private static string CanonicalDirKey(string path)
+    {
+        try
+        {
+            var di = new DirectoryInfo(path);
+            if (di.LinkTarget is not null && di.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+            {
+                return Path.GetFullPath(target.FullName);
+            }
+
+            return Path.GetFullPath(path);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return path;
+        }
     }
 
     private static PathEntry FromPath(string path) => new(path, Devolutions.Psign.Signing.Portable.RustPath.FileName(path), Directory.Exists(path));
@@ -521,7 +560,7 @@ internal static class RustGlob
                                 throw PatternError(old - 1, ErrorRecursiveWildcards);
                             }
 
-                            if (!(tokens.Count > 1 && tokens[^1].Kind == TokenKind.AnyRecursiveSequence))
+                            if (!(tokens.Count > 0 && tokens[^1].Kind == TokenKind.AnyRecursiveSequence))
                             {
                                 isRecursive = true;
                                 tokens.Add(new Token(TokenKind.AnyRecursiveSequence));

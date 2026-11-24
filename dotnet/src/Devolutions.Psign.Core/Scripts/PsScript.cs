@@ -248,7 +248,13 @@ public static class PsScript
         }
 
         var embedded = sig.Digest;
-        var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var kind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (embedded.Length != kind.DigestLength())
+        {
+            throw new PsignException(
+                $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+        }
         var stripped = StripSignatureRegionUtf16(VerifierUnits(raw), family);
         var computed = HashPayload(kind, Utf16LeBytes(stripped));
         if (!computed.AsSpan().SequenceEqual(embedded))
@@ -268,5 +274,5 @@ public static class PsScript
     /// <c>script_authenticode_spc_indirect_data</c>.
     /// </summary>
     public static byte[] SigningDigest(ReadOnlySpan<byte> script, AuthenticodeHashKind kind) =>
-        HashPayload(kind, Utf16LeBytes(FileUtf16Units(script)));
+        HashPayload(kind, Utf16LeBytes(VerifierUnits(script)));
 }

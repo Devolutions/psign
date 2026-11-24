@@ -51,7 +51,7 @@ fn tlv_outer_sequence_payload(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
     let (len, hdr) = parse_der_definite_length(&data[1..])?;
-    let total = 1 + hdr + len;
+    let total = 1usize.checked_add(hdr)?.checked_add(len)?;
     if data.len() < total {
         return None;
     }
@@ -210,7 +210,7 @@ pub fn der_tlv_total_len_from_start(data: &[u8]) -> Option<usize> {
         return None;
     }
     let (content_len, hdr) = parse_der_definite_length(&data[1..])?;
-    Some(1 + hdr + content_len)
+    1usize.checked_add(hdr)?.checked_add(content_len)
 }
 
 /// PKCS#7 **`ContentInfo`** bytes at the start of **`data`**, trimming trailing octets (e.g. **`WIN_CERTIFICATE`** 8-byte alignment padding).
@@ -234,7 +234,10 @@ pub fn normalize_pkcs7_der_for_authenticode(sig_blob: &[u8]) -> Cow<'_, [u8]> {
     };
     let normalized = match inner.first().copied() {
         Some(0x06) => Cow::Borrowed(sig_blob),
-        Some(0x02) => Cow::Owned(pkcs7_content_info_signed_data(sig_blob)),
+        Some(0x02) => {
+            let outer = pkcs7_outer_sequence_prefix(sig_blob).unwrap_or(sig_blob);
+            Cow::Owned(pkcs7_content_info_signed_data(outer))
+        }
         _ => Cow::Borrowed(sig_blob),
     };
     match dedupe_signed_data_certificate_set(normalized.as_ref()) {

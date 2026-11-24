@@ -102,7 +102,7 @@ public static class Output
         {
             return File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException(context ?? $"read {path}", IoErrorText.Inner(e));
         }
@@ -115,7 +115,7 @@ public static class Output
         {
             File.WriteAllBytes(path, data.ToArray());
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException(context ?? $"write {path}", IoErrorText.Inner(e));
         }
@@ -137,7 +137,7 @@ public static class Output
                     File.WriteAllBytes(outputPath, Utf8NoBom.GetBytes(Hex.Lower(digest) + "\n"));
                 }
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
                 throw new PsignException($"create {outputPath}", IoErrorText.Inner(e));
             }

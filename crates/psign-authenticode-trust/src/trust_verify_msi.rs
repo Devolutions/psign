@@ -27,6 +27,7 @@ pub fn trust_verify_msi_bytes(
             "MSI Authenticode digest mismatch before trust checks (Rust SIP vs PKCS#7 indirect digest)"
         ));
     }
+    psign_sip_digest::msi_digest::verify_msi_digest_consistency_bytes(data)?;
 
     let mut report = TrustVerifyPeReport::new(&anchors);
     verify_pkcs7_entry(

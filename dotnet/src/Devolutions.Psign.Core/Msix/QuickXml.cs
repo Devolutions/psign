@@ -55,7 +55,7 @@ internal sealed class XmlEvent
         get
         {
             var name = Kind == XmlEventKind.End ? Content.AsSpan() : Name;
-            int colon = name.IndexOf((byte)':');
+            int colon = name.LastIndexOf((byte)':');
             return Encoding.UTF8.GetString(colon >= 0 ? name[(colon + 1)..] : name);
         }
     }

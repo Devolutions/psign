@@ -1019,15 +1019,17 @@ internal sealed class CfbFile
     private List<uint> ChainSectors(uint start)
     {
         var ids = new List<uint>();
+        var seen = new HashSet<uint>();
         uint current = start;
         while (current != EndOfChain)
         {
-            ids.Add(current);
-            current = Next(current);
-            if (current == start)
+            if (!seen.Add(current))
             {
                 throw Error($"Chain contained duplicate sector id {current}");
             }
+
+            ids.Add(current);
+            current = Next(current);
         }
 
         return ids;
@@ -1282,15 +1284,17 @@ internal sealed class CfbFile
     private List<uint> MiniChainSectors(uint start)
     {
         var ids = new List<uint>();
+        var seen = new HashSet<uint>();
         uint current = start;
         while (current != EndOfChain)
         {
-            ids.Add(current);
-            current = NextMiniSector(current);
-            if (current == start)
+            if (!seen.Add(current))
             {
                 throw Error($"Minichain contained duplicate sector id {current}");
             }
+
+            ids.Add(current);
+            current = NextMiniSector(current);
         }
 
         return ids;
@@ -1783,7 +1787,7 @@ internal sealed class CfbFile
             }
 
             streamId = (uint)existing.Id;
-            if (existing.StreamLength != 0)
+            if (existing.StreamLength != 0 || existing.StartSector != EndOfChain)
             {
                 ResizeStream(streamId, 0);
             }

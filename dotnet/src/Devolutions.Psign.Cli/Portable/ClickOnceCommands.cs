@@ -421,14 +421,12 @@ internal static class ClickOnceCommands
         var bytes = Output.ReadFile(cert);
         try
         {
-            CertificateLoader.ParseCertificate(bytes);
+            return CertificateLoader.ParseCertificate(bytes).RawData;
         }
         catch (PsignException e)
         {
             throw new PsignException($"parse signer certificate {cert}", e);
         }
-
-        return bytes;
     }
 
     private static long StatLength(string path)
@@ -442,7 +440,7 @@ internal static class ClickOnceCommands
 
             return new FileInfo(path).Length;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"stat {path}", new PsignException(IoErrorText.Message(e)));
         }
@@ -462,7 +460,7 @@ internal static class ClickOnceCommands
             File.Copy(input, output, overwrite: true);
             return new FileInfo(output).Length;
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"copy {input} to {output}", new PsignException(IoErrorText.Message(e)));
         }

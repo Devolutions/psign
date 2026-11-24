@@ -356,6 +356,36 @@ pub fn msi_rsa_sha256_signer_prehash_digest(data: &[u8], signer_index: usize) ->
     crate::pkcs7::signed_data_rsa_sha256_signer_prehash_digest(&sd, signer_index)
 }
 
+/// Compare PKCS#7 indirect digest with a Rust MSI SIP fingerprint (Signify-compatible) from in-memory bytes.
+pub fn verify_msi_digest_consistency_bytes(data: &[u8]) -> Result<()> {
+    let mut cfb = CompoundFile::open(Cursor::new(data))?;
+
+    let pkcs7 = msi_digital_signature_pkcs7_from_cfb(&mut cfb)?;
+    let sig = AuthenticodeSignature::from_bytes(&pkcs7)
+        .map_err(|e| anyhow!("MSI Authenticode PKCS#7 parse failed: {e}"))?;
+    let embedded = sig.digest();
+    let kind = PeAuthenticodeHashKind::from_digest_byte_len(embedded.len())?;
+
+    let computed = compute_msi_fingerprint(&mut cfb, kind)?;
+    if computed.as_slice() != embedded {
+        return Err(anyhow!(
+            "MSI Authenticode digest mismatch (Rust SIP fingerprint vs PKCS#7 indirect digest)"
+        ));
+    }
+
+    if msi_has_extended(&cfb) {
+        let expected = read_stream_all(&mut cfb, &root_stream(EXTENDED_SIGNATURE_ENTRY))?;
+        let pre = compute_prehash(&cfb, kind)?;
+        if pre != expected {
+            return Err(anyhow!(
+                "MSI extended metadata digest mismatch (MsiDigitalSignatureEx stream vs Rust pre-hash)"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Compare PKCS#7 indirect digest with a Rust MSI SIP fingerprint (Signify-compatible).
 pub fn verify_msi_digest_consistency(path: &Path) -> Result<()> {
     let mut cfb = CompoundFile::open(File::open(path)?)?;

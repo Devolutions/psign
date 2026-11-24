@@ -84,7 +84,7 @@ public static partial class DistinguishedName
     public static List<List<X500Attribute>> Decode(ReadOnlySpan<byte> nameDer)
     {
         var outer = Der.First(nameDer);
-        if (outer is null || outer.Value.Tag != 0x30)
+        if (outer is null || outer.Value.Tag != 0x30 || outer.Value.End != nameDer.Length)
         {
             throw new PsignException("X.500 Name: expected SEQUENCE");
         }
@@ -100,6 +100,11 @@ public static partial class DistinguishedName
             var rdn = new List<X500Attribute>();
             foreach (var atv in Der.Children(nameDer, set) ?? throw new PsignException("X.500 Name: malformed RDN"))
             {
+                if (atv.Tag != 0x30)
+                {
+                    throw new PsignException("X.500 Name: malformed AttributeTypeAndValue");
+                }
+
                 var parts = Der.Children(nameDer, atv);
                 if (parts is not { Count: 2 } || parts[0].Tag != 0x06)
                 {
@@ -536,6 +541,14 @@ public static partial class DistinguishedName
         }
 
         var arcs = dotted.Split('.');
+        foreach (var arc in arcs)
+        {
+            if (arc.Length > 1 && arc[0] == '0')
+            {
+                return false;
+            }
+        }
+
         if (!uint.TryParse(arcs[0], NumberStyles.None, CultureInfo.InvariantCulture, out var first) || first > 2)
         {
             return false;
@@ -546,7 +559,25 @@ public static partial class DistinguishedName
             return false;
         }
 
-        return first == 2 || second < 40;
+        if (first < 2 && second >= 40)
+        {
+            return false;
+        }
+
+        if (first == 2 && second > ulong.MaxValue - 80)
+        {
+            return false;
+        }
+
+        for (var i = 2; i < arcs.Length; i++)
+        {
+            if (!ulong.TryParse(arcs[i], NumberStyles.None, CultureInfo.InvariantCulture, out _))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     [GeneratedRegex(@"^[0-9]+(\.[0-9]+)+$")]

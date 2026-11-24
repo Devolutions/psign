@@ -235,6 +235,9 @@ pub fn pkifailure_info_flag_labels_from_bit_string_tlv(tlv: &[u8]) -> Option<Vec
     if tlv.first().copied()? != 0x03 {
         return None;
     }
+    if der_definite_tlv_total_len(tlv)? != tlv.len() {
+        return None;
+    }
     let body = der_tlv_body(tlv)?;
     let (&unused_u8, value_octets) = body.split_first()?;
     let unused = unused_u8 as usize;
@@ -242,7 +245,7 @@ pub fn pkifailure_info_flag_labels_from_bit_string_tlv(tlv: &[u8]) -> Option<Vec
         return None;
     }
     if value_octets.is_empty() {
-        return Some(Vec::new());
+        return (unused == 0).then(Vec::new);
     }
     if value_octets.len().checked_mul(8)? < unused {
         return None;
@@ -291,13 +294,18 @@ fn der_definite_tlv_total_len(input: &[u8]) -> Option<usize> {
     pos += 1;
     let body_len = if ll < 0x80 {
         ll as usize
-    } else if ll == 0x81 {
-        let v = *input.get(pos)? as usize;
-        pos += 1;
-        v
-    } else if ll == 0x82 {
-        let v = ((*input.get(pos)? as usize) << 8) | (*input.get(pos + 1)? as usize);
-        pos += 2;
+    } else if (0x81..=0x84).contains(&ll) {
+        let n = (ll & 0x7f) as usize;
+        if input.len() < pos + n {
+            return None;
+        }
+        let mut v = 0usize;
+        for i in 0..n {
+            v = v
+                .checked_shl(8)?
+                .checked_add(*input.get(pos + i)? as usize)?;
+        }
+        pos += n;
         v
     } else {
         return None;
@@ -326,10 +334,8 @@ fn tlv_len_field_size(tlv: &[u8]) -> Option<usize> {
     let ll = *tlv.get(1)?;
     Some(if ll < 0x80 {
         1
-    } else if ll == 0x81 {
-        2
-    } else if ll == 0x82 {
-        3
+    } else if (0x81..=0x84).contains(&ll) {
+        1 + (ll & 0x7f) as usize
     } else {
         return None;
     })

@@ -37,7 +37,14 @@ public sealed class TimestampClient : IDisposable
     public async Task<byte[]> PostTimestampRequestAsync(string url, byte[] timeStampReqDer, CancellationToken cancellationToken = default)
     {
         var target = url.Trim();
-        using var request = new HttpRequestMessage(HttpMethod.Post, target) { Content = new ByteArrayContent(timeStampReqDer) };
+        if (!Uri.TryCreate(target, UriKind.Absolute, out var targetUri)
+            || (!string.Equals(targetUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(targetUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new PsignException($"POST TimeStampReq to {target}: invalid URL");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, targetUri) { Content = new ByteArrayContent(timeStampReqDer) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/timestamp-query");
         request.Headers.TryAddWithoutValidation("Accept", "application/timestamp-reply, application/timestamp-response");
         var rsp = await _http.SendAsync(request, Timeout, $"POST TimeStampReq to {target}", cancellationToken).ConfigureAwait(false);
@@ -76,10 +83,18 @@ public sealed class TimestampClient : IDisposable
     /// <inheritdoc cref="RequestToken"/>
     public async Task<byte[]> RequestTokenAsync(string timestampServer, AuthenticodeHashKind algorithm, byte[] stamped, CancellationToken cancellationToken = default)
     {
+        var target = timestampServer.Trim();
+        if (!Uri.TryCreate(target, UriKind.Absolute, out var targetUri)
+            || (!string.Equals(targetUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(targetUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new PsignException($"POST TimeStampReq to {target}: invalid URL");
+        }
+
         var imprint = algorithm.Hash(stamped);
         var requestDer = BuildRequest(algorithm, imprint)
             ?? throw new PsignException("build RFC3161 TimeStampReq");
-        using var request = new HttpRequestMessage(HttpMethod.Post, timestampServer) { Content = new ByteArrayContent(requestDer) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, targetUri) { Content = new ByteArrayContent(requestDer) };
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/timestamp-query");
         request.Headers.TryAddWithoutValidation("Accept", "application/timestamp-reply");
         var rsp = await _http.SendAsync(request, Timeout, $"POST TimeStampReq to {timestampServer}", cancellationToken).ConfigureAwait(false);
@@ -105,7 +120,7 @@ public sealed class TimestampClient : IDisposable
         {
             sd = CmsSignedData.Parse(pkcs7Der);
         }
-        catch (PsignException e)
+        catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException or FormatException)
         {
             throw new PsignException("parse PKCS#7 SignedData", e);
         }

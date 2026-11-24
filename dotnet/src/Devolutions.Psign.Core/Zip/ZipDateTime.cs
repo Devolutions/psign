@@ -35,7 +35,7 @@ public readonly record struct ZipDateTime
     /// <summary>Validated constructor (Rust <c>DateTime::from_date_and_time</c>); returns <c>null</c> when out of range.</summary>
     public static ZipDateTime? FromDateAndTime(int year, int month, int day, int hour, int minute, int second)
     {
-        if (year >= 1980 && year <= 2107 && month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 60
+        if (year >= 1980 && year <= 2107 && month >= 1 && month <= 12 && day >= 1 && day <= DateTime.DaysInMonth(year, month) && hour <= 23 && minute <= 59 && second <= 60
             && hour >= 0 && minute >= 0 && second >= 0)
         {
             return new ZipDateTime(year, month, day, hour, minute, second);
@@ -57,10 +57,10 @@ public readonly record struct ZipDateTime
     }
 
     /// <summary>MS-DOS date field.</summary>
-    public ushort DatePart => (ushort)(Day | (Month << 5) | ((Year - 1980) << 9));
+    public ushort DatePart => (ushort)((Day & 0x1F) | ((Month & 0x0F) << 5) | (Math.Clamp(Year - 1980, 0, 127) << 9));
 
     /// <summary>MS-DOS time field.</summary>
-    public ushort TimePart => (ushort)((Second >> 1) | (Minute << 5) | (Hour << 11));
+    public ushort TimePart => (ushort)(((Second >> 1) & 0x1F) | ((Minute & 0x3F) << 5) | ((Hour & 0x1F) << 11));
 
     /// <summary>Sort key (year, month, day, hour, minute, second).</summary>
     public long SortKey => ((((((long)Year * 100) + Month) * 100 + Day) * 100 + Hour) * 100 + Minute) * 100 + Second;

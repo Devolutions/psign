@@ -65,7 +65,7 @@ internal static class AuthRootCache
             writeVerbose?.Invoke($"AuthRoot CAB cached at: {cabPath}");
             return cabPath;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException)
         {
             writeVerbose?.Invoke($"AuthRoot CAB download failed: {ex.Message}");
 
@@ -136,8 +136,18 @@ internal static class AuthRootCache
                 return true;
             }
 
+            DateTimeOffset? downloadedAt = meta.DownloadedAtUnixSecs is { } secs && secs >= 0
+                ? DateTimeOffset.FromUnixTimeSeconds(secs)
+                : meta.DownloadedAtUtc is { } dt
+                    ? new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc))
+                    : null;
+            if (downloadedAt is null)
+            {
+                return true;
+            }
+
             int maxAgeDays = GetMaxAgeDays();
-            return (DateTime.UtcNow - meta.DownloadedAtUtc).TotalDays > maxAgeDays;
+            return (DateTimeOffset.UtcNow - downloadedAt.Value).TotalDays > maxAgeDays;
         }
         catch
         {
@@ -148,39 +158,104 @@ internal static class AuthRootCache
     private static int GetMaxAgeDays()
     {
         string? envValue = Environment.GetEnvironmentVariable(MaxAgeEnvVar);
-        if (envValue is not null && int.TryParse(envValue, out int days) && days > 0)
+        if (envValue is not null
+            && int.TryParse(envValue.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int days)
+            && days > 0)
         {
             return days;
         }
         return DefaultMaxAgeDays;
     }
 
+    private const int DefaultMaxDownloadBytes = 2 * 1024 * 1024;
+
     private static void DownloadCab(string cabPath, string metaPath, string sourceUrl)
     {
-        using HttpResponseMessage response = SharedClient.GetAsync(sourceUrl).GetAwaiter().GetResult();
-        response.EnsureSuccessStatusCode();
+        byte[] bytes = Task.Run(async () =>
+        {
+            using CancellationTokenSource cts = new(TimeSpan.FromSeconds(30));
+            using HttpResponseMessage response = await SharedClient
+                .GetAsync(sourceUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
 
-        byte[] bytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+            await using Stream stream = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false);
+            using MemoryStream ms = new();
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cts.Token).ConfigureAwait(false)) > 0)
+            {
+                ms.Write(buffer, 0, read);
+                if (ms.Length > DefaultMaxDownloadBytes)
+                {
+                    throw new IOException($"AuthRoot CAB download exceeded {DefaultMaxDownloadBytes} bytes.");
+                }
+            }
 
-        string tempCab = cabPath + ".tmp";
-        File.WriteAllBytes(tempCab, bytes);
-        File.Move(tempCab, cabPath, overwrite: true);
+            return ms.ToArray();
+        }).GetAwaiter().GetResult();
 
+        if (bytes.Length == 0)
+        {
+            throw new IOException("AuthRoot CAB download returned an empty response.");
+        }
+
+        string tempCab = $"{cabPath}.tmp-{Environment.ProcessId}-{Guid.NewGuid():N}";
+        try
+        {
+            File.WriteAllBytes(tempCab, bytes);
+            File.Move(tempCab, cabPath, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(tempCab);
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
         AuthRootMeta meta = new()
         {
-            DownloadedAtUtc = DateTime.UtcNow,
+            DownloadedAtUtc = now.UtcDateTime,
+            DownloadedAtUnixSecs = now.ToUnixTimeSeconds(),
             SourceUrl = sourceUrl,
             SizeBytes = bytes.Length,
         };
 
         string metaJson = JsonSerializer.Serialize(meta, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(metaPath, metaJson);
+        string tempMeta = $"{metaPath}.tmp-{Environment.ProcessId}-{Guid.NewGuid():N}";
+        try
+        {
+            File.WriteAllText(tempMeta, metaJson);
+            File.Move(tempMeta, metaPath, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(tempMeta);
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
     }
 
     private sealed class AuthRootMeta
     {
         [JsonPropertyName("downloaded_at_utc")]
-        public DateTime DownloadedAtUtc { get; init; }
+        public DateTime? DownloadedAtUtc { get; init; }
+
+        [JsonPropertyName("downloaded_at_unix_secs")]
+        public long? DownloadedAtUnixSecs { get; init; }
 
         [JsonPropertyName("source_url")]
         public string SourceUrl { get; init; } = string.Empty;

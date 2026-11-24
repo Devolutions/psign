@@ -347,6 +347,18 @@ public static class CodePlanner
                     continue;
                 }
 
+                if (RustPath.IsExtension(name, "app"))
+                {
+                    var appBytes = archive.Read(file);
+                    if (CodeFormats.Detect(name, appBytes, haveBytes: true) == CodeFormat.Unknown)
+                    {
+                        continue;
+                    }
+
+                    entries.Add(new NestedEntry(display, outputDisplay, depth, appBytes));
+                    continue;
+                }
+
                 if (CodeFormats.Detect(name) == CodeFormat.Unknown)
                 {
                     continue;

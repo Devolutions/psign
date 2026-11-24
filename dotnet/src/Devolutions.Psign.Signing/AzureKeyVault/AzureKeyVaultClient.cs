@@ -104,11 +104,17 @@ public sealed class AzureKeyVaultClient : IDisposable
 
         if (p.ManagedIdentity)
         {
-            var url = ImdsEndpoint + "?" + HttpText.FormEncode(new KeyValuePair<string, string>[]
+            var query = new List<KeyValuePair<string, string>>
             {
                 new("api-version", "2018-02-01"),
                 new("resource", "https://vault.azure.net"),
-            });
+            };
+            if (NonBlank(p.ClientId) is { } miClientId)
+            {
+                query.Add(new("client_id", miClientId));
+            }
+
+            var url = ImdsEndpoint + (ImdsEndpoint.Contains('?', StringComparison.Ordinal) ? "&" : "?") + HttpText.FormEncode(query);
             using var miRequest = new HttpRequestMessage(HttpMethod.Get, url);
             miRequest.Headers.TryAddWithoutValidation("Metadata", "true");
             var mi = await _http.SendAsync(miRequest, TimeSpan.FromSeconds(120), "managed identity token request (IMDS)", cancellationToken).ConfigureAwait(false);
@@ -123,8 +129,8 @@ public sealed class AzureKeyVaultClient : IDisposable
         var tenant = NonBlank(p.TenantId) ?? throw new PsignException("client credentials require tenant id");
         var clientId = NonBlank(p.ClientId) ?? throw new PsignException("client credentials require client id");
         var secret = NonBlank(p.ClientSecret) ?? throw new PsignException("client credentials require client secret");
-        var authority = NonBlank(p.Authority) ?? "https://login.microsoftonline.com";
-        var tokenUrl = $"{authority}/{tenant}/oauth2/v2.0/token";
+        var authority = (NonBlank(p.Authority) ?? "https://login.microsoftonline.com").TrimEnd('/');
+        var tokenUrl = $"{authority}/{HttpText.EncodePathSegment(tenant)}/oauth2/v2.0/token";
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
         {
             Content = ArtifactSigningClient.FormContent(
@@ -142,7 +148,11 @@ public sealed class AzureKeyVaultClient : IDisposable
         return HttpTransport.RequiredString(rsp.Body, "access_token", "Azure AD token JSON");
     }
 
-    private static string? NonBlank(string? value) => value is null || value.Trim().Length == 0 ? null : value;
+    private static string? NonBlank(string? value)
+    {
+        var t = value?.Trim();
+        return string.IsNullOrEmpty(t) ? null : t;
+    }
 
     // ------------------------------------------------------------------ certificate
 
@@ -171,8 +181,14 @@ public sealed class AzureKeyVaultClient : IDisposable
     public static string CertificateUrl(string vaultBase, string certName, string? certVersion)
     {
         var baseUrl = NormalizeVaultBase(vaultBase);
+        var name = certName.Trim();
+        if (name.Length == 0)
+        {
+            throw new PsignException("Azure Key Vault certificate name must not be empty");
+        }
+
         var uri = ParseHierarchical(baseUrl, "invalid vault URL", "vault URL must be hierarchical https");
-        var segments = new List<string> { "certificates", certName.Trim() };
+        var segments = new List<string> { "certificates", name };
         if (certVersion?.Trim() is { Length: > 0 } v)
         {
             segments.Add(v);
@@ -331,7 +347,7 @@ public sealed class AzureKeyVaultClient : IDisposable
         b64 = b64.PadRight(b64.Length + ((4 - (b64.Length % 4)) % 4), '=');
         try
         {
-            return Convert.FromBase64String(b64);
+            return Base64Standard.Decode(b64);
         }
         catch (FormatException e)
         {

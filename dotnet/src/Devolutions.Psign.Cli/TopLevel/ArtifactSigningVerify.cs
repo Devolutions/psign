@@ -95,6 +95,11 @@ internal static class ArtifactSigningVerify
         var output = new StringBuilder();
         if (args.DetachedPkcs7 is { } signature)
         {
+            if (args.DetachedPkcs7Content is null && args.Files.Count > 1)
+            {
+                throw new PsignException("--mode portable verify --detached-pkcs7 requires exactly one verify target");
+            }
+
             var contentPath = args.DetachedPkcs7Content ?? args.Files.FirstOrDefault()
                 ?? throw new PsignException("--detached-pkcs7 requires a content file");
             var content = Output.ReadFile(contentPath);

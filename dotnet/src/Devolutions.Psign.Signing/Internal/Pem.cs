@@ -44,6 +44,10 @@ internal static class Pem
             }
 
             var found = text[labelStart..labelEnd];
+            if (found.Length == 0 || found.IndexOfAny(['\r', '\n']) >= 0)
+            {
+                throw new PsignException("PEM BEGIN line is not terminated");
+            }
             var bodyStart = labelEnd + 5;
             var endMarker = "-----END " + found + "-----";
             var end = text.IndexOf(endMarker, bodyStart, StringComparison.Ordinal);

@@ -106,7 +106,8 @@ public static class TrustChain
             }
 
             var fetched = OnlineTrust.IssuerCandidatesFromAia(current, online);
-            if (fetched.Count == 0)
+            var matched = fetched.Any(c => SubjectEquals(c, issuerDn));
+            if (fetched.Count == 0 || !matched)
             {
                 if (anchors is not null && output.Count > 0 && anchors.Contains(output[^1]))
                 {

@@ -310,7 +310,7 @@ internal sealed class CodeSigner : IDisposable
             var attrs = Pkcs7Builder.SignedAttributes(econtentType, econtentDer, digest, profile, hint);
             var prehash = Pkcs7Builder.SignedAttributesDigest(attrs, digest);
             var remote = SignRemoteDigest(digest, prehash);
-            if (hint is not null && !hint.Equals(remote.SignerCert))
+            if (hint is not null && !hint.RawData.AsSpan().SequenceEqual(remote.SignerCert.RawData))
             {
                 if (attempt == 0)
                 {
@@ -358,9 +358,10 @@ internal sealed class CodeSigner : IDisposable
         if (_local is { } local)
         {
             var certBytes = local.ReadCert();
+            var signerCert = ParseSignerCertificate(certBytes, local.CertLabel);
             var keyBytes = local.ReadKey();
             using var key = ParseKey(keyBytes, local.KeyLabel);
-            return (key.SignData(signedInfo, algorithm.HashAlgorithmName(), RSASignaturePadding.Pkcs1), certBytes);
+            return (key.SignData(signedInfo, algorithm.HashAlgorithmName(), RSASignaturePadding.Pkcs1), signerCert.RawData);
         }
 
         var remote = SignRemoteDigest(algorithm, algorithm.Hash(signedInfo));
@@ -376,7 +377,7 @@ internal sealed class CodeSigner : IDisposable
         {
             var certBytes = local.ReadCert();
             var keyBytes = local.ReadKey();
-            if (ChainCerts.Count == 0)
+            if (ChainCerts.Count == 0 && digest == AuthenticodeHashKind.Sha256)
             {
                 return SignPeImageRsaSha256(input, certBytes, keyBytes);
             }

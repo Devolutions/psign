@@ -131,7 +131,7 @@ internal static class FormatCommands
         {
             return File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException(IoErrorText.Message(e));
         }
@@ -188,7 +188,7 @@ internal static class FormatCommands
             c.Handler = p =>
             {
                 var path = p.Pos("path")!;
-                int signerIndex = p.Int("signer-index");
+                int signerIndex = RequireNonNegative(p.Int("signer-index"), "--signer-index");
                 var bytes = Output.ReadFile(path);
                 var digest = Wrap($"{name} {path} --signer-index {signerIndex}", () => prehash(bytes, signerIndex));
                 Wrap($"write {name} output ({path})", () => Output.Digest(p.Required("encoding"), digest, p.Value("output")));

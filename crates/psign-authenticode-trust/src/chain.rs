@@ -120,7 +120,8 @@ pub fn issuer_chain_excluding_leaf_online(
 
         // Try AIA fetch before declaring failure
         let fetched = crate::online::issuer_candidates_from_aia(&current, online)?;
-        if fetched.is_empty() {
+        let matched = fetched.iter().any(|c| c.subject_name() == issuer_dn);
+        if fetched.is_empty() || !matched {
             // Check if the last cert we added has its thumbprint in the anchor store
             if let Some(store) = anchors
                 && let Some(last) = out.last()

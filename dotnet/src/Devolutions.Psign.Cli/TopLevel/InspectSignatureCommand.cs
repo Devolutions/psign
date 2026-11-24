@@ -16,7 +16,7 @@ internal static class InspectSignatureCommand
             c.Choice("input", ["pe", "pkcs7"], "pe", "PE (embedded attribute PKCS#7 rows) vs raw PKCS#7 file.");
             c.Handler = p =>
             {
-                PsignTool.RunPortableArgs(["inspect-authenticode", p.Pos("path")!, "--input", p.Value("input") ?? "pe"]);
+                PsignTool.RunPortableArgs(["inspect-authenticode", "--input", p.Value("input") ?? "pe", "--", p.Pos("path")!]);
                 return PsignTool.PrintOutput(p, string.Empty);
             };
         });

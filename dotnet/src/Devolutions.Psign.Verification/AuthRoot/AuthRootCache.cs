@@ -24,11 +24,12 @@ public sealed record AuthRootCacheOptions
     public static AuthRootCacheOptions FromEnv()
     {
         var url = Environment.GetEnvironmentVariable(AuthRootCache.SourceUrlEnv);
+        ulong days = Math.Min(AuthRootCache.MaxAgeDaysFromEnv(), (ulong)(TimeSpan.MaxValue.TotalDays - 1));
         return new AuthRootCacheOptions
         {
             CacheDir = AuthRootCache.CacheDirFromEnv(),
             SourceUrl = string.IsNullOrWhiteSpace(url) ? AuthRootCache.AuthRootCabUrl : url,
-            MaxAge = TimeSpan.FromSeconds(AuthRootCache.MaxAgeDaysFromEnv() * 24 * 60 * 60),
+            MaxAge = TimeSpan.FromDays(days),
             Timeout = TimeSpan.FromSeconds(AuthRootCache.DefaultTimeoutSecs),
             MaxDownloadBytes = AuthRootCache.DefaultMaxDownloadBytes,
         };
@@ -116,7 +117,7 @@ public static class AuthRootCache
             {
                 cabBytes = fetch(options);
             }
-            catch (Exception e) when (e is PsignException or IOException or HttpRequestException)
+            catch (Exception e) when (e is PsignException or IOException or HttpRequestException or TaskCanceledException or TimeoutException)
             {
                 throw PsignException.Context($"download AuthRoot CAB from {options.SourceUrl}", e);
             }
@@ -187,7 +188,9 @@ public static class AuthRootCache
 
     private static DateTimeOffset? MetaDownloadedAt(AuthRootMeta meta)
     {
-        if (meta.DownloadedAtUnixSecs is { } secs && secs >= 0)
+        if (meta.DownloadedAtUnixSecs is { } secs
+            && secs >= 0
+            && secs <= DateTimeOffset.MaxValue.ToUnixTimeSeconds())
         {
             return DateTimeOffset.FromUnixTimeSeconds(secs);
         }
@@ -217,7 +220,7 @@ public static class AuthRootCache
         }
 
         var digest = SHA256.HashData(cabBytes);
-        var tmpPath = Path.Combine(Path.GetDirectoryName(cabPath) ?? options.CacheDir, $"{AuthRootCabFileName}.tmp-{Environment.ProcessId}");
+        var tmpPath = Path.Combine(Path.GetDirectoryName(cabPath) ?? options.CacheDir, $"{AuthRootCabFileName}.tmp-{Environment.ProcessId}-{Guid.NewGuid():N}");
         try
         {
             File.WriteAllBytes(tmpPath, cabBytes);
@@ -233,6 +236,14 @@ public static class AuthRootCache
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
+            try
+            {
+                File.Delete(tmpPath);
+            }
+            catch
+            {
+            }
+
             throw PsignException.Context($"cache AuthRoot CAB at {cabPath}", e);
         }
 
@@ -245,12 +256,22 @@ public static class AuthRootCache
             SizeBytes = (ulong)cabBytes.Length,
             Sha256 = Hex.Lower(digest),
         };
+        var metaTmpPath = Path.Combine(Path.GetDirectoryName(metaPath) ?? options.CacheDir, $"{AuthRootMetaFileName}.tmp-{Environment.ProcessId}-{Guid.NewGuid():N}");
         try
         {
-            File.WriteAllText(metaPath, RustJson.ToStringPretty(meta, VerificationJsonContext.Default.AuthRootMeta));
+            File.WriteAllText(metaTmpPath, RustJson.ToStringPretty(meta, VerificationJsonContext.Default.AuthRootMeta));
+            File.Move(metaTmpPath, metaPath, overwrite: true);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
+            try
+            {
+                File.Delete(metaTmpPath);
+            }
+            catch
+            {
+            }
+
             throw PsignException.Context($"write AuthRoot cache metadata {metaPath}", e);
         }
     }

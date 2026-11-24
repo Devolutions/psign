@@ -202,7 +202,8 @@ fn read_package(data: &[u8]) -> Result<Package> {
         .keys()
         .filter_map(|k| {
             let ct = overrides.get(k).cloned().or_else(|| {
-                let ext = k.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                let leaf = k.rsplit_once('/').map(|(_, l)| l).unwrap_or(k.as_str());
+                let ext = leaf.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                 defaults.get(ext).cloned()
             })?;
             Some((k.clone(), ct))

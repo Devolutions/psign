@@ -127,22 +127,24 @@ public static class Rfc3161Extract
             throw new PsignException("timestamp token MessageImprint does not match primary signer signature");
         }
 
-        var tstDigest = SHA256.HashData(tstinfoDer);
-        try
-        {
-            CmsTrustHelpers.VerifyPkcs9MessageDigestAndRsaSha256(tsSd, 0, tstDigest);
-        }
-        catch (PsignException e)
-        {
-            throw new PsignException($"timestamp token CMS signature: {e.Message}");
-        }
-
         if (tsSd.SignerInfos.Count == 0)
         {
             throw new PsignException("timestamp token SignedData has no SignerInfo");
         }
 
         var si = tsSd.SignerInfos[0];
+        var tsaDigestKind = AuthenticodeHashKinds.FromOid(si.DigestAlgorithm.Oid)
+            ?? throw new PsignException($"timestamp token CMS signature: unsupported SignerInfo digestAlgorithm {si.DigestAlgorithm.Oid}");
+        var tstDigest = tsaDigestKind.Hash(tstinfoDer);
+        try
+        {
+            VerifyTimestampCmsSignature(tsSd, si, tsaDigestKind, tstDigest);
+        }
+        catch (PsignException e)
+        {
+            throw new PsignException($"timestamp token CMS signature: {e.Message}");
+        }
+
         CertificateInfo tsa;
         try
         {
@@ -175,7 +177,14 @@ public static class Rfc3161Extract
 
         try
         {
-            PickyCert.VerifyExact(tsa, chain, genDate);
+            if (PickyCert.IsSelfIssued(tsa) && chain.Count == 0)
+            {
+                PickyCert.Verify(tsa, [], new PickyValidatorOptions { Now = PickyFormat.Truncate(genDate), RequireChainCheck = false });
+            }
+            else
+            {
+                PickyCert.VerifyExact(tsa, chain, genDate);
+            }
         }
         catch (PickyException e)
         {
@@ -185,28 +194,49 @@ public static class Rfc3161Extract
         return genDate;
     }
 
+    private static void VerifyTimestampCmsSignature(CmsSignedData sd, CmsSignerInfo si, AuthenticodeHashKind digestKind, byte[] expectedContentDigest)
+    {
+        if (digestKind == AuthenticodeHashKind.Sha256)
+        {
+            CmsTrustHelpers.VerifyPkcs9MessageDigestAndRsaSha256(sd, 0, expectedContentDigest);
+            return;
+        }
+
+        var md = CmsTrustHelpers.SignerInfoPkcs9MessageDigestOctets(si);
+        if (!md.AsSpan().SequenceEqual(expectedContentDigest))
+        {
+            throw new PsignException("PKCS#9 messageDigest does not match expected content digest");
+        }
+
+        var cert = CmsTrustHelpers.CertificateForSigner(sd, si);
+        if (si.SignedAttributes is null)
+        {
+            throw new PsignException("SignerInfo has no authenticated attributes");
+        }
+
+        var attrsDer = si.SignedAttributesSetDer();
+        if (!SignatureVerifier.Verify(cert.SubjectPublicKeyInfo, si.SignatureAlgorithm, attrsDer, si.Signature, digestKind))
+        {
+            throw new PsignException($"CMS verify over signedAttrs ({digestKind.Name()}): signature error");
+        }
+    }
+
+    private static readonly byte[] TimeStampingOidValue = CmsTrustHelpers.OidValue(Oids.EkuTimeStamping);
+
     private static bool HasTimeStampingEku(CertificateInfo cert)
     {
         foreach (var ext in cert.Extensions.Where(e => e.Oid == Oids.ExtendedKeyUsage))
         {
-            List<string> ekus;
             try
             {
-                var r = new System.Formats.Asn1.AsnReader(ext.Value, System.Formats.Asn1.AsnEncodingRules.DER).ReadSequence();
-                ekus = [];
-                while (r.HasData)
+                if (CmsTrustHelpers.ExtendedKeyUsageContains(ext.Value, TimeStampingOidValue))
                 {
-                    ekus.Add(r.ReadObjectIdentifier());
+                    return true;
                 }
             }
-            catch (System.Formats.Asn1.AsnContentException e)
+            catch (PsignException e)
             {
                 throw new PsignException($"timestamp ExtendedKeyUsage extension: {e.Message}");
-            }
-
-            if (ekus.Contains(Oids.EkuTimeStamping))
-            {
-                return true;
             }
         }
 
@@ -601,7 +631,7 @@ public static class Rfc3161Extract
     internal static DateTimeOffset? UtcDateFromSigningTimeAny(ReadOnlySpan<byte> bytes)
     {
         var t = Der.First(bytes);
-        if (t is null)
+        if (t is null || t.Value.End != bytes.Length)
         {
             return null;
         }
@@ -669,7 +699,7 @@ public static class Rfc3161Extract
     internal static ParsedTstInfo? ParseTstInfoDer(byte[] der)
     {
         var outer = Der.First(der);
-        if (outer is null || outer.Value.Tag != 0x30)
+        if (outer is null || outer.Value.Tag != 0x30 || outer.Value.End != der.Length)
         {
             return null;
         }
@@ -711,6 +741,16 @@ public static class Rfc3161Extract
             return null;
         }
 
+        string genTime;
+        try
+        {
+            genTime = new UTF8Encoding(false, true).GetString(items[4].Value(der));
+        }
+        catch (DecoderFallbackException)
+        {
+            return null;
+        }
+
         string? nonce = null;
         foreach (var t in items.Skip(5))
         {
@@ -734,7 +774,7 @@ public static class Rfc3161Extract
             algOid,
             mi[1].Value(der).ToArray(),
             Hex.Lower(items[3].Value(der)),
-            Encoding.ASCII.GetString(items[4].Value(der)),
+            genTime,
             nonce);
     }
 }

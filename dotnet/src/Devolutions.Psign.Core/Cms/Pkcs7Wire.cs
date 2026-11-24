@@ -59,11 +59,11 @@ public static class Pkcs7Wire
             return blob.ToArray();
         }
 
-        // Rust uses the outer sequence payload regardless of trailing octets.
+        // Only wrap the outer SEQUENCE TLV itself so trailing padding (e.g. PE WIN_CERTIFICATE alignment) does not break [0] EXPLICIT parsing.
         var inner = blob[outer.Value.ValueStart..outer.Value.ValueEnd];
         if (!inner.IsEmpty && inner[0] == 0x02)
         {
-            normalized = WrapSignedDataInContentInfo(blob);
+            normalized = WrapSignedDataInContentInfo(outer.Value.Encoded(blob));
         }
         else
         {

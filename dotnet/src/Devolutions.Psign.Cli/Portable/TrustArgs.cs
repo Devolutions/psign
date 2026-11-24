@@ -65,13 +65,33 @@ internal static class TrustArgs
             _ => RevocationMode.Off,
         },
         CrlUrlOverride = p.Value("crl-url-override"),
-        OnlineTimeoutSecs = ulong.Parse(p.Value("online-timeout-secs") ?? "5", NumberStyles.None, CultureInfo.InvariantCulture),
-        OnlineMaxDownloadBytes = int.Parse(p.Value("online-max-download-bytes") ?? "1048576", NumberStyles.None, CultureInfo.InvariantCulture),
+        OnlineTimeoutSecs = ParseOnlineTimeoutSecs(p.Value("online-timeout-secs") ?? "5"),
+        OnlineMaxDownloadBytes = ParseMaxDownloadBytes(p.Value("online-max-download-bytes") ?? "1048576"),
         ArtifactSigning = p.Flag("artifact-signing"),
         ArtifactSigningPublisherId = p.Values("artifact-signing-publisher-id").ToList(),
         ArtifactSigningPrivateTrustRoot = p.Values("artifact-signing-private-trust-root").ToList(),
         ArtifactSigningAllowMissingTimestamp = p.Flag("artifact-signing-allow-missing-timestamp"),
     };
+
+    private static ulong ParseOnlineTimeoutSecs(string raw)
+    {
+        if (!ulong.TryParse(raw.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture, out ulong value))
+        {
+            throw new PsignException($"invalid --online-timeout-secs value '{raw}': expected an unsigned integer");
+        }
+
+        return value;
+    }
+
+    private static int ParseMaxDownloadBytes(string raw)
+    {
+        if (!int.TryParse(raw.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture, out int value))
+        {
+            throw new PsignException($"--online-max-download-bytes value '{raw}' exceeds maximum supported size ({int.MaxValue})");
+        }
+
+        return value;
+    }
 
     /// <summary>Rust <c>trust_verify_options_from_shared</c>, with verbose chain output routed to the CLI stderr.</summary>
     public static TrustVerifyPeOptions Options(TrustVerifySharedArgs shared) => shared.ToOptions() with { Log = StderrWriter.Instance };

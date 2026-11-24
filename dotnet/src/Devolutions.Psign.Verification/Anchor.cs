@@ -149,6 +149,11 @@ public static class Anchors
     public static CertificateInfo ParseCertBytes(ReadOnlySpan<byte> raw)
     {
         int start = 0;
+        if (raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF)
+        {
+            start = 3;
+        }
+
         while (start < raw.Length && raw[start] is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or 0x0C)
         {
             start++;

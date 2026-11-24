@@ -185,7 +185,7 @@ public sealed class PrivateKeyMaterial
             throw new PsignException($"portable signing supports RSA private keys only (got {AlgorithmOid})");
         }
 
-        return new RsaDigestSigner(CreateRsa());
+        return new RsaDigestSigner(CreateRsa(), ownsKey: true);
     }
 
     /// <summary>Whether this key's public half matches <paramref name="cert"/>'s subject public key.</summary>

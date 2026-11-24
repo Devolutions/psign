@@ -116,7 +116,7 @@ internal static class HttpWire
             throw new PsignException("missing HTTP path");
         }
 
-        ulong contentLen = 0;
+        ulong? parsedContentLen = null;
         foreach (var line in lines.Skip(1))
         {
             int colon = line.IndexOf(':');
@@ -125,12 +125,24 @@ internal static class HttpWire
                 continue;
             }
 
-            if (HttpRequest.EqualsIgnoreAsciiCase(line[..colon], "content-length") && TryParseUsize(line[(colon + 1)..].Trim(), out var v))
+            if (HttpRequest.EqualsIgnoreAsciiCase(line[..colon].Trim(), "content-length"))
             {
-                contentLen = v;
-                break;
+                var rawLen = line[(colon + 1)..].Trim();
+                if (!TryParseUsize(rawLen, out var v))
+                {
+                    throw new PsignException($"invalid HTTP Content-Length '{rawLen}'");
+                }
+
+                if (parsedContentLen is { } prev && prev != v)
+                {
+                    throw new PsignException("conflicting HTTP Content-Length headers");
+                }
+
+                parsedContentLen = v;
             }
         }
+
+        ulong contentLen = parsedContentLen ?? 0;
 
         var parsedHeaders = new List<(string, string)>();
         foreach (var line in lines.Skip(1))
@@ -143,10 +155,8 @@ internal static class HttpWire
         }
 
         long bodyStart = headerEnd + 4;
-
-        // The Rust server overflows `body_start + content_len` here and panics, taking the process down. Reject a
-        // body that cannot fit in a managed array instead, so the serve loop logs the request failure and continues.
-        if (contentLen > (ulong)(Array.MaxLength - bodyStart))
+        const ulong MaxBodyBytes = 64UL * 1024 * 1024;
+        if (contentLen > MaxBodyBytes || contentLen > (ulong)(Array.MaxLength - bodyStart))
         {
             throw new PsignException($"HTTP Content-Length {contentLen} is too large");
         }
@@ -371,7 +381,13 @@ internal static class HttpWire
             int sent = 0;
             while (sent < all.Length)
             {
-                sent += socket.Send(all, sent, all.Length - sent, SocketFlags.None);
+                int n = socket.Send(all, sent, all.Length - sent, SocketFlags.None);
+                if (n <= 0)
+                {
+                    throw new PsignException("write HTTP response headers: socket closed while sending");
+                }
+
+                sent += n;
             }
         }
         catch (SocketException e)

@@ -162,20 +162,27 @@ public static class PageHashes
             return null;
         }
 
-        var (tag, start, end) = DecodeTlv(seqDer);
-        if (tag != 0x30)
+        try
+        {
+            var (tag, start, end) = DecodeTlv(seqDer);
+            if (tag != 0x30)
+            {
+                return null;
+            }
+
+            var body = seqDer[start..end];
+            var classId = DecodeOctetString(body, out int used);
+            if (classId.Length != 16)
+            {
+                return null;
+            }
+
+            return DecodeOctetString(body[used..], out _).ToArray();
+        }
+        catch (PsignException)
         {
             return null;
         }
-
-        var body = seqDer[start..end];
-        var classId = DecodeOctetString(body, out int used);
-        if (classId.Length != 16)
-        {
-            return null;
-        }
-
-        return DecodeOctetString(body[used..], out _).ToArray();
     }
 
     private static byte[] ConcatOctetsFromSetOfTypeAndOptionalValue(byte[] data)

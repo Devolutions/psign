@@ -280,14 +280,14 @@ fn expand_glob_pattern(
     if pattern.is_empty() {
         return Ok(());
     }
-    if pattern.contains('*') || pattern.contains('?') {
+    let literal = Path::new(pattern);
+    if !literal.exists() && pattern.contains(['*', '?', '[']) {
         for entry in glob(pattern).map_err(|e| anyhow!("{e}"))? {
             let p = entry.map_err(|e| anyhow!("{e}"))?;
             insert_sign_target(p, out, seen);
         }
     } else {
-        let p = PathBuf::from(pattern);
-        insert_sign_target(p, out, seen);
+        insert_sign_target(literal.to_path_buf(), out, seen);
     }
     Ok(())
 }
@@ -315,7 +315,7 @@ fn expand_sign_targets(args: &SignArgs) -> Result<Vec<PathBuf>> {
     }
     for p in &args.files {
         let pattern = p.to_string_lossy();
-        if pattern.contains('*') || pattern.contains('?') {
+        if !p.exists() && pattern.contains(['*', '?', '[']) {
             expand_glob_pattern(&pattern, &mut out, &mut seen)?;
         } else {
             // Native-shaped trailing targets are operations, not a set: signing the same

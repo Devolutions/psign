@@ -103,7 +103,7 @@ public static class CliRunner
         {
             return exit.ExitCode;
         }
-        catch (Exception e) when (e is PsignException or IOException or UnauthorizedAccessException or FormatException or System.Security.Cryptography.CryptographicException or System.Formats.Asn1.AsnContentException or InvalidDataException or HttpRequestException or ArgumentException or OverflowException)
+        catch (Exception e) when (e is PsignException or IOException or UnauthorizedAccessException or FormatException or System.Security.Cryptography.CryptographicException or System.Formats.Asn1.AsnContentException or InvalidDataException or HttpRequestException or ArgumentException or OverflowException or NotSupportedException)
         {
             if (quiet is null || !quiet(leaf))
             {

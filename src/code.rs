@@ -960,21 +960,21 @@ fn sign_nested_package_entries(
                     compression: zip::CompressionMethod::Stored,
                 });
             }
-            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest
-                if !(skip_signed && clickonce_manifest_has_signature(&bytes)) =>
-            {
-                entry_updates.push(ZipEntryUpdate {
-                    name,
-                    bytes: sign_clickonce_manifest_bytes(
-                        &bytes,
-                        &nested_label,
-                        signer,
-                        vsix_digest,
-                        timestamp_url,
-                        timestamp_digest,
-                    )?,
-                    compression,
-                });
+            CodeFormat::ClickOnceApplication | CodeFormat::Vsto | CodeFormat::Manifest => {
+                if !(skip_signed && clickonce_manifest_has_signature(&bytes)) {
+                    entry_updates.push(ZipEntryUpdate {
+                        name,
+                        bytes: sign_clickonce_manifest_bytes(
+                            &bytes,
+                            &nested_label,
+                            signer,
+                            vsix_digest,
+                            timestamp_url,
+                            timestamp_digest,
+                        )?,
+                        compression,
+                    });
+                }
             }
             CodeFormat::Deploy => entry_updates.push(ZipEntryUpdate {
                 name,
@@ -1974,13 +1974,18 @@ impl CodeSigner {
             let key = &paths.key;
             let cert_bytes =
                 std::fs::read(cert).with_context(|| format!("read {}", cert.display()))?;
+            let signer_cert = rdp::parse_certificate(&cert_bytes)
+                .with_context(|| format!("parse signer certificate {}", cert.display()))?;
+            let cert_der = signer_cert
+                .to_der()
+                .context("encode signer certificate DER")?;
             let key_bytes =
                 std::fs::read(key).with_context(|| format!("read {}", key.display()))?;
             let private_key = rdp::parse_rsa_private_key(&key_bytes)
                 .with_context(|| format!("parse RSA private key {}", key.display()))?;
             return Ok((
                 sign_xml_signed_info(algorithm, private_key, signed_info),
-                cert_bytes,
+                cert_der,
             ));
         }
 
@@ -2707,7 +2712,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 fn validate_appinstaller_descriptor(bytes: &[u8]) -> Result<()> {
     let text = std::str::from_utf8(bytes).context("App Installer descriptor is not UTF-8")?;
-    if !text.contains("<AppInstaller") {
+    if find_xml_start_tag_by_local_name(text, "AppInstaller", 0)?.is_none() {
         return Err(anyhow!(
             "App Installer descriptor root <AppInstaller> not found"
         ));

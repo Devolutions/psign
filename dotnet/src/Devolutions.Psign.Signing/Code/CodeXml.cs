@@ -14,7 +14,7 @@ internal static class CodeXml
     public static void ValidateAppInstallerDescriptor(byte[] bytes)
     {
         var text = RustIo.Utf8(bytes, "App Installer descriptor is not UTF-8");
-        if (!text.Contains("<AppInstaller", StringComparison.Ordinal))
+        if (XmlTextScan.FindXmlStartTagByLocalName(text, "AppInstaller", 0) is null)
         {
             throw new PsignException("App Installer descriptor root <AppInstaller> not found");
         }
@@ -46,48 +46,6 @@ internal static class CodeXml
         return Encoding.UTF8.GetBytes(updated);
     }
 
-    private static string UpdateAttrForLocalTags(string text, string localName, string attr, string escapedValue)
-    {
-        var sb = new StringBuilder(text.Length);
-        int cursor = 0;
-        while (XmlTextScan.FindXmlStartTagByLocalName(text, localName, cursor) is { } tag)
-        {
-            sb.Append(text, cursor, tag.Start - cursor);
-            sb.Append(ReplaceOrInsertXmlAttr(text[tag.Start..(tag.End + 1)], attr, escapedValue));
-            cursor = tag.End + 1;
-        }
-
-        sb.Append(text, cursor, text.Length - cursor);
-        return sb.ToString();
-    }
-
-    private static string ReplaceOrInsertXmlAttr(string tag, string attr, string escapedValue)
-    {
-        string needle = $"{attr}=\"";
-        int idx = tag.IndexOf(needle, StringComparison.Ordinal);
-        if (idx >= 0)
-        {
-            int valueStart = idx + needle.Length;
-            int valueEnd = tag.IndexOf('"', valueStart);
-            if (valueEnd < 0)
-            {
-                throw new PsignException($"XML {attr} attribute is not closed");
-            }
-
-            return tag[..valueStart] + escapedValue + tag[valueEnd..];
-        }
-
-        int insertAt = tag.LastIndexOf("/>", StringComparison.Ordinal);
-        if (insertAt < 0)
-        {
-            insertAt = tag.LastIndexOf('>');
-        }
-
-        if (insertAt < 0)
-        {
-            throw new PsignException("XML tag is not closed");
-        }
-
-        return tag[..insertAt] + " " + attr + "=\"" + escapedValue + "\"" + tag[insertAt..];
-    }
+    private static string UpdateAttrForLocalTags(string text, string localName, string attr, string escapedValue) =>
+        XmlTextScan.UpdateAttrForLocalTags(text, localName, attr, escapedValue);
 }

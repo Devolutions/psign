@@ -139,7 +139,13 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
         }
         finally
         {
-            Directory.Delete(tempDirectory, recursive: true);
+            try
+            {
+                Directory.Delete(tempDirectory, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
@@ -198,17 +204,19 @@ public sealed class GetPsignSignatureCommand : PSCmdlet
     {
         string fileName = System.IO.Path.GetFileName(sourcePathOrExtension);
         if (!string.IsNullOrWhiteSpace(fileName)
+            && fileName is not ("." or "..")
             && System.IO.Path.HasExtension(fileName)
             && !string.IsNullOrWhiteSpace(System.IO.Path.GetFileNameWithoutExtension(fileName)))
         {
             return fileName;
         }
 
-        string extension = sourcePathOrExtension.Trim();
-        if (!extension.StartsWith('.'))
+        string extension = System.IO.Path.GetFileName(sourcePathOrExtension.Trim()).TrimStart('.');
+        if (string.IsNullOrWhiteSpace(extension) || extension.IndexOfAny(['/', '\\', ':', '\0']) >= 0 || extension is "." or "..")
         {
-            extension = "." + extension;
+            return "content.bin";
         }
-        return "content" + extension;
+
+        return "content." + extension;
     }
 }

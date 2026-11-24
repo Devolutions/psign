@@ -47,7 +47,7 @@ internal static class Program
         {
             root = RustFs.Canonicalize(signtool);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"failed to resolve {signtool}", IoErrorText.Inner(e));
         }
@@ -57,7 +57,7 @@ internal static class Program
         {
             Directory.CreateDirectory(outputDir);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException("failed to create parity-output directory", IoErrorText.Inner(e));
         }
@@ -76,7 +76,7 @@ internal static class Program
                 continue;
             }
 
-            var imports = PeImportsOf(current);
+            var (imports, sha256) = PeImportsAndSha256Of(current);
             var parent = RustFs.Parent(current) ?? ".";
             var resolvedChildren = new List<string>();
             foreach (var import in imports)
@@ -91,7 +91,6 @@ internal static class Program
                 }
             }
 
-            var sha256 = ReadSha256(current);
             nodes.Add((current, sha256, imports));
             edges[current] = resolvedChildren;
         }
@@ -132,7 +131,7 @@ internal static class Program
         {
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(text));
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException(context, IoErrorText.Inner(e));
         }
@@ -146,7 +145,7 @@ internal static class Program
         {
             stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"failed to open {path}", IoErrorText.Inner(e));
         }
@@ -165,14 +164,16 @@ internal static class Program
     }
 
     /// <summary>Rust <c>pe_imports</c>: lowercase, sorted, deduplicated imported library names (empty for non-PE objects).</summary>
-    internal static List<string> PeImportsOf(string path)
+    internal static List<string> PeImportsOf(string path) => PeImportsAndSha256Of(path).Imports;
+
+    private static (List<string> Imports, string Sha256) PeImportsAndSha256Of(string path)
     {
         byte[] bytes;
         try
         {
             bytes = File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             // Unix read(2) on a directory fails with EISDIR (Windows reports access denied, as IoErrorText does).
             var inner = !OperatingSystem.IsWindows() && Directory.Exists(path)
@@ -202,7 +203,7 @@ internal static class Program
             }
         }
 
-        return dedup;
+        return (dedup, Hex.Lower(SHA256.HashData(bytes)));
     }
 
     /// <summary>goblin <c>Object::parse</c> + <c>pe.libraries</c>; non-PE objects yield no libraries.</summary>

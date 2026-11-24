@@ -13,8 +13,7 @@ public static class TrustVerifyCab
         var (anchors, anchorCerts) = TrustVerifyPe.TrustMaterialFor(opts);
         var ctx = CabDigest.ParseContext(data);
         var pkcs7 = CabDigest.SignaturePkcs7Der(data);
-        var embedded = TrustVerifyFormats.EmbeddedIndirectDigest(pkcs7, "CAB PKCS#7");
-        var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var (kind, embedded) = TrustVerifyFormats.EmbeddedIndirectDigestAndKind(pkcs7, "CAB PKCS#7");
         var cabDigest = CabDigest.ComputeAuthenticodeDigest(data, ctx, kind);
         if (!cabDigest.AsSpan().SequenceEqual(embedded))
         {
@@ -30,16 +29,30 @@ public static class TrustVerifyCab
 /// <summary>Helpers shared by the format trust verifiers.</summary>
 internal static class TrustVerifyFormats
 {
-    /// <summary>Indirect digest of an Authenticode PKCS#7 (Rust <c>AuthenticodeSignature::from_bytes(..)?.digest()</c>).</summary>
-    public static byte[] EmbeddedIndirectDigest(byte[] pkcs7, string context)
+    /// <summary>Indirect digest and validated hash algorithm of an Authenticode PKCS#7.</summary>
+    public static (AuthenticodeHashKind Kind, byte[] Digest) EmbeddedIndirectDigestAndKind(byte[] pkcs7, string context)
     {
+        AuthenticodeSignature sig;
         try
         {
-            return AuthenticodeSignature.Parse(pkcs7).Digest;
+            sig = AuthenticodeSignature.Parse(pkcs7);
         }
         catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException or FormatException)
         {
             throw new PsignException($"{context}: {e.Message}");
         }
+
+        var kind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"{context}: unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (sig.Digest.Length != kind.DigestLength())
+        {
+            throw new PsignException(
+                $"{context}: digest length {sig.Digest.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+        }
+
+        return (kind, sig.Digest);
     }
+
+    /// <summary>Indirect digest of an Authenticode PKCS#7 (Rust <c>AuthenticodeSignature::from_bytes(..)?.digest()</c>).</summary>
+    public static byte[] EmbeddedIndirectDigest(byte[] pkcs7, string context) => EmbeddedIndirectDigestAndKind(pkcs7, context).Digest;
 }

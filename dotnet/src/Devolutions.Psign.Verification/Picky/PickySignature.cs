@@ -40,6 +40,7 @@ internal static class PickySignature
 #endif
         Oids.EcdsaWithSha256 => (Kind.Ecdsa, HashAlgorithmName.SHA256),
         Oids.EcdsaWithSha384 => (Kind.Ecdsa, HashAlgorithmName.SHA384),
+        Oids.EcdsaWithSha512 => (Kind.Ecdsa, HashAlgorithmName.SHA512),
         Ed25519 => (Kind.Ed25519, default),
         _ => null,
     };
@@ -102,7 +103,9 @@ internal static class PickySignature
                     var curve = EcCurveOid(spkiDer);
                     var (wantCurve, hashName, curveName) = alg.Value.Hash == HashAlgorithmName.SHA256
                         ? (P256, "SHA256", CurveDisplay(curve))
-                        : (P384, "SHA384", CurveDisplay(curve));
+                        : alg.Value.Hash == HashAlgorithmName.SHA384
+                            ? (P384, "SHA384", CurveDisplay(curve))
+                            : (P521, "SHA512", CurveDisplay(curve));
                     if (curve is not (P256 or P384 or P521))
                     {
                         return $"Key error: unsupported curve {curve} for verifying";
