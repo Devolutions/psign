@@ -226,7 +226,7 @@ internal static class VerifyCommand
         AllSignatures = p.Flag("all-signatures"),
         AllowTestRoot = p.Flag("allow-test-root"),
         WarnIfNotTimestamped = p.Flag("warn-if-not-timestamped"),
-        SignatureIndex = p.Value("signature-index") is { } ds ? uint.Parse(ds.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture) : null,
+        SignatureIndex = p.Value("signature-index") is { } ds ? uint.Parse(ds.StartsWith('+') ? ds[1..] : ds, NumberStyles.None, CultureInfo.InvariantCulture) : null,
         MultipleSemantics = p.Flag("multiple-semantics"),
         VerifyPkcs7File = p.Flag("verify-pkcs7-file"),
         PrintDescription = p.Flag("print-description"),
@@ -286,8 +286,21 @@ internal static class VerifyCommand
         return value > uint.MaxValue ? $"{value} is not in 0..=4294967295" : null;
     }
 
-    private static ulong ParseU64(string? value, ulong defaultValue) =>
-        value is null ? defaultValue : ulong.Parse(value.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture);
+    private static ulong ParseU64(string? value, ulong defaultValue)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        var digits = value.StartsWith('+') ? value[1..] : value;
+        if (!ulong.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+        {
+            throw new PsignException($"invalid unsigned integer value '{value}'");
+        }
+
+        return parsed;
+    }
 
     /// <summary>Rust <c>execute_portable_verify</c>; returns the command stdout (inner portable commands print directly).</summary>
     internal static string ExecutePortableVerify(VerifyArgs args)
@@ -306,7 +319,7 @@ internal static class VerifyCommand
             {
                 foreach (var subject in args.Files)
                 {
-                    PsignTool.RunPortableArgs(["verify-catalog-member", "--catalog", artifactCatalog, subject]);
+                    PsignTool.RunPortableArgs(["verify-catalog-member", "--catalog", artifactCatalog, "--", subject]);
                 }
             }
 
@@ -323,6 +336,7 @@ internal static class VerifyCommand
             var content = args.DetachedPkcs7Content ?? args.Files[0];
             var argv = new List<string> { "trust-verify-detached" };
             AppendPortableTrustArgs(args, argv);
+            argv.Add("--");
             argv.Add(content);
             argv.Add(signature);
             PsignTool.RunPortableArgs(argv);
@@ -339,12 +353,13 @@ internal static class VerifyCommand
 
             var trustArgv = new List<string> { "trust-verify-catalog" };
             AppendPortableTrustArgs(args, trustArgv);
+            trustArgv.Add("--");
             trustArgv.Add(catalog);
             PsignTool.RunPortableArgs(trustArgv);
 
             foreach (var subject in args.Files)
             {
-                PsignTool.RunPortableArgs(["verify-catalog-member", "--catalog", catalog, subject]);
+                PsignTool.RunPortableArgs(["verify-catalog-member", "--catalog", catalog, "--", subject]);
             }
 
             return string.Empty;
@@ -370,6 +385,7 @@ internal static class VerifyCommand
 
             var argv = new List<string> { command };
             AppendPortableTrustArgs(args, argv);
+            argv.Add("--");
             argv.Add(path);
             PsignTool.RunPortableArgs(argv);
         }

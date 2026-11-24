@@ -102,6 +102,7 @@ public static class PortableRemove
     /// <summary>Remove the trailing signature block (and its surrounding newline) or return <c>null</c>.</summary>
     public static string? RemoveScriptSignatureBlock(string content, string ext)
     {
+        ext = ext.TrimStart('.').ToLowerInvariant();
         var (begin, end) = ext switch
         {
             "ps1xml" or "psc1" or "cdxml" => ("<!-- SIG # Begin signature block -->", "<!-- SIG # End signature block -->"),
@@ -109,7 +110,7 @@ public static class PortableRemove
             _ => ("# SIG # Begin signature block", "# SIG # End signature block"),
         };
         int beginAt = content.LastIndexOf(begin, StringComparison.Ordinal);
-        if (beginAt < 0)
+        if (beginAt < 0 || (beginAt > 0 && content[beginAt - 1] is not ('\n' or '\r')))
         {
             return null;
         }
@@ -154,6 +155,7 @@ public static class PortableRemove
     /// <summary>True when every non-empty line is a comment wrapping base64 and the payload decodes.</summary>
     public static bool IsAuthenticodeSignatureBlock(string body, string ext)
     {
+        ext = ext.TrimStart('.').ToLowerInvariant();
         var payload = new StringBuilder();
         foreach (var raw in body.Split('\n'))
         {
@@ -204,7 +206,7 @@ public static class PortableRemove
         {
             return File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"read '{path}'", e);
         }
@@ -216,7 +218,7 @@ public static class PortableRemove
         {
             File.WriteAllBytes(path, bytes);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException(context, e);
         }

@@ -208,9 +208,9 @@ public sealed class PortableCertStore
             throw new PsignException("certificate store name must not be empty");
         }
 
-        if (trimmed.IndexOfAny(['/', '\\', '\0']) >= 0)
+        if (trimmed.IndexOfAny(['/', '\\', ':', '\0']) >= 0 || trimmed is "." or "..")
         {
-            throw new PsignException("certificate store name must not contain path separators");
+            throw new PsignException("certificate store name must not contain path separators or traversal segments");
         }
 
         return trimmed.ToLowerInvariant() switch
@@ -317,7 +317,7 @@ public sealed class PortableCertStore
         {
             pfx = File.ReadAllBytes(pfxPath);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"read PFX '{pfxPath}'", IoErrorText.Inner(e));
         }
@@ -361,7 +361,7 @@ public sealed class PortableCertStore
 
             foreach (var path in entries)
             {
-                if (System.IO.Path.GetExtension(path) != ".der")
+                if (!string.Equals(System.IO.Path.GetExtension(path), ".der", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -371,7 +371,7 @@ public sealed class PortableCertStore
                 {
                     der = File.ReadAllBytes(path);
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
                 {
                     throw new PsignException($"read certificate '{path}'", IoErrorText.Inner(e));
                 }
@@ -411,6 +411,10 @@ public sealed class PortableCertStore
         if (withKey)
         {
             keyOutPath = keyOut ?? throw new PsignException("--key-out is required when exporting with --with-key");
+            if (Portable.PortableCore.SamePath(outPath, keyOutPath))
+            {
+                throw new PsignException($"certificate output path '{outPath}' and key output path '{keyOutPath}' must be different files");
+            }
         }
 
         if (PathExists(outPath) && !force)
@@ -428,7 +432,7 @@ public sealed class PortableCertStore
         if (keyOutPath is not null)
         {
             var keyPem = ReadExistingKey(keyPath);
-            WriteFile(keyOutPath, keyPem, $"write exported private key '{keyOutPath}'");
+            WritePrivateKeyFile(keyOutPath, keyPem, overwrite: force, $"write exported private key '{keyOutPath}'");
             output.Append("key_path=").Append(keyPath).Append("\nkey_out=").Append(keyOutPath).Append('\n');
         }
 
@@ -494,7 +498,7 @@ public sealed class PortableCertStore
         {
             bytes = File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"read certificate '{path}'", IoErrorText.Inner(e));
         }
@@ -581,11 +585,15 @@ public sealed class PortableCertStore
         return true;
     }
 
-    private static void WritePrivateKeyFile(string path, byte[] bytes)
+    private static void WritePrivateKeyFile(string path, byte[] bytes, bool overwrite = false, string? context = null)
     {
         try
         {
-            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+            var options = new FileStreamOptions
+            {
+                Mode = overwrite ? FileMode.Create : FileMode.CreateNew,
+                Access = FileAccess.Write,
+            };
             if (!OperatingSystem.IsWindows())
             {
                 options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
@@ -596,7 +604,7 @@ public sealed class PortableCertStore
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new PsignException($"write private key '{path}'", IoErrorText.Inner(e));
+            throw new PsignException(context ?? $"write private key '{path}'", IoErrorText.Inner(e));
         }
     }
 

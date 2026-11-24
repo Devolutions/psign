@@ -302,7 +302,8 @@ impl ContentTypes {
         self.overrides
             .get(&key)
             .or_else(|| {
-                let ext = key.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+                let leaf = key.rsplit_once('/').map(|(_, l)| l).unwrap_or(key.as_str());
+                let ext = leaf.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
                 self.defaults.get(ext)
             })
             .map(String::as_str)
@@ -785,8 +786,18 @@ fn ensure_relationship(
 /// Turn a self-closing document element (`<Types/>`) into an open/close pair so children can be
 /// appended; a document element that already has a separate end tag is left untouched.
 fn expand_self_closing_xml_root(text: &str, root: &str) -> String {
-    let Some(start) = text.find(&format!("<{root}")) else {
-        return text.to_string();
+    let needle = format!("<{root}");
+    let mut cursor = 0;
+    let start = loop {
+        let Some(rel) = text[cursor..].find(&needle) else {
+            return text.to_string();
+        };
+        let pos = cursor + rel;
+        let next = text.as_bytes().get(pos + needle.len()).copied();
+        if matches!(next, Some(b' ' | b'\t' | b'\r' | b'\n' | b'/' | b'>')) {
+            break pos;
+        }
+        cursor = pos + needle.len();
     };
     // End of the document element's start tag (attribute values cannot contain a raw `>`).
     let Some(tag_end) = text[start..].find('>').map(|e| start + e) else {

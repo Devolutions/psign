@@ -127,6 +127,7 @@ internal static class Servers
                     try
                     {
                         client.ReceiveTimeout = (int)ReadTimeout.TotalMilliseconds;
+                        client.SendTimeout = (int)ReadTimeout.TotalMilliseconds;
                         handle(client);
                     }
                     catch (PsignException e)
@@ -157,7 +158,7 @@ internal static class Servers
     public static void RunTimestampServer(TimestampServerArgs args)
     {
         DerPush.ValidateGeneralizedTimeZ(args.GenTime);
-        var listener = BindListener(args.Listen);
+        using var listener = BindListener(args.Listen);
         var local = LocalAddress(listener);
         using var tsa = new TimestampAuthority();
         if (args.CertOutput is { } certOut)
@@ -242,7 +243,7 @@ internal static class Servers
 
     public static void RunPkiServer(PkiServerArgs args)
     {
-        var listener = BindListener(args.Listen);
+        using var listener = BindListener(args.Listen);
         var local = LocalAddress(listener);
         var pki = new PkiAuthority(args.CrlRevokeLeaf, args.OcspStatus);
         if (args.RootCertOutput is { } rootOut)
@@ -312,7 +313,7 @@ internal static class Servers
 
     public static void RunAzureKeyVaultServer(AzureKeyVaultServerArgs args)
     {
-        var listener = BindListener(args.Listen);
+        using var listener = BindListener(args.Listen);
         var baseUrl = $"http://{LocalAddress(listener)}/";
         using var identity = new AzureSigningIdentity(
             "psign local Azure Key Vault test root CA",
@@ -407,7 +408,7 @@ internal static class Servers
 
     public static void RunArtifactSigningServer(ArtifactSigningServerArgs args)
     {
-        var listener = BindListener(args.Listen);
+        using var listener = BindListener(args.Listen);
         var baseUrl = $"http://{LocalAddress(listener)}/";
         using var identity = new AzureSigningIdentity(
             "psign local Artifact Signing test root CA",

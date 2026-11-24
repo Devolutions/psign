@@ -16,12 +16,18 @@ public static class Asn1Time
         try
         {
             var r = new AsnReader(tlv.ToArray(), AsnEncodingRules.BER);
-            return tlv[0] switch
+            var dt = tlv[0] switch
             {
                 0x17 => r.ReadUtcTime(twoDigitYearMax: 2049),
                 0x18 => r.ReadGeneralizedTime(),
                 _ => throw new PsignException($"time: unexpected tag 0x{tlv[0]:x2}"),
             };
+            if (r.HasData)
+            {
+                throw new PsignException("time: trailing data");
+            }
+
+            return dt;
         }
         catch (AsnContentException e)
         {

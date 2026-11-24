@@ -77,10 +77,11 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 // Scope level (CurrentUser / LocalMachine)
                 if (scope != null)
                 {
-                    string scopeDir = Path.Combine(CurrentDrive.BaseDirectory, scope);
+                    string safeScope = CertStorePathHelper.NormalizeScope(scope);
+                    string scopeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope);
                     var item = new PSObject();
-                    item.Properties.Add(new PSNoteProperty("PSChildName", scope));
-                    item.Properties.Add(new PSNoteProperty("Location", scope));
+                    item.Properties.Add(new PSNoteProperty("PSChildName", safeScope));
+                    item.Properties.Add(new PSNoteProperty("Location", safeScope));
                     item.Properties.Add(new PSNoteProperty("StoreDirectory", scopeDir));
                     WriteItemObject(item, path, isContainer: true);
                 }
@@ -89,12 +90,13 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 // Store level
                 if (scope != null && store != null)
                 {
+                    string safeScope = CertStorePathHelper.NormalizeScope(scope);
                     string normalized = CertStorePathHelper.NormalizeStoreName(store);
-                    string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, normalized);
+                    string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, normalized);
                     var item = new PSObject();
                     item.Properties.Add(new PSNoteProperty("PSChildName", normalized));
                     item.Properties.Add(new PSNoteProperty("Name", normalized));
-                    item.Properties.Add(new PSNoteProperty("Location", scope));
+                    item.Properties.Add(new PSNoteProperty("Location", safeScope));
                     item.Properties.Add(new PSNoteProperty("StoreDirectory", storeDir));
                     int certCount = Directory.Exists(storeDir)
                         ? Directory.GetFiles(storeDir, "*.der").Length
@@ -108,10 +110,11 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 // Certificate level
                 if (scope != null && store != null && thumbprint != null)
                 {
+                    string safeScope = CertStorePathHelper.NormalizeScope(scope);
                     string normalized = CertStorePathHelper.NormalizeStoreName(store);
                     string normalThumb = CertStorePathHelper.NormalizeThumbprint(thumbprint);
                     string derPath = Path.Combine(
-                        CurrentDrive.BaseDirectory, scope, normalized, normalThumb + ".der");
+                        CurrentDrive.BaseDirectory, safeScope, normalized, normalThumb + ".der");
                     if (File.Exists(derPath))
                     {
                         var cert = CertStorePathHelper.LoadCertificate(derPath);
@@ -120,7 +123,7 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                     else
                     {
                         WriteError(new ErrorRecord(
-                            new ItemNotFoundException($"Certificate '{normalThumb}' not found in {scope}\\{normalized}."),
+                            new ItemNotFoundException($"Certificate '{normalThumb}' not found in {safeScope}\\{normalized}."),
                             "CertificateNotFound",
                             ErrorCategory.ObjectNotFound,
                             path));
@@ -141,25 +144,43 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 return true;
             case 1:
                 // Scopes always exist conceptually
-                return scope != null;
+                if (scope == null) return false;
+                try
+                {
+                    CertStorePathHelper.NormalizeScope(scope);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
             case 2:
                 // Well-known stores always exist; custom stores require the directory
                 if (scope == null || store == null) return false;
-                string normalizedStore = CertStorePathHelper.NormalizeStoreName(store);
-                if (CertStorePathHelper.WellKnownStores.Contains(normalizedStore))
+                try
                 {
-                    return true;
+                    string safeScope = CertStorePathHelper.NormalizeScope(scope);
+                    string normalizedStore = CertStorePathHelper.NormalizeStoreName(store);
+                    if (CertStorePathHelper.WellKnownStores.Contains(normalizedStore))
+                    {
+                        return true;
+                    }
+                    string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, normalizedStore);
+                    return Directory.Exists(storeDir);
                 }
-                string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, normalizedStore);
-                return Directory.Exists(storeDir);
+                catch
+                {
+                    return false;
+                }
             case 3:
             default:
                 if (scope == null || store == null || thumbprint == null) return false;
                 try
                 {
+                    string safeScope = CertStorePathHelper.NormalizeScope(scope);
                     string ns = CertStorePathHelper.NormalizeStoreName(store);
                     string nt = CertStorePathHelper.NormalizeThumbprint(thumbprint);
-                    string derPath = Path.Combine(CurrentDrive.BaseDirectory, scope, ns, nt + ".der");
+                    string derPath = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns, nt + ".der");
                     return File.Exists(derPath);
                 }
                 catch
@@ -199,7 +220,8 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
             case 1:
                 // Scope — list stores
                 if (scope == null) break;
-                string scopePath = Path.Combine(CurrentDrive.BaseDirectory, scope);
+                string safeScope = CertStorePathHelper.NormalizeScope(scope);
+                string scopePath = Path.Combine(CurrentDrive.BaseDirectory, safeScope);
                 var stores = GetStoresForScope(scopePath);
                 foreach (string storeName in stores)
                 {
@@ -207,7 +229,7 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                     var item = new PSObject();
                     item.Properties.Add(new PSNoteProperty("PSChildName", storeName));
                     item.Properties.Add(new PSNoteProperty("Name", storeName));
-                    item.Properties.Add(new PSNoteProperty("Location", scope));
+                    item.Properties.Add(new PSNoteProperty("Location", safeScope));
                     item.Properties.Add(new PSNoteProperty("StoreDirectory", stDir));
                     int certCount = Directory.Exists(stDir)
                         ? Directory.GetFiles(stDir, "*.der").Length
@@ -223,8 +245,9 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
             case 2:
                 // Store — list certificates
                 if (scope == null || store == null) break;
+                string safeScope2 = CertStorePathHelper.NormalizeScope(scope);
                 string normalizedStore = CertStorePathHelper.NormalizeStoreName(store);
-                string storeDirectory = Path.Combine(CurrentDrive.BaseDirectory, scope, normalizedStore);
+                string storeDirectory = Path.Combine(CurrentDrive.BaseDirectory, safeScope2, normalizedStore);
                 if (!Directory.Exists(storeDirectory)) break;
                 foreach (string derFile in Directory.GetFiles(storeDirectory, "*.der"))
                 {
@@ -258,7 +281,7 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 break;
             case 1:
                 if (scope == null) break;
-                string scopePath = Path.Combine(CurrentDrive.BaseDirectory, scope);
+                string scopePath = Path.Combine(CurrentDrive.BaseDirectory, CertStorePathHelper.NormalizeScope(scope));
                 foreach (string storeName in GetStoresForScope(scopePath))
                 {
                     WriteItemObject(storeName, MakePath(path, storeName), isContainer: true);
@@ -266,8 +289,9 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 break;
             case 2:
                 if (scope == null || store == null) break;
+                string safeScope = CertStorePathHelper.NormalizeScope(scope);
                 string ns = CertStorePathHelper.NormalizeStoreName(store);
-                string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, ns);
+                string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns);
                 if (!Directory.Exists(storeDir)) break;
                 foreach (string derFile in Directory.GetFiles(storeDir, "*.der"))
                 {
@@ -291,8 +315,9 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 return true; // scopes always have child stores (at least conceptually)
             case 2:
                 if (scope == null || store == null) return false;
+                string safeScope = CertStorePathHelper.NormalizeScope(scope);
                 string ns = CertStorePathHelper.NormalizeStoreName(store);
-                string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, ns);
+                string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns);
                 return Directory.Exists(storeDir) && Directory.GetFiles(storeDir, "*.der").Length > 0;
             default:
                 return false;
@@ -314,15 +339,16 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
         if (depth == 2 && scope != null && store != null)
         {
             // Create a store directory
+            string safeScope = CertStorePathHelper.NormalizeScope(scope);
             string ns = CertStorePathHelper.NormalizeStoreName(store);
-            string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, ns);
+            string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns);
             if (ShouldProcess(storeDir, "Create store directory"))
             {
                 Directory.CreateDirectory(storeDir);
                 var item = new PSObject();
                 item.Properties.Add(new PSNoteProperty("PSChildName", ns));
                 item.Properties.Add(new PSNoteProperty("Name", ns));
-                item.Properties.Add(new PSNoteProperty("Location", scope));
+                item.Properties.Add(new PSNoteProperty("Location", safeScope));
                 item.Properties.Add(new PSNoteProperty("StoreDirectory", storeDir));
                 WriteItemObject(item, path, isContainer: true);
             }
@@ -332,8 +358,9 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
         if (depth >= 3 && scope != null && store != null)
         {
             // Import a certificate
+            string safeScope = CertStorePathHelper.NormalizeScope(scope);
             string ns = CertStorePathHelper.NormalizeStoreName(store);
-            string storeDir = Path.Combine(CurrentDrive.BaseDirectory, scope, ns);
+            string storeDir = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns);
             byte[]? certDer = ResolveCertificateBytes(newItemValue);
             if (certDer == null)
             {
@@ -355,7 +382,8 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
                 File.WriteAllBytes(derPath, certDer);
 
                 var cert = new X509Certificate2(certDer);
-                WriteItemObject(cert, MakePath(path, computedThumb), isContainer: false);
+                string parentPath = GetParentPath(path, CurrentDrive.Root);
+                WriteItemObject(cert, MakePath(parentPath, computedThumb), isContainer: false);
             }
             return;
         }
@@ -374,22 +402,23 @@ public sealed class PortableCertStoreProvider : NavigationCmdletProvider
 
         if (depth == 3 && scope != null && store != null && thumbprint != null)
         {
+            string safeScope = CertStorePathHelper.NormalizeScope(scope);
             string ns = CertStorePathHelper.NormalizeStoreName(store);
             string nt = CertStorePathHelper.NormalizeThumbprint(thumbprint);
-            string derPath = Path.Combine(CurrentDrive.BaseDirectory, scope, ns, nt + ".der");
-            string keyPath = Path.Combine(CurrentDrive.BaseDirectory, scope, ns, nt + ".key");
+            string derPath = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns, nt + ".der");
+            string keyPath = Path.Combine(CurrentDrive.BaseDirectory, safeScope, ns, nt + ".key");
 
             if (!File.Exists(derPath))
             {
                 WriteError(new ErrorRecord(
-                    new ItemNotFoundException($"Certificate '{nt}' not found in {scope}\\{ns}."),
+                    new ItemNotFoundException($"Certificate '{nt}' not found in {safeScope}\\{ns}."),
                     "CertificateNotFound",
                     ErrorCategory.ObjectNotFound,
                     path));
                 return;
             }
 
-            if (ShouldProcess($"{scope}\\{ns}\\{nt}", "Remove certificate"))
+            if (ShouldProcess($"{safeScope}\\{ns}\\{nt}", "Remove certificate"))
             {
                 File.Delete(derPath);
                 if (File.Exists(keyPath))

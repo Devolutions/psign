@@ -66,12 +66,14 @@ public static class VsixSigner
             throw new PsignException("VSIX signature XML is not UTF-8", e);
         }
 
-        if (text.Contains("<EncodedTime>", StringComparison.Ordinal))
+        if (Core.Xml.XmlTextScan.FindXmlStartTagByLocalName(text, "EncodedTime", 0) is not null)
         {
             throw new PsignException("VSIX signature XML is already timestamped");
         }
 
-        int end = text.LastIndexOf("</Signature>", StringComparison.Ordinal);
+        var root = Core.Xml.XmlTextScan.FindXmlRootStartTag(text);
+        string closeTag = $"</{root.Name}>";
+        int end = text.LastIndexOf(closeTag, StringComparison.Ordinal);
         if (end < 0)
         {
             throw new PsignException("VSIX signature XML is missing </Signature>");
@@ -98,16 +100,16 @@ public static class VsixSigner
         DateTimeOffset? now = null,
         Func<byte[], byte[]>? timestampToken = null)
     {
-        var (xml, template) = CreateSignatureXml(package, algorithm, signerCertDer, signSignedInfo, VsixSigningTime.Now, now);
-        if (timestampToken is not null)
-        {
-            xml = AddSignatureTimestamp(xml, timestampToken(TimestampImprintInput(xml)));
-        }
-
         var info = VsixPackage.InspectVsix(package);
         if (info.HasOpcSignature && !overwrite)
         {
             throw new PsignException("package already contains OPC signature parts; pass overwrite to replace them");
+        }
+
+        var (xml, template) = CreateSignatureXml(package, algorithm, signerCertDer, signSignedInfo, VsixSigningTime.Now, now);
+        if (timestampToken is not null)
+        {
+            xml = AddSignatureTimestamp(xml, timestampToken(TimestampImprintInput(xml)));
         }
 
         return new VsixSignResult(VsixPackage.EmbedSignatureXml(package, xml, overwrite), xml, template);

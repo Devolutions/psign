@@ -90,7 +90,8 @@ internal static class CmsTrustHelpers
             throw new PsignException("SpcIndirectData messageDigest does not match expected subject digest");
         }
 
-        VerifyRsaSha256Signature(sd, signerIndex);
+        var econtentDigest = SHA256.HashData(sd.EncapContentDigestInput());
+        VerifyPkcs9MessageDigestAndRsaSha256(sd, signerIndex, econtentDigest);
     }
 
     /// <summary><c>verify_signed_data_pkcs9_message_digest_and_rsa_sha256_pkcs1v15_signature</c>.</summary>

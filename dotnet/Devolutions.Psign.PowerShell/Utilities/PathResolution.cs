@@ -9,7 +9,16 @@ internal static class PathResolution
     {
         if (literal)
         {
-            return [cmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath(path)];
+            string resolvedLiteral = cmdlet.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+                path,
+                out ProviderInfo literalProvider,
+                out _);
+            if (!StringComparer.OrdinalIgnoreCase.Equals(literalProvider.Name, "FileSystem"))
+            {
+                throw new PSInvalidOperationException($"Only FileSystem paths are supported; provider was '{literalProvider.Name}'.");
+            }
+
+            return [resolvedLiteral];
         }
 
         Collection<string> resolved = cmdlet.SessionState.Path.GetResolvedProviderPathFromPSPath(

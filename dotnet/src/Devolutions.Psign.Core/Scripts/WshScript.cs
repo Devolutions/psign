@@ -232,7 +232,13 @@ public static class WshScript
         }
 
         var embedded = sig.Digest;
-        var hkind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var hkind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (embedded.Length != hkind.DigestLength())
+        {
+            throw new PsignException(
+                $"Authenticode digest length {embedded.Length} does not match algorithm {hkind.Name()} ({hkind.DigestLength()} bytes)");
+        }
         var (stripped, beginOff) = StripWshSignatureUnits(units, kind);
         var payload = new byte[(stripped.Length * 2) + 4];
         RustText.Utf16LeBytes(stripped).CopyTo(payload, 0);

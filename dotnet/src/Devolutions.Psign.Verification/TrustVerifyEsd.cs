@@ -33,8 +33,7 @@ public static class TrustVerifyEsd
             }
 
             var pkcs7 = EsdDigest.ReadEmbeddedPkcs7(f, header);
-            var embedded = TrustVerifyFormats.EmbeddedIndirectDigest(pkcs7, "WIM/ESD PKCS#7 parse failed");
-            var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+            var (kind, embedded) = TrustVerifyFormats.EmbeddedIndirectDigestAndKind(pkcs7, "WIM/ESD PKCS#7 parse failed");
             var computed = EsdDigest.ComputeWimImageDigestFromHeader(f, header, kind);
             if (!computed.AsSpan().SequenceEqual(embedded))
             {

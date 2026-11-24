@@ -238,7 +238,13 @@ public static class EsdDigest
         }
 
         var embedded = sig.Digest;
-        var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var kind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (embedded.Length != kind.DigestLength())
+        {
+            throw new PsignException(
+                $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+        }
         var computed = ComputeWimImageDigestFromHeader(image, head, kind);
         if (!computed.AsSpan().SequenceEqual(embedded))
         {

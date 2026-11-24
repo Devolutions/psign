@@ -93,7 +93,7 @@ internal static class PeCommands
             c.Handler = p =>
             {
                 var path = p.Pos("path")!;
-                int index = p.Int("index");
+                int index = RequireNonNegative(p.Int("index"), "--index");
                 var bytes = Output.ReadFile(path);
                 var indirect = Wrap(
                     $"inspect-pe-spc-indirect {path} --index {index} (need PKCS#7 row and SpcIndirectData)",
@@ -131,7 +131,7 @@ internal static class PeCommands
             c.Handler = p =>
             {
                 var path = p.Pos("path")!;
-                int index = p.Int("index");
+                int index = RequireNonNegative(p.Int("index"), "--index");
                 var bytes = Output.ReadFile(path);
                 var der = Wrap(
                     $"extract-pe-pkcs7 {path} --index {index} (need PKCS#7 row at this index)",
@@ -178,8 +178,8 @@ internal static class PeCommands
             c.Handler = p =>
             {
                 var path = p.Pos("path")!;
-                int index = p.Int("index");
-                int signerIndex = p.Int("signer-index");
+                int index = RequireNonNegative(p.Int("index"), "--index");
+                int signerIndex = RequireNonNegative(p.Int("signer-index"), "--signer-index");
                 var bytes = Output.ReadFile(path);
                 var pkcs7 = Wrap($"pe-signer-rs256-prehash {path} --index {index} (need PKCS#7 row)", () => PeAuthenticode.NthPkcs7(bytes, index));
                 var sd = Wrap($"parse PKCS#7 SignedData ({path})", () => CmsSignedData.Parse(pkcs7));
@@ -198,7 +198,7 @@ internal static class PeCommands
             c.Handler = p =>
             {
                 var path = p.Pos("path")!;
-                int signerIndex = p.Int("signer-index");
+                int signerIndex = RequireNonNegative(p.Int("signer-index"), "--signer-index");
                 var raw = Output.ReadFile(path);
                 var sd = Wrap($"pkcs7-signer-rs256-prehash {path} (need PKCS#7 SignedData)", () => CmsSignedData.Parse(Pkcs7Wire.NormalizeForAuthenticode(raw)));
                 var prehash = Wrap($"pkcs7-signer-rs256-prehash {path}", () => SignerPrehash.Rs256(sd, signerIndex));
@@ -226,6 +226,9 @@ internal static class PeCommands
             };
         });
     }
+
+    internal static int RequireNonNegative(int value, string flagName) =>
+        value < 0 ? throw new PsignException($"{flagName} must be non-negative, got {value}") : value;
 
     /// <summary>Run <paramref name="f"/> and wrap failures with Rust-style context.</summary>
     internal static T Wrap<T>(string context, Func<T> f)

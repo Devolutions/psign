@@ -38,14 +38,32 @@ public interface IDigestSigner
 }
 
 /// <summary>Local RSA PKCS#1 v1.5 signer.</summary>
-public sealed class RsaDigestSigner : IDigestSigner
+public sealed class RsaDigestSigner : IDigestSigner, IDisposable
 {
     private readonly RSA _key;
+    private readonly bool _ownsKey;
 
-    public RsaDigestSigner(RSA key) => _key = key;
+    public RsaDigestSigner(RSA key)
+        : this(key, ownsKey: false)
+    {
+    }
+
+    public RsaDigestSigner(RSA key, bool ownsKey)
+    {
+        _key = key;
+        _ownsKey = ownsKey;
+    }
 
     public byte[] SignDigest(byte[] digest, AuthenticodeHashKind hash) =>
         _key.SignHash(digest, hash.HashAlgorithmName(), RSASignaturePadding.Pkcs1);
+
+    public void Dispose()
+    {
+        if (_ownsKey)
+        {
+            _key.Dispose();
+        }
+    }
 }
 
 /// <summary>Signer that returns a precomputed signature (split prehash / from-signature workflows).</summary>
@@ -102,14 +120,9 @@ public static class Pkcs7Builder
     public static CmsAttribute SpcStatementTypeAttribute() =>
         new(Oids.SpcStatementType, Der.EncodeSequence(Der.EncodeOid(Oids.SpcIndividualCodeSigning)));
 
-    /// <summary>PKCS#9 <c>signingTime</c> encoded as UTCTime (Rust <c>UtcTime::from_system_time</c>).</summary>
-    public static CmsAttribute SigningTimeAttribute(DateTimeOffset now)
-    {
-        var w = new System.Formats.Asn1.AsnWriter(System.Formats.Asn1.AsnEncodingRules.DER);
-        var t = now.ToUniversalTime();
-        w.WriteUtcTime(new DateTimeOffset(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, TimeSpan.Zero), twoDigitYearMax: 2049);
-        return new CmsAttribute(Oids.Pkcs9SigningTime, w.Encode());
-    }
+    /// <summary>PKCS#9 <c>signingTime</c> encoded per RFC 5652 §11.3 (UTCTime for 1950..2049, GeneralizedTime otherwise).</summary>
+    public static CmsAttribute SigningTimeAttribute(DateTimeOffset now) =>
+        new(Oids.Pkcs9SigningTime, Asn1Time.EncodeTime(now));
 
     /// <summary>CAdES <c>commitmentTypeIndication</c> with only a commitment type identifier.</summary>
     public static CmsAttribute CommitmentTypeIndicationAttribute(string commitmentType) =>

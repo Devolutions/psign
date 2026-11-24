@@ -204,6 +204,7 @@ pub fn prepare_unsigned_cab_for_authenticode_signature(
         u32::try_from(signature_len).map_err(|_| anyhow!("CAB signature too large"))?;
     let original_len = u32::try_from(data.len()).map_err(|_| anyhow!("CAB file too large"))?;
     let sigpos = checked_u32_add(original_len, 24, "signed CAB header")?;
+    let _ = checked_u32_add(sigpos, signature_len, "signed CAB total size")?;
     let original_cb_cabinet = read_u32_le(data, 8)?;
     if original_cb_cabinet != original_len {
         return Err(anyhow!(
@@ -213,6 +214,13 @@ pub fn prepare_unsigned_cab_for_authenticode_signature(
         ));
     }
     let original_coff_files = read_u32_le(data, 16)?;
+    if original_coff_files > original_len {
+        return Err(anyhow!(
+            "CAB coffFiles {} exceeds file size {}",
+            original_coff_files,
+            original_len
+        ));
+    }
     let folder_count = read_u16_le(data, 26)? as usize;
     let original_folder_table = cffolder_table_offset(data, ctx.flags)?;
     let original_coff_files_usize =
@@ -305,10 +313,10 @@ fn hash_sz_field(
         hasher.update(&[b]);
         idx += 1;
         if b == 0 {
-            break;
+            return Ok(idx);
         }
     }
-    Ok(idx)
+    Err(anyhow!("truncated CAB sz field"))
 }
 
 /// Recompute the CAB image digest (`cab_digest_calc`).

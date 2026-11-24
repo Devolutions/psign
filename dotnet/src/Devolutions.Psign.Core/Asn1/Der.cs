@@ -195,7 +195,8 @@ public static class Der
             return null;
         }
 
-        return 1 + parsed.Value.HeaderLength + parsed.Value.Length;
+        long total = 1L + parsed.Value.HeaderLength + parsed.Value.Length;
+        return total > int.MaxValue ? null : (int)total;
     }
 
     /// <summary>Total byte length of a definite-length TLV of any single-octet tag.</summary>

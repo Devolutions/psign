@@ -123,7 +123,7 @@ public sealed record TrustVerifySharedArgs
                 OcspUrlOverride = OcspUrlOverride,
                 RevocationMode = RevocationMode,
                 CrlUrlOverride = CrlUrlOverride,
-                Timeout = TimeSpan.FromSeconds(OnlineTimeoutSecs),
+                Timeout = TimeSpan.FromSeconds(Math.Min(OnlineTimeoutSecs, (ulong)(TimeSpan.MaxValue.TotalSeconds - 1))),
                 MaxDownloadBytes = OnlineMaxDownloadBytes,
             },
             Policy = new AuthenticodeTrustPolicy
@@ -155,12 +155,7 @@ public sealed record TrustVerifySharedArgs
     public static byte[] ParseSha256Hex(string s)
     {
         var hex = s.Trim();
-        if (hex.StartsWith("0x", StringComparison.Ordinal))
-        {
-            hex = hex[2..];
-        }
-
-        if (hex.StartsWith("0X", StringComparison.Ordinal))
+        if (hex.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
             hex = hex[2..];
         }

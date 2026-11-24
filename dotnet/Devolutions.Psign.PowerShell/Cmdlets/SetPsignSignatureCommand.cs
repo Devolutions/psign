@@ -265,7 +265,13 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
         }
         finally
         {
-            Directory.Delete(tempDirectory, recursive: true);
+            try
+            {
+                Directory.Delete(tempDirectory, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
@@ -355,7 +361,10 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
 
     private FileAttributes? PrepareWritableTarget(string inputPath, string targetPath)
     {
-        if (!StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(inputPath), Path.GetFullPath(targetPath)))
+        StringComparer comparer = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        if (!comparer.Equals(Path.GetFullPath(inputPath), Path.GetFullPath(targetPath)))
         {
             return null;
         }
@@ -403,8 +412,16 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
         {
             materialCount++;
         }
-        if (AzureKeyVaultUrl is not null)
+        if (AzureKeyVaultUrl is not null || AzureKeyVaultCertificate is not null)
         {
+            if (AzureKeyVaultUrl is null)
+            {
+                ThrowTerminatingError(new ErrorRecord(
+                    new PSInvalidOperationException("-AzureKeyVaultUrl is required when using -AzureKeyVaultCertificate."),
+                    "PsignSignatureAkvUrlRequired",
+                    ErrorCategory.InvalidArgument,
+                    this));
+            }
             if (AzureKeyVaultCertificate is null)
             {
                 ThrowTerminatingError(new ErrorRecord(
@@ -415,7 +432,7 @@ public sealed class SetPsignSignatureCommand : PSCmdlet
             }
             materialCount++;
         }
-        if (ArtifactSigningEndpoint is not null || ArtifactSigningAccountName is not null)
+        if (ArtifactSigningEndpoint is not null || ArtifactSigningAccountName is not null || ArtifactSigningProfileName is not null)
         {
             materialCount++;
         }

@@ -28,27 +28,14 @@ public static class PeEmbed
     public static uint ComputeImageChecksum(ReadOnlySpan<byte> image)
     {
         int checkOff = ChecksumFieldOffset(image);
+        int checkEnd = checkOff + 4;
         ulong sum = 0;
-        int i = 0;
-        while (i < image.Length)
+        for (int i = 0; i < image.Length; i += 2)
         {
-            if (i >= checkOff && i < checkOff + 4)
-            {
-                i = checkOff + 4;
-                continue;
-            }
-
-            if (i + 1 < image.Length)
-            {
-                sum += BinaryPrimitives.ReadUInt16LittleEndian(image[i..]);
-            }
-            else
-            {
-                sum += image[i];
-            }
-
+            byte lo = (i >= checkOff && i < checkEnd) ? (byte)0 : image[i];
+            byte hi = (i + 1 < image.Length && !(i + 1 >= checkOff && i + 1 < checkEnd)) ? image[i + 1] : (byte)0;
+            sum += (ushort)(lo | (hi << 8));
             sum = (sum >> 16) + (sum & 0xFFFF);
-            i += 2;
         }
 
         while ((sum >> 16) != 0)
@@ -279,7 +266,8 @@ public static class PeEmbed
     {
         var replacement = WrapPkcs7InWinCertificate(pkcs7);
         var (va, size) = ReadSecurityDataDirectory(image);
-        if (va == 0 || size == 0)
+        ValidateAlignment(va, size);
+        if (va == 0 && size == 0)
         {
             throw new PsignException("PE has no certificate table");
         }
@@ -303,12 +291,20 @@ public static class PeEmbed
                 throw new PsignException($"truncated WIN_CERTIFICATE header at table offset {offset}");
             }
 
-            int len = (int)BinaryPrimitives.ReadUInt32LittleEndian(table[offset..]);
-            if (len < 8 || offset + (long)len > table.Length)
+            uint rawLen = BinaryPrimitives.ReadUInt32LittleEndian(table[offset..]);
+            if (rawLen < 8 || offset + (long)rawLen > table.Length)
             {
-                throw new PsignException($"invalid WIN_CERTIFICATE length {len} at table offset {offset}");
+                throw new PsignException($"invalid WIN_CERTIFICATE length {rawLen} at table offset {offset}");
             }
 
+            int len = (int)rawLen;
+            long rounded = (rawLen + 7L) & ~7L;
+            if (offset + rounded > table.Length)
+            {
+                throw new PsignException($"WIN_CERTIFICATE aligned length {rounded} exceeds certificate table at offset {offset}");
+            }
+
+            int alignedLen = (int)rounded;
             ushort type = BinaryPrimitives.ReadUInt16LittleEndian(table[(offset + 6)..]);
             if (type == AttributeCertificate.WinCertTypePkcsSignedData)
             {
@@ -319,17 +315,17 @@ public static class PeEmbed
                 }
                 else
                 {
-                    rebuilt.Write(table.Slice(offset, len));
+                    rebuilt.Write(table.Slice(offset, alignedLen));
                 }
 
                 seen++;
             }
             else
             {
-                rebuilt.Write(table.Slice(offset, len));
+                rebuilt.Write(table.Slice(offset, alignedLen));
             }
 
-            offset += len;
+            offset += alignedLen;
         }
 
         if (!replaced)
@@ -350,7 +346,8 @@ public static class PeEmbed
     public static (byte[] Image, int Removed) RemoveCertificates(byte[] image)
     {
         var (va, size) = ReadSecurityDataDirectory(image);
-        if (va == 0 || size == 0)
+        ValidateAlignment(va, size);
+        if (va == 0 && size == 0)
         {
             return (image, 0);
         }

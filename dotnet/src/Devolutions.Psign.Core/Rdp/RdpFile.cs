@@ -116,7 +116,8 @@ public static class RdpFile
         }
 
         var strict = RustText.TryFromUtf8(bytes);
-        return strict is not null ? strict.TrimStart('﻿') : RustText.FromUtf8Lossy(bytes);
+        var text = strict ?? RustText.FromUtf8Lossy(bytes);
+        return text.TrimStart('\uFEFF');
     }
 
     private static string? DecodeBomlessUtf16(ReadOnlySpan<byte> bytes)

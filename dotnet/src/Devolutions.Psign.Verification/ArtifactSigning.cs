@@ -583,7 +583,7 @@ public static class ArtifactSigning
             RequireValidTimestamp = false,
         };
         TrustPkcs7.VerifyPkcs7TrustWithBinding(binding, pkcs7Der, pkcs7Index, subjectDigest, asAnchors, asCerts, trustPolicy, opts.Online, instant, opts.VerboseChain, opts.Log);
-        var root = SignerTerminalRoot(pkcs7Der, asAnchors, asCerts);
+        var root = SignerTerminalRoot(pkcs7Der, asAnchors, asCerts, opts.Online);
         return VerifiedSignature(pkcs7Index, subject, identity, root, timestamped, instant);
     }
 
@@ -610,7 +610,7 @@ public static class ArtifactSigning
         return VerifiedSignature(signatureIndex, subject, identity, root, timestamped, instant);
     }
 
-    private static CertificateInfo SignerTerminalRoot(byte[] pkcs7Der, AnchorStore anchors, IReadOnlyList<CertificateInfo> anchorCerts)
+    private static CertificateInfo SignerTerminalRoot(byte[] pkcs7Der, AnchorStore anchors, IReadOnlyList<CertificateInfo> anchorCerts, OnlineTrustOptions online)
     {
         var sd = CmsTrustHelpers.ParsePkcs7SignedDataDer(Pkcs7Wire.NormalizeForAuthenticode(pkcs7Der));
         if (sd.SignerInfos.Count == 0)
@@ -620,7 +620,7 @@ public static class ArtifactSigning
 
         var leaf = CmsTrustHelpers.CertificateForSigner(sd, sd.SignerInfos[0]);
         var pool = TrustChain.MergeUniqueCerts(anchorCerts, sd.GetCertificates());
-        var chain = TrustChain.IssuerChainExcludingLeaf(leaf, pool, anchors);
+        var chain = TrustChain.IssuerChainExcludingLeafOnline(leaf, pool, online, anchors);
         return TrustChain.TerminalRootCert(leaf, chain);
     }
 

@@ -222,6 +222,12 @@ public static class Rfc3161
             return null;
         }
 
+        var total = DerDefiniteTlvTotalLen(tlv);
+        if (total is null || total.Value != tlv.Length)
+        {
+            return null;
+        }
+
         var body = DerTlvBody(tlv);
         if (body is null || body.Value.Length == 0)
         {
@@ -238,7 +244,7 @@ public static class Rfc3161
 
         if (valueOctets.IsEmpty)
         {
-            return [];
+            return unused == 0 ? [] : null;
         }
 
         if (valueOctets.Length * 8 < unused)
@@ -279,37 +285,34 @@ public static class Rfc3161
 
         int pos = 2;
         byte ll = input[1];
-        int bodyLen;
+        long bodyLen;
         if (ll < 0x80)
         {
             bodyLen = ll;
         }
-        else if (ll == 0x81)
+        else if (ll is >= 0x81 and <= 0x84)
         {
-            if (input.Length < 3)
+            int n = ll & 0x7f;
+            if (input.Length < 2 + n)
             {
                 return null;
             }
 
-            bodyLen = input[2];
-            pos += 1;
-        }
-        else if (ll == 0x82)
-        {
-            if (input.Length < 4)
+            bodyLen = 0;
+            for (int i = 0; i < n; i++)
             {
-                return null;
+                bodyLen = (bodyLen << 8) | input[pos + i];
             }
 
-            bodyLen = (input[2] << 8) | input[3];
-            pos += 2;
+            pos += n;
         }
         else
         {
             return null;
         }
 
-        return pos + bodyLen;
+        long total = pos + bodyLen;
+        return total > int.MaxValue ? null : (int)total;
     }
 
     private static (int Tlv, int Remaining)? DerReadTlv0(ReadOnlySpan<byte> input)
@@ -331,7 +334,7 @@ public static class Rfc3161
             return null;
         }
 
-        int lfs = tlv[1] < 0x80 ? 1 : tlv[1] == 0x81 ? 2 : 3;
+        int lfs = tlv[1] < 0x80 ? 1 : 1 + (tlv[1] & 0x7f);
         int start = 1 + lfs;
         if (start > total.Value)
         {

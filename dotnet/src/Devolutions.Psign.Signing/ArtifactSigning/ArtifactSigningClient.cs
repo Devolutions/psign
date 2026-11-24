@@ -128,7 +128,7 @@ public sealed class ArtifactSigningClient : IDisposable
     public static string OperationLocationUrl(string baseUrl, string location)
     {
         var trimmed = location.Trim();
-        if (trimmed.StartsWith("http://", StringComparison.Ordinal) || trimmed.StartsWith("https://", StringComparison.Ordinal))
+        if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
             return trimmed;
         }
@@ -227,7 +227,7 @@ public sealed class ArtifactSigningClient : IDisposable
 
     private async Task<string> AcquireManagedIdentityTokenAsync(string? clientId, string? resourceId, CancellationToken ct)
     {
-        var endpoint = _environment("PSIGN_CODESIGNING_IMDS_ENDPOINT") ?? DefaultImdsEndpoint;
+        var endpoint = Env("PSIGN_CODESIGNING_IMDS_ENDPOINT") ?? DefaultImdsEndpoint;
         var query = new List<KeyValuePair<string, string>>
         {
             new("api-version", "2018-02-01"),
@@ -265,7 +265,7 @@ public sealed class ArtifactSigningClient : IDisposable
             throw new PsignException("client credentials require non-empty tenant_id, client_id, client_secret");
         }
 
-        var tokenUrl = $"{NormalizeAuthority(authority)}/{tenant}/oauth2/v2.0/token";
+        var tokenUrl = $"{NormalizeAuthority(authority)}/{HttpText.EncodePathSegment(tenant)}/oauth2/v2.0/token";
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
         {
             Content = FormContent(
@@ -303,7 +303,7 @@ public sealed class ArtifactSigningClient : IDisposable
             throw new PsignException("workload identity requires non-empty tenant_id, client_id, and federated token file");
         }
 
-        var tokenUrl = $"{NormalizeAuthority(authority)}/{tenant}/oauth2/v2.0/token";
+        var tokenUrl = $"{NormalizeAuthority(authority)}/{HttpText.EncodePathSegment(tenant)}/oauth2/v2.0/token";
         using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
         {
             Content = FormContent(
@@ -343,18 +343,31 @@ public sealed class ArtifactSigningClient : IDisposable
             throw new PsignException("digest is empty");
         }
 
+        var rawAccount = p.AccountName.Trim();
+        var rawProfile = p.ProfileName.Trim();
+        var api = p.ApiVersion.Trim();
+        var sigAlg = p.SignatureAlgorithm.Trim();
+        if (rawAccount.Length == 0 || rawProfile.Length == 0 || api.Length == 0 || sigAlg.Length == 0)
+        {
+            throw new PsignException("Artifact Signing account, profile, signature algorithm, and API version must not be empty");
+        }
+
+        if (string.IsNullOrWhiteSpace(p.EndpointBaseUrl) && string.IsNullOrWhiteSpace(p.Region))
+        {
+            throw new PsignException("Artifact Signing requires either an endpoint base URL or a non-empty region");
+        }
+
         var token = await AcquireTokenAsync(p.Auth, p.Authority, cancellationToken).ConfigureAwait(false);
         var baseUrl = DataPlaneBaseUrl(p);
-        var account = p.AccountName.Trim();
-        var profile = p.ProfileName.Trim();
-        var api = p.ApiVersion.Trim();
-        var submitUrl = $"{baseUrl}/codesigningaccounts/{account}/certificateprofiles/{profile}:sign?api-version={api}";
+        var account = HttpText.EncodePathSegment(rawAccount);
+        var profile = HttpText.EncodePathSegment(rawProfile);
+        var submitUrl = HttpText.AppendQueryPair($"{baseUrl}/codesigningaccounts/{account}/certificateprofiles/{profile}:sign", "api-version", api);
 
         // serde_json::json! builds a BTreeMap, so the body keys are sorted.
         var body = RustJson.Compact(new JsonObject
         {
             ["digest"] = Convert.ToBase64String(p.Digest),
-            ["signatureAlgorithm"] = p.SignatureAlgorithm.Trim(),
+            ["signatureAlgorithm"] = sigAlg,
         });
 
         using var request = new HttpRequestMessage(HttpMethod.Post, submitUrl)
@@ -382,6 +395,7 @@ public sealed class ArtifactSigningClient : IDisposable
         if (opLocation is not null)
         {
             pollUrl = OperationLocationUrl(baseUrl, opLocation);
+            EnsureSameOrigin(baseUrl, pollUrl);
         }
         else if (StringMember(acceptJson, "status") == "Succeeded")
         {
@@ -389,7 +403,10 @@ public sealed class ArtifactSigningClient : IDisposable
         }
         else if ((StringMember(acceptJson, "id") ?? StringMember(acceptJson, "operationId")) is { } id)
         {
-            pollUrl = $"{baseUrl}/codesigningaccounts/{account}/certificateprofiles/{profile}/sign/{id}?api-version={api}";
+            pollUrl = HttpText.AppendQueryPair(
+                $"{baseUrl}/codesigningaccounts/{account}/certificateprofiles/{profile}/sign/{HttpText.EncodePathSegment(id.Trim())}",
+                "api-version",
+                api);
         }
         else
         {
@@ -398,6 +415,18 @@ public sealed class ArtifactSigningClient : IDisposable
 
         debug?.Invoke($"artifact-signing poll URL={pollUrl}");
         return await PollOperationAsync(token, pollUrl, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void EnsureSameOrigin(string baseUrl, string pollUrl)
+    {
+        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri)
+            || !Uri.TryCreate(pollUrl, UriKind.Absolute, out var pollUri)
+            || !string.Equals(baseUri.Scheme, pollUri.Scheme, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(baseUri.Host, pollUri.Host, StringComparison.OrdinalIgnoreCase)
+            || baseUri.Port != pollUri.Port)
+        {
+            throw new PsignException($"Artifact Signing Operation-Location origin does not match data-plane endpoint: {pollUrl}");
+        }
     }
 
     /// <summary>Submit and decode the signature result (Rust <c>submit_codesign_hash_signature_blocking</c>).</summary>
@@ -430,7 +459,11 @@ public sealed class ArtifactSigningClient : IDisposable
                 case "Canceled":
                     throw new PsignException("codesign operation canceled");
                 default:
-                    await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+                    if (attempt + 1 < MaxPollAttempts)
+                    {
+                        await Task.Delay(PollInterval, ct).ConfigureAwait(false);
+                    }
+
                     break;
             }
         }
@@ -557,7 +590,7 @@ public sealed class ArtifactSigningClient : IDisposable
             throw new PsignException($"Artifact Signing root certificate HTTP {rsp.StatusText}: {rsp.Text}");
         }
 
-        ValidateRootCertificateResponse(rsp.Message.Content.Headers.ContentType?.ToString(), rsp.Body);
+        ValidateRootCertificateResponse(rsp.Header("Content-Type"), rsp.Body);
         return rsp.Body;
     }
 

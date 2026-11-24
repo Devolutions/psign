@@ -22,7 +22,7 @@
 
 use crate::anchor::{AnchorStore, cert_sha1_thumbprint, parse_cert_bytes};
 use crate::chain::verify_certificate_chain_to_anchors;
-use crate::chain::{issuer_chain_excluding_leaf, merge_unique_certs, terminal_root_cert};
+use crate::chain::{merge_unique_certs, terminal_root_cert_owned};
 use crate::policy::AuthenticodeTrustPolicy;
 use crate::rfc3161_extract::{
     trusted_utc_date_from_authenticode_timestamp_token, trusted_utc_date_from_timestamp_token,
@@ -620,7 +620,7 @@ pub fn verify_artifact_signing_pkcs7(
         opts.verbose_chain,
     )?;
 
-    let root = signer_terminal_root(pkcs7_der, &anchors, &anchor_certs)?;
+    let root = signer_terminal_root(pkcs7_der, &anchors, &anchor_certs, &opts.online)?;
     verified_signature(
         pkcs7_index,
         signer_subject,
@@ -687,6 +687,7 @@ fn signer_terminal_root(
     pkcs7_der: &[u8],
     anchors: &AnchorStore,
     anchor_certs: &[Cert],
+    online: &crate::policy::OnlineTrustOptions,
 ) -> Result<Cert> {
     let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
     let sd = parse_pkcs7_signed_data_der(normalized.as_ref())?;
@@ -710,9 +711,10 @@ fn signer_terminal_root(
         })
         .filter_map(|der| Cert::from_der(&der).ok())
         .collect();
-    let pool = merge_unique_certs(anchor_certs.to_vec(), embedded)?;
-    let chain = issuer_chain_excluding_leaf(&leaf, &pool, Some(anchors))?;
-    Ok(terminal_root_cert(&leaf, &chain).clone())
+    let mut pool = merge_unique_certs(anchor_certs.to_vec(), embedded)?;
+    let chain =
+        crate::chain::issuer_chain_excluding_leaf_online(&leaf, &mut pool, online, Some(anchors))?;
+    Ok(terminal_root_cert_owned(&leaf, &chain).clone())
 }
 
 fn utc_date_rfc3339(d: &UtcDate) -> String {

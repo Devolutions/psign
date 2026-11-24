@@ -163,7 +163,18 @@ public class CodeCommandParityTests
         CliHarness.AssertSameOutput(Local("--output", output, "--continue-on-error", "encrypted.emsix", "valid.app", "archive.cab", "app.application"));
         CliHarness.AssertSameOutput(Local("--output", output, "--continue-on-error", "--max-concurrency", "3", "encrypted.emsix", "valid.app", "archive.cab", "unsupported.exe"));
         CliHarness.AssertSameOutput(Local("--output", output, "--publisher-name", "", "companion.zip"));
-        CliHarness.AssertSameOutput(Code("--base-directory", dir.DirPath, "--cert", dir.File("bad.der"), "--key", signer.KeyPath, "--output", output, "app.application", "unsupported.exe", "--continue-on-error"));
+        // Both runtimes reject a malformed --cert for ClickOnce/PE; innermost ASN.1 library text differs like bad.key below.
+        var badCert = Code("--base-directory", dir.DirPath, "--cert", dir.File("bad.der"), "--key", signer.KeyPath, "--output", output, "app.application", "unsupported.exe", "--continue-on-error");
+        var rustBadCert = CliHarness.RunRust(badCert);
+        var managedBadCert = CliHarness.RunManaged(badCert);
+        Assert.Equal(rustBadCert.ExitCode, managedBadCert.ExitCode);
+        Assert.Equal(rustBadCert.Stderr, managedBadCert.Stderr);
+        var rustBadCertLines = rustBadCert.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var managedBadCertLines = managedBadCert.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(rustBadCertLines.Length, managedBadCertLines.Length);
+        Assert.StartsWith(rustBadCertLines[0][..rustBadCertLines[0].IndexOf("parse DER certificate: ", StringComparison.Ordinal)], managedBadCertLines[0]);
+        Assert.Contains("parse DER certificate: ", managedBadCertLines[0]);
+        Assert.Equal(rustBadCertLines[1], managedBadCertLines[1]);
         // The innermost key-parser diagnostic text comes from different ASN.1 libraries; the context chain matches.
         var badKey = Code("--base-directory", dir.DirPath, "--cert", signer.CertPath, "--key", dir.File("bad.key"), "--output", output, "app.application");
         var rustBadKey = CliHarness.RunRust(badKey);

@@ -661,26 +661,42 @@ fn build_ocsp_cert_id_der(cert: &Cert, issuer: &Cert) -> Result<Vec<u8>> {
 
 fn parse_http_uri_general_names(input: &[u8]) -> Result<Vec<String>> {
     let mut urls = Vec::new();
-    let mut pos = 0usize;
-    while pos < input.len() {
-        if input[pos] == 0x86 {
-            let (body_start, len) = read_len(input, pos + 1)?;
-            let end = body_start
-                .checked_add(len)
-                .ok_or_else(|| anyhow!("URI length overflow"))?;
-            if end <= input.len() {
-                let uri = std::str::from_utf8(&input[body_start..end])
-                    .map_err(|e| anyhow!("URI is not UTF-8: {e}"))?;
-                if uri.starts_with("http://") {
-                    urls.push(uri.to_string());
-                }
-                pos = end;
-                continue;
-            }
-        }
-        pos += 1;
-    }
+    collect_http_uri_general_names(input, 0, input.len(), &mut urls, 0)?;
     Ok(urls)
+}
+
+fn collect_http_uri_general_names(
+    input: &[u8],
+    start: usize,
+    end: usize,
+    urls: &mut Vec<String>,
+    depth: usize,
+) -> Result<()> {
+    if depth > 32 {
+        return Ok(());
+    }
+    let mut pos = start;
+    while pos < end {
+        let tag = input[pos];
+        let (body_start, len) = read_len(input, pos + 1)?;
+        let tlv_end = body_start
+            .checked_add(len)
+            .ok_or_else(|| anyhow!("URI length overflow"))?;
+        if tlv_end > end {
+            return Err(anyhow!("TLV length exceeds input"));
+        }
+        if tag == 0x86 {
+            let uri = std::str::from_utf8(&input[body_start..tlv_end])
+                .map_err(|e| anyhow!("URI is not UTF-8: {e}"))?;
+            if uri.starts_with("http://") {
+                urls.push(uri.to_string());
+            }
+        } else if (tag & 0x20) != 0 {
+            collect_http_uri_general_names(input, body_start, tlv_end, urls, depth + 1)?;
+        }
+        pos = tlv_end;
+    }
+    Ok(())
 }
 
 pub(crate) fn http_get_limited(url: &str, options: &OnlineTrustOptions) -> Result<Vec<u8>> {

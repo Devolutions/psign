@@ -91,6 +91,14 @@ public static class TrustVerifyNuGet
             content = found ?? throw new PsignException("NuGet package hash mismatch: the package content changed after signing");
         }
 
+        var siDigestKind = AuthenticodeHashKinds.FromOid(sd.SignerInfos[0].DigestAlgorithm.Oid)
+            ?? throw new PsignException($"unsupported NuGet signature digest algorithm OID {sd.SignerInfos[0].DigestAlgorithm.Oid}");
+        if (siDigestKind == AuthenticodeHashKind.Sha1 || messageDigest.Length != siDigestKind.DigestLength())
+        {
+            throw new PsignException(
+                $"NuGet signature messageDigest length {messageDigest.Length} does not match SignerInfo digestAlgorithm {siDigestKind.Name()}");
+        }
+
         if (!DigestForLength(messageDigest.Length, content).AsSpan().SequenceEqual(messageDigest))
         {
             throw new PsignException("NuGet signature messageDigest mismatch: the signed content differs from the embedded content");

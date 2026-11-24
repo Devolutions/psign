@@ -65,7 +65,7 @@ internal static class TimestampCommand
         LegacyUrl = p.Value("legacy-url"),
         SealTimestampUrl = p.Value("seal-timestamp-url"),
         Digest = p.Value("digest"),
-        SignatureIndex = p.Value("signature-index") is { } tp ? uint.Parse(tp.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture) : null,
+        SignatureIndex = p.Value("signature-index") is { } tp ? uint.Parse(tp.StartsWith('+') ? tp[1..] : tp, NumberStyles.None, CultureInfo.InvariantCulture) : null,
         TimestampPkcs7Files = p.Flag("timestamp-pkcs7-files"),
         RemoveSeal = p.Flag("remove-seal"),
         NoSealWarn = p.Flag("no-seal-warn"),
@@ -126,7 +126,7 @@ internal static class TimestampCommand
             {
                 image = File.ReadAllBytes(path);
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
             {
                 throw new PsignException($"read {path}: {IoErrorText.Message(e)}");
             }
@@ -142,7 +142,7 @@ internal static class TimestampCommand
                     $"--mode portable timestamp supports only PE/WinMD files with a primary embedded Authenticode signature ({path}): {e.Message}");
             }
 
-            PsignTool.RunPortableArgs(["timestamp-pe-rfc3161", path, "--rfc3161-url", url, "--digest", digest, "--output", path]);
+            PsignTool.RunPortableArgs(["timestamp-pe-rfc3161", "--rfc3161-url", url, "--digest", digest, "--output", path, "--", path]);
         }
     }
 }

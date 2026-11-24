@@ -19,28 +19,43 @@ public static class CodePatterns
     public static List<CodePatternRule> PatternRules(string input)
     {
         bool include = true;
-        string pattern;
+        string raw;
+        string prefix = string.Empty;
         if (input.StartsWith("\\!", StringComparison.Ordinal))
         {
-            pattern = "!" + UnescapePattern(input[2..]);
+            prefix = "!";
+            raw = input[2..];
         }
         else if (input.StartsWith('!'))
         {
             include = false;
-            pattern = UnescapePattern(input[1..]);
+            raw = input[1..];
         }
         else
         {
-            pattern = UnescapePattern(input);
+            raw = input;
         }
 
-        if (pattern.Length == 0)
+        if (raw.Length == 0 && prefix.Length == 0)
         {
             throw new PsignException("empty pattern");
         }
 
-        ValidateRelativePattern(pattern);
-        return ExpandBraces(pattern).Select(p => new CodePatternRule(include, p)).ToList();
+        var expanded = ExpandBraces(raw);
+        var rules = new List<CodePatternRule>(expanded.Count);
+        foreach (var item in expanded)
+        {
+            string pattern = prefix + UnescapePattern(item);
+            if (pattern.Length == 0)
+            {
+                throw new PsignException("empty pattern");
+            }
+
+            ValidateRelativePattern(pattern);
+            rules.Add(new CodePatternRule(include, pattern));
+        }
+
+        return rules;
     }
 
     /// <summary>Rust <c>unescape_pattern</c>: <c>\!</c>, <c>\{</c>, <c>\}</c>, <c>\\</c> become literals.</summary>
@@ -77,24 +92,36 @@ public static class CodePatterns
         return sb.ToString();
     }
 
+    private const int MaxBraceExpansions = 65_536;
+
     /// <summary>Rust <c>expand_braces</c>: nested <c>{a,b}</c> lists and <c>{01..10}</c> numeric ranges.</summary>
     public static List<string> ExpandBraces(string pattern)
     {
+        var output = new List<string>();
+        ExpandBracesInto(pattern, output);
+        return output;
+    }
+
+    private static void ExpandBracesInto(string pattern, List<string> output)
+    {
         if (FirstBrace(pattern) is not { } span)
         {
-            return [pattern];
+            if (output.Count >= MaxBraceExpansions)
+            {
+                throw new PsignException($"brace expansion exceeds limit of {MaxBraceExpansions} patterns");
+            }
+
+            output.Add(pattern);
+            return;
         }
 
         string before = pattern[..span.Start];
         string body = pattern[(span.Start + 1)..span.End];
         string after = pattern[(span.End + 1)..];
-        var output = new List<string>();
         foreach (var choice in BraceChoices(body))
         {
-            output.AddRange(ExpandBraces(before + choice + after));
+            ExpandBracesInto(before + choice + after, output);
         }
-
-        return output;
     }
 
     private static (int Start, int End)? FirstBrace(string pattern)
@@ -157,6 +184,12 @@ public static class CodePatterns
             string endText = body[(dots + 2)..];
             if (TryParseI64(startText, out long first) && TryParseI64(endText, out long last))
             {
+                decimal span = Math.Abs((decimal)last - (decimal)first) + 1m;
+                if (span > MaxBraceExpansions)
+                {
+                    throw new PsignException($"brace range expansion exceeds limit of {MaxBraceExpansions} items");
+                }
+
                 int width = Math.Max(Encoding.UTF8.GetByteCount(startText), Encoding.UTF8.GetByteCount(endText));
                 var range = new List<string>();
                 if (first <= last)

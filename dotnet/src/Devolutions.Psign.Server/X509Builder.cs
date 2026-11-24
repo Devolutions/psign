@@ -113,9 +113,25 @@ internal static class X509Builder
 
     internal static byte[] SubjectPublicKeyBits(byte[] spki)
     {
-        var outer = Der.First(spki)!.Value;
-        var children = Der.Children(spki, outer)!;
-        return children[1].Value(spki)[1..].ToArray();
+        var outer = Der.First(spki);
+        if (outer is null || outer.Value.Tag != 0x30)
+        {
+            throw new Devolutions.Psign.Core.PsignException("malformed SubjectPublicKeyInfo");
+        }
+
+        var children = Der.Children(spki, outer.Value);
+        if (children is not { Count: 2 } || children[1].Tag != 0x03)
+        {
+            throw new Devolutions.Psign.Core.PsignException("malformed SubjectPublicKeyInfo");
+        }
+
+        var bitString = children[1].Value(spki);
+        if (bitString.Length == 0 || bitString[0] != 0)
+        {
+            throw new Devolutions.Psign.Core.PsignException("malformed SubjectPublicKeyInfo");
+        }
+
+        return bitString[1..].ToArray();
     }
 
     private static byte[] Extension(string oid, bool critical, byte[] value) =>

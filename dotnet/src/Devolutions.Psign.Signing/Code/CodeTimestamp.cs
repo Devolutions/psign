@@ -86,7 +86,7 @@ internal sealed class CodeTimestamp
         {
             sd = CmsSignedData.Parse(pkcs7Der);
         }
-        catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException)
+        catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException or FormatException)
         {
             throw new PsignException("parse PKCS#7 SignedData", e);
         }
@@ -130,10 +130,17 @@ internal sealed class CodeTimestamp
         var der = Devolutions.Psign.Core.Timestamp.Rfc3161.BuildTimestampRequestBytes(new Devolutions.Psign.Core.Timestamp.Rfc3161TimestampRequestPlan { DigestAlgOid = Kind(algorithm).Oid(), Nonce = null, CertReq = true }, imprint)
             ?? throw new PsignException("unsupported digest OID / preimage length for RFC3161 TimeStampReq");
         var target = url.Trim();
+        if (!Uri.TryCreate(target, UriKind.Absolute, out var targetUri)
+            || (!string.Equals(targetUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(targetUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new PsignException($"POST TimeStampReq to {target}: invalid URL");
+        }
+
         using var http = new HttpTransport(_handler);
         var rsp = HttpTransport.RunSync(async () =>
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, target) { Content = new ByteArrayContent(der) };
+            using var request = new HttpRequestMessage(HttpMethod.Post, targetUri) { Content = new ByteArrayContent(der) };
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/timestamp-query");
             request.Headers.TryAddWithoutValidation("Accept", "application/timestamp-reply, application/timestamp-response");
             return await http.SendAsync(request, TimeSpan.FromSeconds(120), $"POST TimeStampReq to {target}", CancellationToken.None).ConfigureAwait(false);

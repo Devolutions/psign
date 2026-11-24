@@ -459,7 +459,10 @@ pub fn script_authenticode_spc_indirect_data(
     script: &[u8],
     digest_algorithm: AuthenticodeSigningDigest,
 ) -> Result<SpcIndirectDataContent> {
-    let units = crate::ps_script::file_utf16_units(script);
+    let mut units = crate::ps_script::file_utf16_units(script);
+    if script.starts_with(&[0xff, 0xfe]) {
+        units.insert(0, 0xfeff_u16);
+    }
     let script_digest = crate::ps_script::hash_payload(
         digest_algorithm.pe_hash_kind(),
         &crate::ps_script::utf16le_bytes(&units),
@@ -1342,7 +1345,17 @@ pub fn verify_signed_data_authenticode_indirect_digest_and_rsa_sha256_pkcs1v15_s
             "SpcIndirectData messageDigest does not match expected subject digest"
         ));
     }
-    verify_signed_data_rsa_sha256_pkcs1v15_signature(sd, signer_index)
+    let encap_any = sd
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .ok_or_else(|| anyhow!("SignedData missing encapsulated content"))?;
+    let econtent_digest = Sha256::digest(encap_any.value());
+    verify_signed_data_pkcs9_message_digest_and_rsa_sha256_pkcs1v15_signature(
+        sd,
+        signer_index,
+        econtent_digest.as_slice(),
+    )
 }
 
 /// Match PKCS#9 **`messageDigest`** against `expected_content_digest`, then verify **RSA PKCS#1 v1.5**

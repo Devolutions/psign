@@ -497,30 +497,26 @@ public static class VsixPackage
     public static byte[] SignedInfoXmlFromSignatureXml(byte[] signatureXml)
     {
         string text = Utf8(signatureXml, "VSIX signature XML is not UTF-8");
-        int start = text.IndexOf("<SignedInfo>", StringComparison.Ordinal);
-        if (start < 0)
+        var span = Xml.XmlTextScan.FindXmlElementSpanByLocalName(text, "SignedInfo", 0);
+        if (span is null)
         {
             throw new PsignException("VSIX signature XML is missing SignedInfo");
         }
 
-        int close = text.IndexOf("</SignedInfo>", start, StringComparison.Ordinal);
-        if (close < 0)
-        {
-            throw new PsignException("VSIX signature XML SignedInfo element is not closed");
-        }
-
-        return Encoding.UTF8.GetBytes(text[start..(close + "</SignedInfo>".Length)]);
+        return Encoding.UTF8.GetBytes(text[span.Value.Start..span.Value.End]);
     }
 
     /// <summary>Decoded <c>SignatureValue</c> (Rust <c>signature_value_from_signature_xml</c>).</summary>
     public static byte[] SignatureValueFromSignatureXml(byte[] signatureXml)
     {
         string text = Utf8(signatureXml, "VSIX signature XML is not UTF-8");
-        string value = ElementText(text, "SignatureValue") ?? throw new PsignException("VSIX signature XML is missing SignatureValue");
+        var span = Xml.XmlTextScan.FindXmlElementByLocalName(text, "SignatureValue", 0)
+            ?? throw new PsignException("VSIX signature XML is missing SignatureValue");
+        string compact = new(text[span.ContentStart..span.ContentEnd].Where(c => !char.IsWhiteSpace(c)).ToArray());
         byte[] signature;
         try
         {
-            signature = Base64Standard.Decode(value);
+            signature = Base64Standard.Decode(compact);
         }
         catch (FormatException e)
         {
@@ -539,11 +535,13 @@ public static class VsixPackage
     public static byte[] SignerCertificateFromSignatureXml(byte[] signatureXml)
     {
         string text = Utf8(signatureXml, "VSIX signature XML is not UTF-8");
-        string value = ElementText(text, "X509Certificate") ?? throw new PsignException("VSIX signature XML is missing X509Certificate");
+        var span = Xml.XmlTextScan.FindXmlElementByLocalName(text, "X509Certificate", 0)
+            ?? throw new PsignException("VSIX signature XML is missing X509Certificate");
+        string compact = new(text[span.ContentStart..span.ContentEnd].Where(c => !char.IsWhiteSpace(c)).ToArray());
         byte[] cert;
         try
         {
-            cert = Base64Standard.Decode(value);
+            cert = Base64Standard.Decode(compact);
         }
         catch (FormatException e)
         {
@@ -695,7 +693,8 @@ public static class VsixPackage
             : Utf8(bytes, "OPC [Content_Types].xml is not UTF-8");
         text = EnsureContentTypeDefault(text, "psdsor", OpcSignatureOriginContentType);
         text = EnsureContentTypeDefault(text, "psdsxs", OpcSignatureXmlContentType);
-        if (!AsciiLower(text).Contains("extension=\"rels\"", StringComparison.Ordinal))
+        string lower = AsciiLower(text);
+        if (!lower.Contains("extension=\"rels\"", StringComparison.Ordinal) && !lower.Contains("extension='rels'", StringComparison.Ordinal))
         {
             int insertAt = text.LastIndexOf("</Types>", StringComparison.Ordinal);
             if (insertAt < 0)
@@ -712,7 +711,10 @@ public static class VsixPackage
     private static string EnsureContentTypeDefault(string text, string extension, string contentType)
     {
         text = ExpandSelfClosingXmlRoot(text, "Types");
-        if (text.Contains($"Extension=\"{extension}\"", StringComparison.Ordinal)
+        string lower = AsciiLower(text);
+        string extLower = AsciiLower(extension);
+        if (lower.Contains($"extension=\"{extLower}\"", StringComparison.Ordinal)
+            || lower.Contains($"extension='{extLower}'", StringComparison.Ordinal)
             || text.Contains($"ContentType=\"{contentType}\"", StringComparison.Ordinal))
         {
             return text;
@@ -760,25 +762,20 @@ public static class VsixPackage
     /// <summary>Turn a self-closing document element into an open/close pair (Rust <c>expand_self_closing_xml_root</c>).</summary>
     internal static string ExpandSelfClosingXmlRoot(string text, string root)
     {
-        int start = text.IndexOf($"<{root}", StringComparison.Ordinal);
-        if (start < 0)
+        var span = Xml.XmlTextScan.FindXmlStartTagByLocalName(text, root, 0);
+        if (span is null)
         {
             return text;
         }
 
-        int tagEnd = text.IndexOf('>', start);
-        if (tagEnd < 0)
-        {
-            return text;
-        }
-
+        int tagEnd = span.Value.End;
         if (tagEnd == 0 || text[tagEnd - 1] != '/')
         {
             return text;
         }
 
         int end = tagEnd - 1;
-        return text[..end] + ">" + $"</{root}>" + text[(end + 2)..];
+        return text[..end] + ">" + $"</{span.Value.Name}>" + text[(end + 2)..];
     }
 
     private static string UniqueRelationshipId(string text, string preferredId)
@@ -866,18 +863,29 @@ public static class VsixPackage
         return end < 0 ? null : text[start..end];
     }
 
-    /// <summary>Raw attribute value preceded by a space (Rust <c>vsix::xml_attr</c>; no unescaping).</summary>
+    /// <summary>Raw attribute value preceded by ASCII whitespace (Rust <c>vsix::xml_attr</c>; no unescaping).</summary>
     internal static string? XmlAttr(string tag, string name)
     {
         foreach (char quote in new[] { '"', '\'' })
         {
-            string needle = $" {name}={quote}";
-            int idx = tag.IndexOf(needle, StringComparison.Ordinal);
-            if (idx >= 0)
+            string needle = $"{name}={quote}";
+            int searchFrom = 0;
+            while (true)
             {
-                int start = idx + needle.Length;
-                int end = tag.IndexOf(quote, start);
-                return end < 0 ? null : tag[start..end];
+                int idx = tag.IndexOf(needle, searchFrom, StringComparison.Ordinal);
+                if (idx < 0)
+                {
+                    break;
+                }
+
+                if (idx > 0 && tag[idx - 1] is ' ' or '\t' or '\r' or '\n' or '\f')
+                {
+                    int start = idx + needle.Length;
+                    int end = tag.IndexOf(quote, start);
+                    return end < 0 ? null : tag[start..end];
+                }
+
+                searchFrom = idx + needle.Length;
             }
         }
 
@@ -945,30 +953,18 @@ public static class VsixPackage
         {
             string text = Utf8(xml, "OPC [Content_Types].xml is not UTF-8");
             var ct = new ContentTypes();
-            foreach (var (tag, map, keyAttr) in new[] { ("<Default ", ct._defaults, "Extension"), ("<Override ", ct._overrides, "PartName") })
+            foreach (var (localName, map, keyAttr) in new[] { ("Default", ct._defaults, "Extension"), ("Override", ct._overrides, "PartName") })
             {
                 int cursor = 0;
-                while (true)
+                while (Xml.XmlTextScan.FindXmlStartTagByLocalName(text, localName, cursor) is { } span)
                 {
-                    int start = text.IndexOf(tag, cursor, StringComparison.Ordinal);
-                    if (start < 0)
-                    {
-                        break;
-                    }
-
-                    int end = text.IndexOf('>', start);
-                    if (end < 0)
-                    {
-                        throw new PsignException($"unterminated {tag} in [Content_Types].xml");
-                    }
-
-                    string element = text[start..(end + 1)];
+                    string element = text[span.Start..(span.End + 1)];
                     if (XmlAttr(element, keyAttr) is { } key && XmlAttr(element, "ContentType") is { } contentType)
                     {
                         map[AsciiLower(key.TrimStart('/'))] = contentType;
                     }
 
-                    cursor = end + 1;
+                    cursor = span.End + 1;
                 }
             }
 
@@ -983,8 +979,10 @@ public static class VsixPackage
                 return ct;
             }
 
-            int dot = key.LastIndexOf('.');
-            string ext = dot < 0 ? string.Empty : key[(dot + 1)..];
+            int slash = key.LastIndexOf('/');
+            string leaf = slash >= 0 ? key[(slash + 1)..] : key;
+            int dot = leaf.LastIndexOf('.');
+            string ext = dot < 0 ? string.Empty : leaf[(dot + 1)..];
             return _defaults.TryGetValue(ext, out var d) ? d : null;
         }
     }

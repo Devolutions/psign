@@ -26,9 +26,18 @@ public class PsignException : Exception
         var parts = new List<string>();
         for (Exception? cur = e; cur is not null; cur = cur.InnerException)
         {
-            if (cur is AggregateException agg && agg.InnerExceptions.Count == 1 && cur.InnerException is not null)
+            if (cur is AggregateException agg)
             {
-                continue;
+                if (agg.InnerExceptions.Count == 1 && cur.InnerException is not null)
+                {
+                    continue;
+                }
+
+                if (agg.InnerExceptions.Count > 1)
+                {
+                    parts.Add(string.Join("; ", agg.InnerExceptions.Select(Render)));
+                    break;
+                }
             }
 
             parts.Add(cur is IOException or UnauthorizedAccessException ? IoErrorText.Message(cur) : cur.Message);

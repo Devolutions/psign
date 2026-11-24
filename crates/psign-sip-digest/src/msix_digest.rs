@@ -865,6 +865,7 @@ fn find_zip64_eocd(
     buf: &[u8],
     nominal_offset: usize,
     search_upper_bound: usize,
+    limit_end: usize,
 ) -> Result<(usize, Zip64Eocd, u64)> {
     let mut pos = nominal_offset;
     while pos <= search_upper_bound {
@@ -899,6 +900,9 @@ fn find_zip64_eocd(
             let tail_end = tail_start
                 .checked_add(tail_len)
                 .ok_or_else(|| anyhow!("zip64 tail overflow"))?;
+            if tail_end > limit_end {
+                return Err(anyhow!("zip64 tail out of range"));
+            }
             let tail_after_fixed = buf
                 .get(tail_start..tail_end)
                 .ok_or_else(|| anyhow!("zip64 tail out of range"))?
@@ -957,8 +961,10 @@ fn parse_zip_tail(buf: &[u8]) -> Result<ZipTail> {
         locator = Some(loc.clone());
         let nominal = usize::try_from(loc.end_of_central_directory_offset)
             .map_err(|_| anyhow!("zip64 nominal offset"))?;
-        let search_upper = cde_pos.saturating_sub(60);
-        let (zpos, z64, _ao) = find_zip64_eocd(buf, nominal, search_upper)?;
+        let search_upper = off
+            .checked_sub(56)
+            .ok_or_else(|| anyhow!("could not find ZIP64 end-of-central-directory"))?;
+        let (zpos, z64, _ao) = find_zip64_eocd(buf, nominal, search_upper, off)?;
         if z64.number_of_files_on_this_disk != z64.number_of_files {
             return Err(anyhow!(
                 "multi-disk ZIP64 entry counts are not valid APPX/MSIX packages"
@@ -1476,7 +1482,7 @@ fn canonical_reserved_part(normalized_name: &str) -> Option<&'static str> {
 }
 
 fn validate_package_part_inventory(
-    archive: &ZipArchive<Cursor<&[u8]>>,
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
     ext: &str,
 ) -> Result<AppxPackageInventory> {
     let is_bundle = matches!(ext, "msixbundle" | "appxbundle");
@@ -1484,7 +1490,8 @@ fn validate_package_part_inventory(
     let mut seen_casefolded = HashMap::<String, String>::new();
     let mut required_counts = HashMap::<&'static str, usize>::new();
 
-    for name in archive.file_names() {
+    for i in 0..archive.len() {
+        let name = archive.by_index_raw(i)?.name().to_owned();
         if name.ends_with('/') || name.ends_with('\\') {
             continue;
         }
@@ -1493,7 +1500,7 @@ fn validate_package_part_inventory(
                 "APPX/MSIX ZIP entry `{name}` uses backslashes; package part names must use `/`"
             ));
         }
-        let decoded = decode_opc_zip_part_name(name)?;
+        let decoded = decode_opc_zip_part_name(&name)?;
         let normalized = normalize_appx_part_name(&decoded)?;
         if !seen.insert(normalized.clone()) {
             return Err(anyhow!("duplicate APPX/MSIX ZIP part `{normalized}`"));
@@ -2371,7 +2378,7 @@ pub fn msix_authenticode_digest_blob(
     let mut layout_archive = ZipArchive::new(Cursor::new(buf))?;
     validate_zip_file_layout(buf, &mut layout_archive, &tail)?;
     let mut archive = ZipArchive::new(Cursor::new(buf))?;
-    let inventory = validate_package_part_inventory(&archive, &ext)?;
+    let inventory = validate_package_part_inventory(&mut archive, &ext)?;
 
     let block_map_bytes = read_zip_entry_raw(&mut archive, std::str::from_utf8(BLOCK_MAP)?)?;
     let (kind, block_map_files) = parse_block_map_xml(&block_map_bytes)?;
@@ -2428,7 +2435,7 @@ fn verify_msix_digest_consistency_bytes(buf: &[u8], ext: &str) -> Result<(Vec<u8
     let mut layout_archive = ZipArchive::new(Cursor::new(buf))?;
     validate_zip_file_layout(buf, &mut layout_archive, &tail)?;
     let mut archive = ZipArchive::new(Cursor::new(buf))?;
-    let inventory = validate_package_part_inventory(&archive, ext)?;
+    let inventory = validate_package_part_inventory(&mut archive, ext)?;
 
     let p7x = read_zip_entry_raw(&mut archive, std::str::from_utf8(APP_SIGNATURE)?)?;
     let pkcs7 = strip_pkcx(&p7x)?;
@@ -2972,8 +2979,8 @@ mod tests {
             ("AppxBlockMap.xml", b""),
             ("AppxSignature.p7x", b""),
         ]);
-        let archive = ZipArchive::new(Cursor::new(missing_manifest.as_slice())).unwrap();
-        let err = validate_package_part_inventory(&archive, "appx").unwrap_err();
+        let mut archive = ZipArchive::new(Cursor::new(missing_manifest.as_slice())).unwrap();
+        let err = validate_package_part_inventory(&mut archive, "appx").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("AppxManifest.xml"), "{msg}");
 
@@ -2983,8 +2990,8 @@ mod tests {
             ("AppxSignature.p7x", b""),
             ("appxmanifest.xml", b""),
         ]);
-        let archive = ZipArchive::new(Cursor::new(wrong_case.as_slice())).unwrap();
-        let err = validate_package_part_inventory(&archive, "appx").unwrap_err();
+        let mut archive = ZipArchive::new(Cursor::new(wrong_case.as_slice())).unwrap();
+        let err = validate_package_part_inventory(&mut archive, "appx").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("canonical path"), "{msg}");
     }
@@ -2999,8 +3006,8 @@ mod tests {
             ("payload.txt", b""),
             ("Payload.txt", b""),
         ]);
-        let archive = ZipArchive::new(Cursor::new(duplicate_payload.as_slice())).unwrap();
-        let err = validate_package_part_inventory(&archive, "appx").unwrap_err();
+        let mut archive = ZipArchive::new(Cursor::new(duplicate_payload.as_slice())).unwrap();
+        let err = validate_package_part_inventory(&mut archive, "appx").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("case-insensitive"), "{msg}");
 
@@ -3011,8 +3018,8 @@ mod tests {
             ("AppxMetadata/AppxBundleManifest.xml", b""),
             ("child.emsix", b""),
         ]);
-        let archive = ZipArchive::new(Cursor::new(encrypted_child.as_slice())).unwrap();
-        let err = validate_package_part_inventory(&archive, "appxbundle").unwrap_err();
+        let mut archive = ZipArchive::new(Cursor::new(encrypted_child.as_slice())).unwrap();
+        let err = validate_package_part_inventory(&mut archive, "appxbundle").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("encrypted child"), "{msg}");
     }

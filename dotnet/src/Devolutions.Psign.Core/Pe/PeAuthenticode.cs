@@ -65,18 +65,26 @@ public static class PeAuthenticode
                 continue;
             }
 
-            byte[] embedded;
+            AuthenticodeSignature sig;
             try
             {
-                embedded = EmbeddedIndirectDigest(pe.CertificateData(attr));
+                sig = AuthenticodeSignature.Parse(pe.CertificateData(attr));
             }
             catch (PsignException e)
             {
                 throw new PsignException($"PKCS#7 Authenticode parse failed: {e.Message}", e);
             }
 
+            var embedded = sig.Digest;
             count++;
-            var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+            var kind = sig.IndirectData.HashKind
+                ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+            if (embedded.Length != kind.DigestLength())
+            {
+                throw new PsignException(
+                    $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+            }
+
             var computed = pe.AuthenticodeDigest(kind);
             if (!computed.AsSpan().SequenceEqual(embedded))
             {

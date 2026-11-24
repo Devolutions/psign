@@ -6,7 +6,7 @@ using Devolutions.Psign.Core;
 namespace Devolutions.Psign.Signing.Internal;
 
 /// <summary>A buffered HTTP response.</summary>
-internal sealed record HttpResult(HttpStatusCode Status, HttpResponseMessage Message, byte[] Body)
+internal sealed record HttpResult(HttpStatusCode Status, Dictionary<string, string> Headers, byte[] Body)
 {
     public bool IsSuccess => (int)Status is >= 200 and <= 299;
 
@@ -14,20 +14,7 @@ internal sealed record HttpResult(HttpStatusCode Status, HttpResponseMessage Mes
 
     public string StatusText => HttpText.Status(Status);
 
-    public string? Header(string name)
-    {
-        if (Message.Headers.TryGetValues(name, out var values))
-        {
-            return values.FirstOrDefault();
-        }
-
-        if (Message.Content.Headers.TryGetValues(name, out var contentValues))
-        {
-            return contentValues.FirstOrDefault();
-        }
-
-        return null;
-    }
+    public string? Header(string name) => Headers.TryGetValue(name, out var value) ? value : null;
 }
 
 /// <summary>
@@ -62,8 +49,16 @@ internal sealed class HttpTransport : IDisposable
         bool followRedirects = true,
         Func<HttpStatusCode, (int Max, string Context)>? bodyLimit = null)
     {
+        if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+        {
+            throw new PsignException($"{context}: timeout must be positive");
+        }
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(timeout);
+        if (timeout != Timeout.InfiniteTimeSpan)
+        {
+            cts.CancelAfter(timeout);
+        }
         HttpResponseMessage response;
         try
         {
@@ -81,40 +76,65 @@ internal sealed class HttpTransport : IDisposable
             throw new PsignException(context, e is OperationCanceledException ? new PsignException("operation timed out", e) : e);
         }
 
-        try
+        using (response)
         {
-            byte[] body;
-            if (bodyLimit is not null)
+            try
             {
-                var (max, limitContext) = bodyLimit(response.StatusCode);
-                try
+                byte[] body;
+                if (bodyLimit is not null)
                 {
-                    var stream = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false);
-                    await using (stream.ConfigureAwait(false))
+                    var (max, limitContext) = bodyLimit(response.StatusCode);
+                    try
                     {
-                        body = await ReadBoundedAsync(stream, max, cts.Token).ConfigureAwait(false);
+                        var stream = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false);
+                        await using (stream.ConfigureAwait(false))
+                        {
+                            body = await ReadBoundedAsync(stream, max, cts.Token).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception e) when (e is PsignException or IOException or HttpRequestException or OperationCanceledException)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+
+                        throw new PsignException(limitContext, e);
                     }
                 }
-                catch (Exception e) when (e is PsignException or IOException or HttpRequestException or OperationCanceledException)
+                else
                 {
-                    throw new PsignException(limitContext, e);
+                    body = await response.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
                 }
-            }
-            else
-            {
-                body = await response.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
-            }
 
-            return new HttpResult(response.StatusCode, response, body);
-        }
-        catch (Exception e) when (e is IOException or HttpRequestException or OperationCanceledException)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
+                var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var h in response.Headers)
+                {
+                    if (h.Value.FirstOrDefault() is { } v)
+                    {
+                        headers[h.Key] = v;
+                    }
+                }
 
-            throw new PsignException(context, e);
+                foreach (var h in response.Content.Headers)
+                {
+                    if (!headers.ContainsKey(h.Key) && h.Value.FirstOrDefault() is { } v)
+                    {
+                        headers[h.Key] = v;
+                    }
+                }
+
+                return new HttpResult(response.StatusCode, headers, body);
+            }
+            catch (Exception e) when (e is IOException or HttpRequestException or OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                throw new PsignException(context, e);
+            }
         }
     }
 

@@ -967,10 +967,19 @@ fn infer_powershell_source_format(path: &Path) -> PortableFileFormat {
 }
 
 fn script_extension_for(path: &Path) -> String {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_else(|| "ps1".to_string())
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        return ext.to_ascii_lowercase();
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let bare = name.trim_start_matches('.').to_ascii_lowercase();
+        if matches!(
+            bare.as_str(),
+            "ps1" | "psm1" | "psd1" | "ps1xml" | "psc1" | "cdxml" | "mof"
+        ) {
+            return bare;
+        }
+    }
+    "ps1".to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -1255,6 +1264,7 @@ struct ArtifactSigningProvider {
     account_name: String,
     profile_name: String,
     correlation_id: Option<String>,
+    authority: Option<String>,
     auth: psign_codesigning_rest::CodesigningAuth,
     chain: Vec<x509_cert::Certificate>,
 }
@@ -1504,7 +1514,7 @@ impl SigningProvider {
                     signature_algorithm: artifact_signature_algorithm(digest_algorithm).to_string(),
                     api_version: psign_codesigning_rest::DEFAULT_API_VERSION.to_string(),
                     correlation_id: provider.correlation_id.clone(),
-                    authority: None,
+                    authority: provider.authority.clone(),
                     auth: provider.auth.clone(),
                     endpoint_base_url: Some(provider.endpoint.clone()),
                 };
@@ -1622,6 +1632,7 @@ fn load_artifact_signing_provider(request: &PortableSignRequest) -> Result<Signi
             account_name,
             profile_name,
             correlation_id: text_opt(request.artifact_signing_correlation_id.as_deref()),
+            authority: text_opt(request.azure_authority.as_deref()),
             auth,
             chain,
         },
@@ -2134,7 +2145,7 @@ fn sign_nuget(request: &PortableSignRequest, output_path: &Path) -> Result<()> {
     let pkcs7 = provider
         .create_nuget_author_signature(&content, request.hash_algorithm.into())
         .with_context(|| format!("create NuGet CMS signature for {}", request.path.display()))?;
-    let pkcs7_final = maybe_timestamp_pkcs7(request, pkcs7)
+    let pkcs7_final = maybe_timestamp_pkcs7_with_attr(request, pkcs7, true)
         .with_context(|| format!("timestamp {}", request.path.display()))?;
     let mut out = Cursor::new(Vec::new());
     psign_opc_sign::nuget::embed_signature(Cursor::new(unsigned), &mut out, &pkcs7_final, false)
@@ -2393,11 +2404,13 @@ fn create_script_authenticode_pkcs7_with_provider(
 }
 
 fn has_azure_key_vault_provider(request: &PortableSignRequest) -> bool {
-    request.azure_key_vault_url.is_some()
+    request.azure_key_vault_url.is_some() || request.azure_key_vault_certificate.is_some()
 }
 
 fn has_artifact_signing_provider(request: &PortableSignRequest) -> bool {
-    request.artifact_signing_endpoint.is_some() || request.artifact_signing_account_name.is_some()
+    request.artifact_signing_endpoint.is_some()
+        || request.artifact_signing_account_name.is_some()
+        || request.artifact_signing_profile_name.is_some()
 }
 
 fn has_local_signing_material(request: &PortableSignRequest) -> bool {
@@ -2507,6 +2520,14 @@ fn load_chain_certificates(request: &PortableSignRequest) -> Result<Vec<x509_cer
 }
 
 fn maybe_timestamp_pkcs7(request: &PortableSignRequest, pkcs7_der: Vec<u8>) -> Result<Vec<u8>> {
+    maybe_timestamp_pkcs7_with_attr(request, pkcs7_der, false)
+}
+
+fn maybe_timestamp_pkcs7_with_attr(
+    request: &PortableSignRequest,
+    pkcs7_der: Vec<u8>,
+    cms_attr: bool,
+) -> Result<Vec<u8>> {
     let Some(timestamp_server) = request.timestamp_server.as_deref() else {
         if request.timestamp_hash_algorithm.is_some() {
             bail!("timestamp_hash_algorithm requires timestamp_server");
@@ -2514,13 +2535,14 @@ fn maybe_timestamp_pkcs7(request: &PortableSignRequest, pkcs7_der: Vec<u8>) -> R
         return Ok(pkcs7_der);
     };
     let alg = request.timestamp_hash_algorithm.unwrap_or_default();
-    timestamp_pkcs7_der_rfc3161(&pkcs7_der, timestamp_server, alg)
+    timestamp_pkcs7_der_rfc3161(&pkcs7_der, timestamp_server, alg, cms_attr)
 }
 
 fn timestamp_pkcs7_der_rfc3161(
     pkcs7_der: &[u8],
     timestamp_server: &str,
     timestamp_digest: PortableTimestampDigestAlgorithm,
+    cms_attr: bool,
 ) -> Result<Vec<u8>> {
     let sd = pkcs7::parse_pkcs7_signed_data_der(pkcs7_der).context("parse PKCS#7 SignedData")?;
     let signer = sd
@@ -2534,8 +2556,12 @@ fn timestamp_pkcs7_der_rfc3161(
         timestamp_digest,
         signer.signature.as_bytes(),
     )?;
-    let stamped = pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, &token)
-        .context("attach RFC3161 timestamp token")?;
+    let stamped = if cms_attr {
+        pkcs7::signed_data_add_pkcs9_rfc3161_timestamp_token(&sd, 0, &token)
+    } else {
+        pkcs7::signed_data_add_rfc3161_timestamp_token(&sd, 0, &token)
+    }
+    .context("attach RFC3161 timestamp token")?;
     pkcs7::encode_pkcs7_content_info_signed_data_der(&stamped)
 }
 

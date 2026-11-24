@@ -76,8 +76,17 @@ public sealed class ZipCrateWriter
         }
 
         var nameBytes = Encoding.UTF8.GetBytes(name);
+        if (nameBytes.Length > ushort.MaxValue)
+        {
+            throw new PsignException($"ZIP entry name exceeds 65535 UTF-8 bytes: {nameBytes.Length}");
+        }
+
         bool nonAscii = nameBytes.Any(b => b >= 0x80);
         ulong headerStart = (ulong)_out.Position;
+        if (headerStart >= 0xFFFFFFFF)
+        {
+            throw new PsignException("Large file option has not been set");
+        }
 
         Span<byte> h = stackalloc byte[30];
         BinaryPrimitives.WriteUInt32LittleEndian(h, 0x04034b50);

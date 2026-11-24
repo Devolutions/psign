@@ -33,9 +33,9 @@ public static partial class PortableCore
         var response = format switch
         {
             PortableFileFormat.Pe => InspectPe(path, data),
-            PortableFileFormat.Cab => InspectCab(path),
-            PortableFileFormat.Msi => InspectMsi(path),
-            PortableFileFormat.Msix => InspectMsix(path),
+            PortableFileFormat.Cab => InspectCab(path, data),
+            PortableFileFormat.Msi => InspectMsi(path, data),
+            PortableFileFormat.Msix => InspectMsix(path, data),
             PortableFileFormat.MsixUpload => throw new PsignException(
                 "MSIX/AppX upload bundles (.appxupload/.msixupload) are dotnet/SignTool packaging containers, not AppX SIP verify subjects"),
             PortableFileFormat.MsixEncrypted => throw new PsignException(
@@ -46,7 +46,7 @@ public static partial class PortableCore
             PortableFileFormat.AppInstaller => InspectAppInstaller(path),
             PortableFileFormat.Zip => InspectZip(path, data),
             PortableFileFormat.PowerShellScript or PortableFileFormat.WshScript => InspectScript(path, data),
-            PortableFileFormat.Catalog => InspectPkcs7File(path, format),
+            PortableFileFormat.Catalog => InspectPkcs7File(path, format, data),
             _ => BaseResponse(path, format, PortableSignatureStatus.NotSupportedFileFormat, "Unsupported file format for portable Authenticode inspection."),
         };
 
@@ -90,6 +90,7 @@ public static partial class PortableCore
         }
 
         var response = InspectScript(request.SourcePathOrExtension, data);
+        response.ArtifactSigning = ArtifactSigningIdentityOf(response.SignerCertificateDerBase64);
         ApplyTrustIfRequested(request.ToSignatureRequest(request.SourcePathOrExtension), format, data, response);
         return response;
     }
@@ -381,50 +382,48 @@ public static partial class PortableCore
         return response;
     }
 
-    private static PortableSignatureResponse InspectCab(string path)
+    private static PortableSignatureResponse InspectCab(string path, byte[] data)
     {
         try
         {
-            CabDigest.VerifyDigestConsistency(ReadFile(path));
+            CabDigest.VerifyDigestConsistency(data);
         }
         catch (Exception e) when (IsOperationError(e))
         {
             return MapDigestError(path, PortableFileFormat.Cab, e);
         }
 
-        var data = ReadFile(path);
         var summary = TryOrNull(() => CabDigest.SignaturePkcs7Der(data)) is { } pkcs7 ? SummarizePkcs7Der(pkcs7) : null;
         return ValidResponse(path, PortableFileFormat.Cab, DigestValidNoTrust, summary ?? new Pkcs7Summary());
     }
 
-    private static PortableSignatureResponse InspectMsi(string path)
+    private static PortableSignatureResponse InspectMsi(string path, byte[] data)
     {
         try
         {
-            MsiDigest.VerifyDigestConsistency(ReadFile(path));
+            MsiDigest.VerifyDigestConsistency(data);
         }
         catch (Exception e) when (IsOperationError(e))
         {
             return MapDigestError(path, PortableFileFormat.Msi, e);
         }
 
-        var data = ReadFile(path);
         var summary = TryOrNull(() => MsiDigest.DigitalSignaturePkcs7Der(data)) is { } pkcs7 ? SummarizePkcs7Der(pkcs7) : null;
         return ValidResponse(path, PortableFileFormat.Msi, DigestValidNoTrust, summary ?? new Pkcs7Summary());
     }
 
-    private static PortableSignatureResponse InspectMsix(string path)
+    private static PortableSignatureResponse InspectMsix(string path, byte[] data)
     {
+        var ext = RustText.ToAsciiLowercase(RustPath.Extension(path) ?? string.Empty);
         try
         {
-            MsixDigest.VerifyMsixDigestConsistency(path);
+            MsixDigest.VerifyMsixDigestConsistencyBytes(data, ext);
         }
         catch (Exception e) when (IsOperationError(e))
         {
             return MapDigestError(path, PortableFileFormat.Msix, e);
         }
 
-        var data = ReadFile(path);
         var summary = TryOrNull(() => MsixDigest.MsixSignaturePkcs7Der(data)) is { } pkcs7 ? SummarizePkcs7Der(pkcs7) : null;
         return ValidResponse(path, PortableFileFormat.Msix, "Portable MSIX digest binding is valid; trust was not evaluated.", summary ?? new Pkcs7Summary());
     }
@@ -460,7 +459,7 @@ public static partial class PortableCore
         bool hasSignature;
         try
         {
-            hasSignature = NuGetPackage.InspectNupkgPath(path).Signed;
+            hasSignature = NuGetPackage.InspectNupkg(data).Signed;
         }
         catch (Exception e) when (IsOperationError(e))
         {
@@ -502,7 +501,7 @@ public static partial class PortableCore
         bool hasSignature;
         try
         {
-            hasSignature = VsixPackage.InspectVsixPath(path).HasOpcSignature;
+            hasSignature = VsixPackage.InspectVsix(data).HasOpcSignature;
         }
         catch (Exception e) when (IsOperationError(e))
         {
@@ -523,7 +522,7 @@ public static partial class PortableCore
         {
             // Legacy only: signatures from psign releases before the OPC layout referenced parts directly and are not
             // verifiable by Visual Studio; keep reporting their part digests so existing packages still inspect.
-            var sigXml = TryOrNull(() => VsixPackage.ExtractSignatureXmlPath(path)) ?? [];
+            var sigXml = TryOrNull(() => VsixPackage.ExtractSignatureXml(data)) ?? [];
             bool legacyOk = sigXml.Length > 0
                 && TryOrNull(() => (object)VsixPackage.VerifyLegacySignatureReferenceXml(data, sigXml, VsixHashAlgorithm.Sha256)) is not null;
             var full = PsignException.Render(standardError);
@@ -598,9 +597,8 @@ public static partial class PortableCore
         return ValidResponse(path, format, "Portable script digest binding is valid; trust was not evaluated.", summary ?? new Pkcs7Summary());
     }
 
-    private static PortableSignatureResponse InspectPkcs7File(string path, PortableFileFormat format)
+    private static PortableSignatureResponse InspectPkcs7File(string path, PortableFileFormat format, byte[] data)
     {
-        var data = ReadFile(path);
         if (CmsSignedData.TryParse(data) is { SignerInfos.Count: 0 })
         {
             var unsigned = BaseResponse(path, format, PortableSignatureStatus.NotSigned, "PKCS#7 SignedData has no SignerInfo.");

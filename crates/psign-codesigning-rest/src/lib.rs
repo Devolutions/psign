@@ -120,7 +120,13 @@ fn data_plane_base_url(params: &CodesigningSubmitParams) -> String {
 
 fn operation_location_url(base: &str, location: &str) -> String {
     let trimmed = location.trim();
-    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+    if trimmed
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+        || trimmed
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
         return trimmed.to_string();
     }
     if trimmed.starts_with('/') {
@@ -362,12 +368,15 @@ fn acquire_client_credentials_token(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| anyhow!("HTTP client: {e}"))?;
-    let token_url = format!(
-        "{}/{tenant}/oauth2/v2.0/token",
-        normalize_authority(authority)
-    );
+    let mut token_url = Url::parse(&normalize_authority(authority))
+        .map_err(|e| anyhow!("invalid OAuth authority URL: {e}"))?;
+    token_url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("OAuth authority URL cannot be a base"))?
+        .pop_if_empty()
+        .extend([tenant, "oauth2", "v2.0", "token"]);
     let rsp = http
-        .post(&token_url)
+        .post(token_url)
         .form(&[
             ("client_id", cid),
             ("client_secret", sec),
@@ -411,12 +420,15 @@ fn acquire_workload_identity_token(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| anyhow!("HTTP client: {e}"))?;
-    let token_url = format!(
-        "{}/{tenant}/oauth2/v2.0/token",
-        normalize_authority(authority)
-    );
+    let mut token_url = Url::parse(&normalize_authority(authority))
+        .map_err(|e| anyhow!("invalid OAuth authority URL: {e}"))?;
+    token_url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("OAuth authority URL cannot be a base"))?
+        .pop_if_empty()
+        .extend([tenant, "oauth2", "v2.0", "token"]);
     let rsp = http
-        .post(&token_url)
+        .post(token_url)
         .form(&[
             ("client_id", cid),
             ("client_assertion", assertion),

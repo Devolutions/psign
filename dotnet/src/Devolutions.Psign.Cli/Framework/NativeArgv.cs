@@ -233,7 +233,19 @@ public static class NativeArgv
         Verb verb = Verb.Verify;
         for (int i = 0; i < args.Count; i++)
         {
-            if (IsVerb(args[i].Trim()) is { } v)
+            var token = args[i].Trim();
+            if (token.Equals("--mode", StringComparison.Ordinal))
+            {
+                i++;
+                continue;
+            }
+
+            if (token.ToLowerInvariant() is "portable" or "code" or "artifact-signing-submit" or "inspect-signature")
+            {
+                break;
+            }
+
+            if (IsVerb(token) is { } v)
             {
                 verbIdx = i;
                 verb = v;

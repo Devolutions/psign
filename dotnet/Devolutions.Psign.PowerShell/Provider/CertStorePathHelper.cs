@@ -48,10 +48,10 @@ internal static class CertStorePathHelper
     internal static string NormalizeStoreName(string storeName)
     {
         string trimmed = storeName.Trim();
-        if (trimmed.Length == 0 || trimmed.Contains('/') || trimmed.Contains('\\') || trimmed.Contains('\0'))
+        if (trimmed.Length == 0 || trimmed.IndexOfAny(['/', '\\', ':', '\0']) >= 0 || trimmed is "." or "..")
         {
             throw new PSInvalidOperationException(
-                "Portable certificate store name must not be empty or contain path separators.");
+                "Portable certificate store name must not be empty or contain path separators or traversal segments.");
         }
 
         return trimmed.ToLowerInvariant() switch
@@ -64,6 +64,21 @@ internal static class CertStorePathHelper
             "disallowed" => "Disallowed",
             _ => trimmed,
         };
+    }
+
+    /// <summary>
+    /// Validate a certificate store scope segment against path separators and traversal segments.
+    /// </summary>
+    internal static string NormalizeScope(string scope)
+    {
+        string trimmed = scope.Trim();
+        if (trimmed.Length == 0 || trimmed.IndexOfAny(['/', '\\', ':', '\0']) >= 0 || trimmed is "." or "..")
+        {
+            throw new PSInvalidOperationException(
+                "Portable certificate store scope must not be empty or contain path separators or traversal segments.");
+        }
+
+        return trimmed;
     }
 
     /// <summary>
@@ -89,14 +104,14 @@ internal static class CertStorePathHelper
         const string begin = "-----BEGIN PRIVATE KEY-----";
         const string end = "-----END PRIVATE KEY-----";
         int beginIndex = text.IndexOf(begin, StringComparison.Ordinal);
-        int endIndex = text.IndexOf(end, StringComparison.Ordinal);
-        if (beginIndex < 0 || endIndex < 0 || endIndex <= beginIndex)
+        int base64Start = beginIndex >= 0 ? beginIndex + begin.Length : -1;
+        int endIndex = base64Start >= 0 ? text.IndexOf(end, base64Start, StringComparison.Ordinal) : -1;
+        if (beginIndex < 0 || endIndex < 0)
         {
             throw new PSInvalidOperationException(
                 $"Portable cert-store key '{keyPath}' must be unencrypted PKCS#8 PEM (BEGIN PRIVATE KEY).");
         }
 
-        int base64Start = beginIndex + begin.Length;
         string base64 = text[base64Start..endIndex];
         string compact = new(base64.Where(c => !char.IsWhiteSpace(c)).ToArray());
         try
@@ -129,24 +144,34 @@ internal static class CertStorePathHelper
         string keyPath = Path.ChangeExtension(derPath, ".key");
         if (File.Exists(keyPath))
         {
+            byte[]? keyDer = null;
             try
             {
-                byte[] keyDer = ReadPkcs8PrivateKeyDer(keyPath);
-                using var certWithKey = cert;
+                keyDer = ReadPkcs8PrivateKeyDer(keyPath);
+            }
+            catch
+            {
+                return cert;
+            }
+
+            try
+            {
                 using RSA rsa = RSA.Create();
                 rsa.ImportPkcs8PrivateKey(keyDer, out _);
-                cert = certWithKey.CopyWithPrivateKey(rsa);
+                var withKey = cert.CopyWithPrivateKey(rsa);
+                cert.Dispose();
+                cert = withKey;
             }
             catch (CryptographicException)
             {
                 // RSA import failed — try ECDSA
                 try
                 {
-                    byte[] keyDer = ReadPkcs8PrivateKeyDer(keyPath);
-                    using var certWithKey = cert;
                     using ECDsa ecdsa = ECDsa.Create();
                     ecdsa.ImportPkcs8PrivateKey(keyDer, out _);
-                    cert = certWithKey.CopyWithPrivateKey(ecdsa);
+                    var withKey = cert.CopyWithPrivateKey(ecdsa);
+                    cert.Dispose();
+                    cert = withKey;
                 }
                 catch
                 {
@@ -206,9 +231,10 @@ internal static class CertStorePathHelper
         string? explicitBaseDir, string scope, string storeName, string thumbprint)
     {
         string baseDir = ResolveBaseDirectory(explicitBaseDir);
+        string normalizedScope = NormalizeScope(scope);
         string normalizedStore = NormalizeStoreName(storeName);
         string normalizedThumb = NormalizeThumbprint(thumbprint);
-        string derPath = Path.Combine(baseDir, scope, normalizedStore, normalizedThumb + ".der");
+        string derPath = Path.Combine(baseDir, normalizedScope, normalizedStore, normalizedThumb + ".der");
 
         if (!File.Exists(derPath))
         {

@@ -33,7 +33,7 @@ internal static class Program
             Run(outcome);
             return 0;
         }
-        catch (Exception e) when (e is PsignException or IOException or UnauthorizedAccessException or System.Net.Sockets.SocketException)
+        catch (Exception e) when (e is PsignException or IOException or UnauthorizedAccessException or System.Net.Sockets.SocketException or ArgumentException or NotSupportedException)
         {
             Console.Error.Write(PsignException.Render(e) + "\n");
             Console.Error.Flush();
@@ -46,7 +46,7 @@ internal static class Program
         var v = parsed.Values;
         string? Get(string name) => v.TryGetValue(name, out var value) ? value : null;
         string Str(string name, string defaultValue) => Get(name) ?? defaultValue;
-        ulong MaxRequests() => Get("max-requests") is { } s ? ulong.Parse(s.TrimStart('+'), System.Globalization.CultureInfo.InvariantCulture) : 0;
+        ulong MaxRequests() => Get("max-requests") is { } s ? ulong.Parse(s.StartsWith('+') ? s[1..] : s, System.Globalization.CultureInfo.InvariantCulture) : 0;
 
         switch (parsed.Command)
         {

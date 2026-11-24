@@ -106,7 +106,7 @@ internal static class MsixCommands
         {
             data = File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"open {path}", new PsignException(IoErrorText.Message(e)));
         }
@@ -132,6 +132,10 @@ internal static class MsixCommands
             {
                 throw new PsignException("read AppxManifest.xml as UTF-8", new PsignException("stream did not contain valid UTF-8", e));
             }
+            catch (InvalidDataException e)
+            {
+                throw new PsignException("read AppxManifest.xml", e);
+            }
         }
 
         var bundle = archive.ByName("AppxMetadata/AppxBundleManifest.xml")
@@ -143,6 +147,10 @@ internal static class MsixCommands
         catch (DecoderFallbackException e)
         {
             throw new PsignException("read AppxMetadata/AppxBundleManifest.xml as UTF-8", new PsignException("stream did not contain valid UTF-8", e));
+        }
+        catch (InvalidDataException e)
+        {
+            throw new PsignException("read AppxMetadata/AppxBundleManifest.xml", e);
         }
     }
 

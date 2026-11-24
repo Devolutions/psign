@@ -56,7 +56,7 @@ public static class AuthRootCab
         {
             bytes = File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw PsignException.Context($"open CAB {path}", e);
         }

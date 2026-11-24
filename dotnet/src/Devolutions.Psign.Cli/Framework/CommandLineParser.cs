@@ -180,14 +180,30 @@ public sealed class ParsedCommand
     public int Int(string id, int defaultValue = 0)
     {
         var v = Value(id);
-        return v is null ? defaultValue : int.Parse(v.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture);
+        if (v is null)
+        {
+            return defaultValue;
+        }
+
+        var digits = v.StartsWith('+') ? v[1..] : v;
+        return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out int n)
+            ? n
+            : throw new Core.PsignException($"invalid integer value '{v}' for option '{id}'");
     }
 
     /// <summary>Optional integer option.</summary>
     public int? IntOrNull(string id)
     {
         var v = Value(id);
-        return v is null ? null : int.Parse(v.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture);
+        if (v is null)
+        {
+            return null;
+        }
+
+        var digits = v.StartsWith('+') ? v[1..] : v;
+        return int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out int n)
+            ? n
+            : throw new Core.PsignException($"invalid integer value '{v}' for option '{id}'");
     }
 
     internal static bool ParseBool(string v) => v.Equals("true", StringComparison.OrdinalIgnoreCase) || v == "1" || v.Equals("yes", StringComparison.OrdinalIgnoreCase) || v.Equals("on", StringComparison.OrdinalIgnoreCase);
@@ -295,19 +311,32 @@ public static class CommandLineParser
                     throw new UsageException(UnexpectedArgument(arg), usage);
                 }
 
-                string? inline = arg.Length > 2 ? (arg[2] == '=' ? arg[3..] : arg[2..]) : null;
+                bool hasEquals = arg.Length > 2 && arg[2] == '=';
+                string? inline = arg.Length > 2 ? (hasEquals ? arg[3..] : arg[2..]) : null;
                 if (opt.Kind is OptionKind.Flag or OptionKind.Count && inline is not null)
                 {
+                    if (hasEquals)
+                    {
+                        throw new UsageException($"unexpected value '{inline}' for '-{c}' found; no more were expected", usage);
+                    }
+
                     // Combined short flags (-qv).
+                    RejectRepeat(parsed, opt, usage);
                     parsed.AddFlag(opt.Id);
                     foreach (char extra in inline)
                     {
+                        if (!spec.DisableHelpFlag && extra == 'h')
+                        {
+                            throw new HelpRequestedException(HelpText(spec, path));
+                        }
+
                         var (o2, _) = FindShort(spec, globals, extra);
                         if (o2 is null || o2.Kind is not (OptionKind.Flag or OptionKind.Count))
                         {
                             throw new UsageException($"unexpected argument '-{extra}' found", usage);
                         }
 
+                        RejectRepeat(parsed, o2, usage);
                         parsed.AddFlag(o2.Id);
                     }
 
@@ -335,7 +364,21 @@ public static class CommandLineParser
 
                 if (arg == "help")
                 {
-                    throw new HelpRequestedException(HelpText(spec, path));
+                    var helpSpec = spec;
+                    var helpPath = path;
+                    for (int h = i + 1; h < args.Count; h++)
+                    {
+                        var target = helpSpec.Subcommands.FirstOrDefault(s => s.Name == args[h] || s.Aliases.Contains(args[h]));
+                        if (target is null)
+                        {
+                            throw new UsageException($"unrecognized subcommand '{args[h]}'", Usage(helpSpec, helpPath));
+                        }
+
+                        helpSpec = target;
+                        helpPath = helpPath + " " + target.Name;
+                    }
+
+                    throw new HelpRequestedException(HelpText(helpSpec, helpPath));
                 }
 
                 if (spec.Positionals.Count == 0)

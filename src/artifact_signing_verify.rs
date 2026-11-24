@@ -108,6 +108,11 @@ pub fn verify_targets(args: &VerifyArgs) -> Result<String> {
     let opts = trust_options(args)?;
     let mut out = String::new();
     if let Some(signature) = &args.detached_pkcs7 {
+        if args.detached_pkcs7_content.is_none() && args.files.len() > 1 {
+            return Err(anyhow!(
+                "--mode portable verify --detached-pkcs7 requires exactly one verify target"
+            ));
+        }
         let content_path = args
             .detached_pkcs7_content
             .as_ref()

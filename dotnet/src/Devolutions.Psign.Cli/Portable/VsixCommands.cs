@@ -242,20 +242,18 @@ internal static class VsixCommands
         _ => VsixHashAlgorithm.Sha256,
     };
 
-    /// <summary>Read <c>--cert</c> and require it to parse (Rust <c>rdp::parse_certificate</c>); returns the raw bytes.</summary>
+    /// <summary>Read <c>--cert</c> and require it to parse (Rust <c>rdp::parse_certificate</c>); returns the DER bytes.</summary>
     private static byte[] ReadCertBytes(string cert)
     {
         var bytes = Output.ReadFile(cert);
         try
         {
-            Core.X509.CertificateLoader.ParseCertificate(bytes);
+            return Core.X509.CertificateLoader.ParseCertificate(bytes).RawData;
         }
         catch (PsignException e)
         {
             throw new PsignException($"parse signer certificate {cert}", e);
         }
-
-        return bytes;
     }
 
     /// <summary>

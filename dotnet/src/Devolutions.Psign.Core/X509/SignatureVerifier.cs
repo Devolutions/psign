@@ -23,6 +23,11 @@ public static class SignatureVerifier
             }
 
             var spkiAlg = SpkiAlgorithm(spkiDer);
+            if (!IsAlgorithmCompatible(spkiAlg, signatureAlgorithm.Oid))
+            {
+                return false;
+            }
+
             if (spkiAlg == Oids.RsaEncryption || spkiAlg == Oids.RsaPss)
             {
                 using var rsa = RSA.Create();
@@ -40,7 +45,7 @@ public static class SignatureVerifier
 
             return false;
         }
-        catch (CryptographicException)
+        catch (Exception e) when (e is CryptographicException or AsnContentException)
         {
             return false;
         }
@@ -54,6 +59,11 @@ public static class SignatureVerifier
         try
         {
             var spkiAlg = SpkiAlgorithm(spkiDer);
+            if (!IsAlgorithmCompatible(spkiAlg, signatureAlgorithm.Oid))
+            {
+                return false;
+            }
+
             if (spkiAlg == Oids.RsaEncryption || spkiAlg == Oids.RsaPss)
             {
                 using var rsa = RSA.Create();
@@ -71,11 +81,19 @@ public static class SignatureVerifier
 
             return false;
         }
-        catch (CryptographicException)
+        catch (Exception e) when (e is CryptographicException or AsnContentException)
         {
             return false;
         }
     }
+
+    private static bool IsAlgorithmCompatible(string spkiAlg, string signatureAlgOid) => spkiAlg switch
+    {
+        Oids.RsaEncryption => signatureAlgOid is Oids.Sha1WithRsa or Oids.Sha256WithRsa or Oids.Sha384WithRsa or Oids.Sha512WithRsa or Oids.RsaEncryption or Oids.RsaPss,
+        Oids.RsaPss => signatureAlgOid == Oids.RsaPss,
+        Oids.EcPublicKey => signatureAlgOid is Oids.EcdsaWithSha1 or Oids.EcdsaWithSha256 or Oids.EcdsaWithSha384 or Oids.EcdsaWithSha512 or Oids.EcPublicKey,
+        _ => false,
+    };
 
     /// <summary>Public key algorithm OID from a SubjectPublicKeyInfo.</summary>
     public static string SpkiAlgorithm(byte[] spkiDer)
@@ -103,7 +121,7 @@ public static class SignatureVerifier
             case Oids.EcdsaWithSha512:
                 return AuthenticodeHashKind.Sha512;
             case Oids.RsaPss:
-                return PssHash(signatureAlgorithm) ?? digestHint;
+                return PssHash(signatureAlgorithm);
             case Oids.RsaEncryption:
             case Oids.EcPublicKey:
                 return digestHint;

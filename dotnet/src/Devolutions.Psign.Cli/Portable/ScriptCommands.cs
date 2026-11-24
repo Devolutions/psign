@@ -80,7 +80,7 @@ internal static class ScriptCommands
             {
                 var kind = AuthenticodeHashKinds.Parse(p.Required("algorithm"));
                 var preimage = LoadTimestampImprintPreimage(p.Value("digest-hex"), p.Value("digest-file"), kind);
-                ulong? nonce = p.Value("nonce") is { } n ? ulong.Parse(n, NumberStyles.None, CultureInfo.InvariantCulture) : null;
+                ulong? nonce = ParseOptionalNonce(p.Value("nonce"), "--nonce");
                 var plan = new Rfc3161TimestampRequestPlan { DigestAlgOid = kind.Oid(), Nonce = nonce, CertReq = p.Flag("cert-req") };
                 var der = Rfc3161.BuildTimestampRequestBytes(plan, preimage)
                     ?? throw new PsignException("unsupported digest OID / preimage length for RFC3161 TimeStampReq");
@@ -106,11 +106,26 @@ internal static class ScriptCommands
             {
                 var path = p.Pos("path")!;
                 var bytes = Output.ReadFile(path);
-                ulong? nonce = p.Value("expect-nonce") is { } n ? ulong.Parse(n, NumberStyles.None, CultureInfo.InvariantCulture) : null;
+                ulong? nonce = ParseOptionalNonce(p.Value("expect-nonce"), "--expect-nonce");
                 Output.Write(Rfc3161.FormatTimeStampRespInspection(bytes, p.Value("expect-digest-hex"), nonce));
                 return 0;
             };
         });
+    }
+
+    internal static ulong? ParseOptionalNonce(string? raw, string flagName)
+    {
+        if (raw is null)
+        {
+            return null;
+        }
+
+        if (!ulong.TryParse(raw.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out ulong value))
+        {
+            throw new PsignException($"invalid {flagName} value '{raw}': expected an unsigned 64-bit integer");
+        }
+
+        return value;
     }
 
     internal static string ScriptExtFromPath(string path)

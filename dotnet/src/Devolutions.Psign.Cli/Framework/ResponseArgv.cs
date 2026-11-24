@@ -50,7 +50,7 @@ public static class ResponseArgv
         {
             bytes = File.ReadAllBytes(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             throw new PsignException($"reading response file {path}", new PsignException(IoErrorText.Message(e)));
         }
@@ -133,7 +133,11 @@ public static class ResponseArgv
         }
 
         var decoded = DecodeToken(t);
-        if (decoded.Length > 1 && decoded[0] == '@')
+        if (decoded.StartsWith("@@", StringComparison.Ordinal))
+        {
+            output.Add(decoded.Length == 2 ? "@" : decoded[1..]);
+        }
+        else if (decoded.Length > 1 && decoded[0] == '@')
         {
             output.AddRange(ReadFlat(decoded[1..], depth + 1));
         }

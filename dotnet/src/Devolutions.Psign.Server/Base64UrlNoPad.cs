@@ -21,21 +21,21 @@ internal static class Base64UrlNoPad
     {
         var input = Encoding.UTF8.GetBytes(text);
         int rem = input.Length % 4;
-        if (rem == 1)
-        {
-            byte last = input[^1];
-            if (last != Pad && DecodeTable[last] == Invalid)
-            {
-                throw InvalidByte(input.Length - 1, last);
-            }
-        }
-
         int prefixLen = Math.Max(0, input.Length - rem - (rem == 0 ? 4 : 0));
         for (int i = 0; i < prefixLen; i++)
         {
             if (DecodeTable[input[i]] == Invalid)
             {
                 throw InvalidByte(i, input[i]);
+            }
+        }
+
+        if (rem == 1)
+        {
+            byte last = input[^1];
+            if (last != Pad && DecodeTable[last] == Invalid)
+            {
+                throw InvalidByte(input.Length - 1, last);
             }
         }
 

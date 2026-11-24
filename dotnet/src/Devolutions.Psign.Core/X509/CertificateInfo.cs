@@ -37,9 +37,9 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
         TbsCertificate = top[0].Encoded(d).ToArray();
         SignatureAlgorithm = AlgorithmIdentifier.Parse(top[1].Encoded(d));
         var sigBits = top[2].Value(d);
-        if (sigBits.IsEmpty)
+        if (sigBits.IsEmpty || sigBits[0] != 0)
         {
-            throw new PsignException("certificate: empty signature BIT STRING");
+            throw new PsignException("certificate: invalid signature BIT STRING");
         }
 
         Signature = sigBits[1..].ToArray();
@@ -50,11 +50,18 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
         if (tbs.Count > 0 && tbs[0].Tag == 0xA0)
         {
             var verChildren = Der.Children(d, tbs[0]);
-            if (verChildren is { Count: 1 } && verChildren[0].Tag == 0x02)
+            if (verChildren is not { Count: 1 } || verChildren[0].Tag != 0x02 || verChildren[0].ValueLength is 0 or > 4)
             {
-                Version = (int)new BigInteger(verChildren[0].Value(d), isUnsigned: false, isBigEndian: true) + 1;
+                throw new PsignException("certificate: malformed version");
             }
 
+            var rawVersion = new BigInteger(verChildren[0].Value(d), isUnsigned: false, isBigEndian: true);
+            if (rawVersion < 0 || rawVersion > int.MaxValue - 1)
+            {
+                throw new PsignException("certificate: version out of range");
+            }
+
+            Version = (int)rawVersion + 1;
             i++;
         }
 
@@ -73,8 +80,18 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
         i++;
         TbsSignatureAlgorithm = AlgorithmIdentifier.Parse(tbs[i].Encoded(d));
         i++;
+        if (tbs[i].Tag != 0x30)
+        {
+            throw new PsignException("certificate: expected issuer SEQUENCE");
+        }
+
         Issuer = tbs[i].Encoded(d).ToArray();
         i++;
+        if (tbs[i].Tag != 0x30)
+        {
+            throw new PsignException("certificate: expected validity SEQUENCE");
+        }
+
         var validity = Der.Children(d, tbs[i]);
         if (validity is null || validity.Count != 2)
         {
@@ -84,19 +101,34 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
         NotBefore = Asn1Time.Decode(validity[0].Encoded(d));
         NotAfter = Asn1Time.Decode(validity[1].Encoded(d));
         i++;
+        if (tbs[i].Tag != 0x30)
+        {
+            throw new PsignException("certificate: expected subject SEQUENCE");
+        }
+
         Subject = tbs[i].Encoded(d).ToArray();
         i++;
+        if (tbs[i].Tag != 0x30)
+        {
+            throw new PsignException("certificate: expected SubjectPublicKeyInfo SEQUENCE");
+        }
+
         SubjectPublicKeyInfo = tbs[i].Encoded(d).ToArray();
         i++;
         var spki = Der.Children(d, tbs[i - 1]);
-        if (spki is null || spki.Count != 2)
+        if (spki is null || spki.Count != 2 || spki[1].Tag != 0x03)
         {
             throw new PsignException("certificate: malformed SubjectPublicKeyInfo");
         }
 
         PublicKeyAlgorithm = AlgorithmIdentifier.Parse(spki[0].Encoded(d));
         var pkBits = spki[1].Value(d);
-        PublicKey = pkBits.IsEmpty ? [] : pkBits[1..].ToArray();
+        if (pkBits.IsEmpty || pkBits[0] != 0)
+        {
+            throw new PsignException("certificate: invalid SubjectPublicKeyInfo BIT STRING");
+        }
+
+        PublicKey = pkBits[1..].ToArray();
 
         var extensions = new List<CertificateExtension>();
         for (; i < tbs.Count; i++)
@@ -107,7 +139,7 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
             }
 
             var extSeq = Der.Children(d, tbs[i]);
-            if (extSeq is not { Count: 1 })
+            if (extSeq is not { Count: 1 } || extSeq[0].Tag != 0x30)
             {
                 throw new PsignException("certificate: malformed extensions");
             }
@@ -115,6 +147,11 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
             var exts = Der.Children(d, extSeq[0]) ?? throw new PsignException("certificate: malformed extensions");
             foreach (var ext in exts)
             {
+                if (ext.Tag != 0x30)
+                {
+                    throw new PsignException("certificate: malformed extension");
+                }
+
                 var parts = Der.Children(d, ext);
                 if (parts is null || parts.Count is < 2 or > 3 || parts[0].Tag != 0x06)
                 {
@@ -126,6 +163,11 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
                 int vi = 1;
                 if (parts.Count == 3)
                 {
+                    if (parts[1].Tag != 0x01 || parts[1].ValueLength != 1)
+                    {
+                        throw new PsignException("certificate: malformed extension critical BOOLEAN");
+                    }
+
                     critical = parts[1].Value(d) is [not 0];
                     vi = 2;
                 }
@@ -250,7 +292,7 @@ public sealed class CertificateInfo : IEquatable<CertificateInfo>
                     r.ReadBoolean();
                 }
 
-                if (r.HasData && r.TryReadInt32(out int len))
+                if (r.HasData && r.TryReadInt32(out int len) && len >= 0)
                 {
                     return len;
                 }

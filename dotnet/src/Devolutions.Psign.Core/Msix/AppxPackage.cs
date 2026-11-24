@@ -350,8 +350,8 @@ public static class AppxPackage
             if (e.Kind is XmlEventKind.Start or XmlEventKind.Empty && e.LocalName == "Package")
             {
                 string? fileName = null;
-                (byte[] Key, string Value)? declaredOffset = null;
-                (byte[] Key, string Value)? declaredSize = null;
+                (byte[] Key, byte[] RawValue, string Value)? declaredOffset = null;
+                (byte[] Key, byte[] RawValue, string Value)? declaredSize = null;
                 var replacement = e.CloneWithoutAttributes();
                 foreach (var attr in CollectAttributes(e, "read bundle Package attribute"))
                 {
@@ -362,11 +362,11 @@ public static class AppxPackage
                     }
                     else if (attr.KeyIs("Offset"))
                     {
-                        declaredOffset = (attr.Key, DecodeAttr(attr));
+                        declaredOffset = (attr.Key, attr.Value, DecodeAttr(attr));
                     }
                     else if (attr.KeyIs("Size"))
                     {
-                        declaredSize = (attr.Key, DecodeAttr(attr));
+                        declaredSize = (attr.Key, attr.Value, DecodeAttr(attr));
                     }
                     else
                     {
@@ -394,12 +394,12 @@ public static class AppxPackage
 
                     if (declaredOffset is { } o)
                     {
-                        replacement.PushRawAttribute(o.Key, Encoding.UTF8.GetBytes(o.Value));
+                        replacement.PushRawAttribute(o.Key, o.RawValue);
                     }
 
                     if (declaredSize is { } s)
                     {
-                        replacement.PushRawAttribute(s.Key, Encoding.UTF8.GetBytes(s.Value));
+                        replacement.PushRawAttribute(s.Key, s.RawValue);
                     }
                 }
 
@@ -485,6 +485,7 @@ public static class AppxPackage
     {
         var source = OpenZip(package, "open staged MSIX ZIP");
         var entries = new List<AppxZipEntry>(source.Count);
+        bool replaced = false;
         for (int i = 0; i < source.Count; i++)
         {
             ZipCrateEntry entry;
@@ -503,6 +504,7 @@ public static class AppxPackage
             if (name == MsixDigest.AppSignature)
             {
                 entries.Add(AppxZipEntry.Stored(name, (byte[])p7x.Clone()));
+                replaced = true;
                 continue;
             }
 
@@ -512,6 +514,11 @@ public static class AppxPackage
             }
 
             entries.Add(AppxZipEntry.Raw(name, entry.CompressionMethod, entry.Crc32, entry.UncompressedSize, raw));
+        }
+
+        if (!replaced)
+        {
+            throw new PsignException($"staged MSIX package is missing {MsixDigest.AppSignature} placeholder");
         }
 
         return WriteAppxZip(entries);
@@ -613,6 +620,7 @@ public static class AppxPackage
     {
         var source = OpenZip(package, "open MSIX ZIP");
         var payloads = new List<(string Name, byte[] Data)>();
+        var seenPayloads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         byte[]? contentTypes = null;
         for (int i = 0; i < source.Count; i++)
         {
@@ -634,6 +642,11 @@ public static class AppxPackage
                     break;
                 default:
                     var logical = MsixDigest.DecodeOpcZipPartName(name);
+                    if (!seenPayloads.Add(logical))
+                    {
+                        throw new PsignException($"duplicate MSIX payload part `{logical}`");
+                    }
+
                     payloads.Add((logical, source.Read(i)));
                     break;
             }
@@ -655,6 +668,7 @@ public static class AppxPackage
     {
         var source = OpenZip(package, "open MSIX bundle ZIP");
         var children = new List<(string Name, byte[] Data)>();
+        var seenChildren = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         byte[]? manifest = null;
         byte[]? contentTypes = null;
         for (int i = 0; i < source.Count; i++)
@@ -681,6 +695,11 @@ public static class AppxPackage
                     break;
                 default:
                     var logical = MsixDigest.DecodeOpcZipPartName(name);
+                    if (!seenChildren.Add(logical))
+                    {
+                        throw new PsignException($"duplicate MSIX bundle child part `{logical}`");
+                    }
+
                     children.Add((logical, source.Read(i)));
                     break;
             }
@@ -862,6 +881,7 @@ public static class AppxPackage
     {
         var reader = new QuickXmlReader(xml, trimText: false);
         var writer = new QuickXmlWriter();
+        bool sawIdentity = false;
         while (true)
         {
             var e = ReadEvent(reader, "parse manifest XML");
@@ -872,11 +892,21 @@ public static class AppxPackage
 
             if (e.Kind is XmlEventKind.Start or XmlEventKind.Empty && targetLocalNames.Contains(e.LocalName))
             {
+                if (e.LocalName == "Identity")
+                {
+                    sawIdentity = true;
+                }
+
                 writer.Write(ReplaceElementPublisher(e, publisher));
                 continue;
             }
 
             writer.Write(e);
+        }
+
+        if (targetLocalNames.Contains("Identity") && !sawIdentity)
+        {
+            throw new PsignException("manifest XML is missing an <Identity> element");
         }
 
         return writer.ToArray();

@@ -147,6 +147,11 @@ public static class SigningProviderFactory
 
             case SigningProviderIdentity.AzureKeyVault kv:
                 {
+                    if (kv.Auth is AzureAuthConfig.WorkloadIdentity)
+                    {
+                        throw new PsignException("Azure Key Vault provider does not support workload identity directly; supply an access token or client secret");
+                    }
+
                     var client = new AzureKeyVaultClient(secrets.HttpHandler);
                     try
                     {
@@ -156,7 +161,12 @@ public static class SigningProviderFactory
                             AccessToken = kv.Auth is AzureAuthConfig.AccessToken ? secrets.AzureKeyVaultAccessToken ?? string.Empty : null,
                             ManagedIdentity = kv.Auth is AzureAuthConfig.ManagedIdentity,
                             TenantId = (kv.Auth as AzureAuthConfig.ClientSecret)?.TenantId,
-                            ClientId = (kv.Auth as AzureAuthConfig.ClientSecret)?.ClientId,
+                            ClientId = kv.Auth switch
+                            {
+                                AzureAuthConfig.ClientSecret cs => cs.ClientId,
+                                AzureAuthConfig.ManagedIdentity mi => mi.ClientId,
+                                _ => null,
+                            },
                             ClientSecret = secrets.AzureKeyVaultClientSecret,
                         };
                         var signer = AzureKeyVaultDigestSigner.Create(client, kv.VaultUrl, kv.Certificate, kv.CertificateVersion, auth);

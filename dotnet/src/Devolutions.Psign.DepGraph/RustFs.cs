@@ -18,7 +18,7 @@ internal static class RustFs
         {
             return File.Exists(path) || Directory.Exists(path);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             return false;
         }
@@ -184,6 +184,11 @@ internal static class RustFs
         string normalizedRoot = root.Length >= 2 && root[1] == ':'
             ? char.ToUpperInvariant(root[0]) + @":\"
             : root.TrimEnd('\\', '/') + "\\";
+        if (components.Length == 0 && !Directory.Exists(normalizedRoot))
+        {
+            throw new DirectoryNotFoundException($"Could not find a part of the path '{normalizedRoot}'.");
+        }
+
         string current = normalizedRoot;
         for (int i = 0; i < components.Length; i++)
         {

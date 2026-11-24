@@ -101,7 +101,7 @@ public static class CatalogDigest
             throw new PsignException("truncated DER long-form length");
         }
 
-        if (data[lenOff + 1] == 0)
+        if (data[lenOff + 1] == 0 || (n == 1 && data[lenOff + 1] < 0x80))
         {
             throw new PsignException("non-minimal DER length");
         }
@@ -300,7 +300,7 @@ public static class CatalogDigest
             }
 
             // Two-byte length form 0x81 <len> for digest sizes <= 255 (e.g. SHA-384/512).
-            if (lb == 0x81 && i + 2 < blob.Length && blob[i + 2] == len &&i + 3 + len <= blob.Length && blob.Slice(i + 3, len).SequenceEqual(expected))
+            if (lb == 0x81 && i + 2 < blob.Length && blob[i + 2] == len && i + 3 + len <= blob.Length && blob.Slice(i + 3, len).SequenceEqual(expected))
             {
                 return true;
             }

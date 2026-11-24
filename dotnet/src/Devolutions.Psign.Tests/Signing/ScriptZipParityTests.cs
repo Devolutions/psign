@@ -82,25 +82,6 @@ public class ScriptZipParityTests
         var name = Path.GetFileName(fixture);
         var ext = ScriptDigestTests.Ext(fixture);
         var signed = ScriptSigner.SignScript(unsigned, ext, AuthenticodeHashKind.Sha256, id.Signer, id.Chain, id.Key);
-
-        if (unsigned.AsSpan().StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE]))
-        {
-            // Rust quirk preserved by the port: the signer hashes UTF-16LE units without the BOM while the verifier
-            // re-inserts U+FEFF, so Rust's post-sign self-verification rejects UTF-16LE scripts (HashMismatch) and the
-            // CLI leaves the file unsigned. The C# signer produces the same (self-inconsistent) signature.
-            var path = dir.File(name);
-            File.WriteAllBytes(path, unsigned);
-            var (code, _, stderr) = RustTool.Run("--mode", "portable", "sign", "--pfx", id.PfxPath, "--password", PfxIdentity.Password, "--digest", "sha256", path);
-            Assert.NotEqual(0, code);
-            Assert.Contains("HashMismatch (script Authenticode digest mismatch", stderr, StringComparison.Ordinal);
-            Assert.Equal(unsigned, File.ReadAllBytes(path));
-            var err = Assert.Throws<PsignException>(() => ScriptDigest.VerifyScriptDigestConsistency(signed, ext));
-            Assert.Equal("script Authenticode digest mismatch (experimental UTF-16 strip heuristic vs PKCS#7)", err.Message);
-            File.WriteAllBytes(path, signed);
-            AssertVerifyScriptParity(path, signed, ext);
-            return;
-        }
-
         var rustPath = RustSignInPlace(dir, name, unsigned, "sha256");
         Assert.Equal(File.ReadAllBytes(rustPath), signed);
         AssertVerifyScriptParity(rustPath, signed, ext);

@@ -102,17 +102,17 @@ public static class NuGetSigner
         ZipDateTime? zipTimestamp = null,
         Func<byte[], byte[]>? timestampToken = null)
     {
+        var info = NuGetPackage.InspectNupkg(package);
+        if (info.Signed && !overwrite)
+        {
+            throw new PsignException($"package already contains {NuGetPackage.PackageSignatureFileName}; pass overwrite to replace it");
+        }
+
         var content = NuGetPackage.UnsignedPackageSignatureContent(package, algorithm);
         var pkcs7 = SignContent(content, algorithm, signerCert, chainCerts, signer, signingTime);
         if (timestampToken is not null)
         {
             pkcs7 = Pkcs7IdData.Timestamp(pkcs7, timestampToken, Rfc3161TimestampAttribute.CmsTimeStampToken);
-        }
-
-        var info = NuGetPackage.InspectNupkg(package);
-        if (info.Signed && !overwrite)
-        {
-            throw new PsignException($"package already contains {NuGetPackage.PackageSignatureFileName}; pass overwrite to replace it");
         }
 
         var signed = NuGetPackage.EmbedSignature(package, pkcs7, overwrite, zipTimestamp);

@@ -182,8 +182,10 @@ fn inspect_signed_data(
                 continue;
             }
             for val in attr.values.iter() {
-                let payload = val.value();
-                match decode_nested_pkcs7_payload(payload) {
+                let Ok(payload) = val.to_der() else {
+                    continue;
+                };
+                match decode_nested_pkcs7_payload(&payload) {
                     Ok(der) => {
                         if let Ok(rep) = inspect_pkcs7_recursive(&der, depth + 1, max_depth) {
                             nested_signatures.push(rep);

@@ -221,6 +221,7 @@ public static class CabDigest
         uint sigLen = (uint)signatureLength;
         uint originalLen = (uint)data.Length;
         uint sigpos = CheckedU32Add(originalLen, 24, "signed CAB header");
+        _ = CheckedU32Add(sigpos, sigLen, "signed CAB total size");
         uint originalCbCabinet = ReadU32(data, 8);
         if (originalCbCabinet != originalLen)
         {
@@ -229,6 +230,11 @@ public static class CabDigest
         }
 
         uint originalCoffFiles = ReadU32(data, 16);
+        if (originalCoffFiles > originalLen)
+        {
+            throw new PsignException(
+                $"CAB coffFiles {originalCoffFiles} exceeds file size {originalLen}");
+        }
         int folderCount = ReadU16(data, 26);
         int originalFolderTable = CfFolderTableOffset(data, ctx.Flags);
         long folderTableEnd = originalFolderTable + ((long)folderCount * 8);
@@ -302,11 +308,11 @@ public static class CabDigest
             idx++;
             if (b == 0)
             {
-                break;
+                return idx;
             }
         }
 
-        return idx;
+        throw new PsignException("truncated CAB sz field");
     }
 
     /// <summary>Recompute the CAB image digest (Rust <c>compute_cab_authenticode_digest</c>, osslsigncode <c>cab_digest_calc</c>).</summary>
@@ -452,7 +458,13 @@ public static class CabDigest
         }
 
         var embedded = sig.Digest;
-        var kind = AuthenticodeHashKinds.FromDigestLength(embedded.Length);
+        var kind = sig.IndirectData.HashKind
+            ?? throw new PsignException($"unsupported Authenticode digest algorithm OID {sig.IndirectData.DigestAlgorithm.Oid}");
+        if (embedded.Length != kind.DigestLength())
+        {
+            throw new PsignException(
+                $"Authenticode digest length {embedded.Length} does not match algorithm {kind.Name()} ({kind.DigestLength()} bytes)");
+        }
         var computed = ComputeAuthenticodeDigest(data, ctx, kind);
         if (!computed.AsSpan().SequenceEqual(embedded))
         {

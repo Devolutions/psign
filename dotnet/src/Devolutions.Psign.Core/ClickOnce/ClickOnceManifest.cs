@@ -323,21 +323,19 @@ public static class ClickOnceManifest
     public static string ResolveManifestPath(string baseDirectory, string manifestPath)
     {
         var parts = new List<string>();
-        bool windows = OperatingSystem.IsWindows();
-        if (manifestPath.StartsWith('/') || (windows && (manifestPath.StartsWith('\\') || (manifestPath.Length >= 2 && manifestPath[1] == ':'))))
+        if (manifestPath.StartsWith('/') || manifestPath.StartsWith('\\') || (manifestPath.Length >= 2 && manifestPath[1] == ':'))
         {
             throw Escape(manifestPath);
         }
 
-        var separators = windows ? new[] { '/', '\\' } : new[] { '/' };
-        foreach (var component in manifestPath.Split(separators))
+        foreach (var component in manifestPath.Split('/', '\\'))
         {
             if (component.Length == 0 || component == ".")
             {
                 continue;
             }
 
-            if (component == "..")
+            if (component == ".." || component.Contains(':'))
             {
                 throw Escape(manifestPath);
             }
@@ -665,37 +663,34 @@ public static class ClickOnceManifest
     /// </summary>
     public static void VerifySignedInfo(AuthenticodeHashKind digest, CertificateInfo signerCert, byte[] signedInfo, byte[] signature, string label)
     {
-        RSA rsa;
+        using var rsa = RSA.Create();
         try
         {
-            rsa = RSA.Create();
-            rsa.ImportSubjectPublicKeyInfo(signerCert.SubjectPublicKeyInfo, out _);
             if (signerCert.PublicKeyAlgorithm.Oid != Oids.RsaEncryption)
             {
                 throw new CryptographicException("unknown/unsupported algorithm OID");
             }
+
+            rsa.ImportSubjectPublicKeyInfo(signerCert.SubjectPublicKeyInfo, out _);
         }
         catch (CryptographicException e)
         {
             throw new PsignException($"RSA public key from signer certificate: {e.Message}");
         }
 
-        using (rsa)
+        bool ok;
+        try
         {
-            bool ok;
-            try
-            {
-                ok = rsa.VerifyData(signedInfo, signature, RequireSignDigest(digest).HashAlgorithmName(), RSASignaturePadding.Pkcs1);
-            }
-            catch (CryptographicException)
-            {
-                ok = false;
-            }
+            ok = rsa.VerifyData(signedInfo, signature, RequireSignDigest(digest).HashAlgorithmName(), RSASignaturePadding.Pkcs1);
+        }
+        catch (CryptographicException)
+        {
+            ok = false;
+        }
 
-            if (!ok)
-            {
-                throw new PsignException($"verify {label} SignatureValue: signature error: verification error");
-            }
+        if (!ok)
+        {
+            throw new PsignException($"verify {label} SignatureValue: signature error: verification error");
         }
     }
 

@@ -397,7 +397,7 @@ internal static class SignCommand
         ContinueOnError = p.Flag("continue-on-error"),
         SkipSigned = p.Flag("skip-signed"),
         MaxDegreeParallelism = p.Value("max-degree-of-parallelism") is { } mdop
-            ? ulong.Parse(mdop.TrimStart('+'), NumberStyles.None, CultureInfo.InvariantCulture)
+            ? ulong.Parse(mdop.StartsWith('+') ? mdop[1..] : mdop, NumberStyles.None, CultureInfo.InvariantCulture)
             : null,
         ExitCodes = p.Value("exit-codes"),
         Files = p.PosAll("files").ToList(),
@@ -537,9 +537,15 @@ internal static class SignCommand
             return explicitScheme;
         }
 
-        if ((environment(EnvExitCodes) ?? environment(LegacyEnvExitCodes)) is { } value)
+        var envValue = environment(EnvExitCodes);
+        if (string.IsNullOrWhiteSpace(envValue))
         {
-            var t = value.Trim();
+            envValue = environment(LegacyEnvExitCodes);
+        }
+
+        if (!string.IsNullOrWhiteSpace(envValue))
+        {
+            var t = envValue.Trim();
             return RustText.EqualsIgnoreAsciiCase(t, "azure") || RustText.EqualsIgnoreAsciiCase(t, "azuresigntool") ? "azuresigntool" : "signtool";
         }
 
@@ -591,7 +597,7 @@ internal static class SignCommand
 
         foreach (var p in args.Files)
         {
-            if (HasWildcard(p))
+            if (!PathExists(p) && HasWildcard(p))
             {
                 ExpandGlobPattern(p, output, seen);
             }
@@ -606,7 +612,9 @@ internal static class SignCommand
         return output;
     }
 
-    private static bool HasWildcard(string pattern) => pattern.Contains('*') || pattern.Contains('?');
+    private static bool PathExists(string path) => File.Exists(path) || Directory.Exists(path);
+
+    private static bool HasWildcard(string pattern) => pattern.IndexOfAny(['*', '?', '[']) >= 0;
 
     private static void ExpandGlobPattern(string pattern, List<string> output, HashSet<string> seen)
     {
@@ -616,7 +624,7 @@ internal static class SignCommand
             return;
         }
 
-        if (HasWildcard(pattern))
+        if (!PathExists(pattern) && HasWildcard(pattern))
         {
             foreach (var match in RustGlob.Enumerate(pattern))
             {
@@ -660,7 +668,7 @@ internal static class SignCommand
                     full = resolved.FullName;
                 }
 
-                return "c:" + (OperatingSystem.IsWindows() ? full.ToUpperInvariant() : full);
+                return "c:" + (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? full.ToUpperInvariant() : full);
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)

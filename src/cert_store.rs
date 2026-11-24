@@ -386,9 +386,9 @@ fn normalize_store_name(input: &str) -> Result<String> {
     if trimmed.is_empty() {
         return Err(anyhow!("certificate store name must not be empty"));
     }
-    if trimmed.contains(['/', '\\', '\0']) {
+    if trimmed.contains(['/', '\\', '\0']) || matches!(trimmed, "." | "..") {
         return Err(anyhow!(
-            "certificate store name must not contain path separators"
+            "certificate store name must not contain path separators or traversal segments"
         ));
     }
     let canonical = match trimmed.to_ascii_lowercase().as_str() {
