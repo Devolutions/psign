@@ -12,11 +12,10 @@
     <AssemblyName>Devolutions.Psign.Core</AssemblyName>
     <RootNamespace>Devolutions.Psign.Core</RootNamespace>
     <PackageId>Devolutions.Psign.Core</PackageId>
-    <Description>Pure C# psign core: Authenticode SIP digest recomputation (PE, CAB, MSI, MSIX/APPX, catalogs, scripts, ZIP, ESD, RDP), OPC package primitives, and PKCS#7 / CMS parsing shared by verification and signing.</Description>
+    <Description>Pure C# psign core: Authenticode digest recomputation and portable signature verification (PE, CAB, MSI, MSIX/APPX, catalogs, scripts, ZIP, NuGet, VSIX, ClickOnce, App Installer, ESD, RDP), explicit trust anchors, AuthRoot, RFC 3161 and revocation validation, OPC primitives, and PKCS#7 / CMS parsing. Contains no signing code or private-key handling.</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Devolutions.Psign.Verification" />
     <InternalsVisibleTo Include="Devolutions.Psign.Signing" />
     <InternalsVisibleTo Include="psign-tool" />
     <InternalsVisibleTo Include="Devolutions.Psign.Tests" />

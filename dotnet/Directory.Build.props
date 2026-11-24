@@ -3,7 +3,7 @@
     <Authors>Devolutions</Authors>
     <Company>Devolutions Inc.</Company>
     <Product>psign</Product>
-    <Version Condition="'$(Version)' == ''">0.8.5</Version>
+    <Version Condition="'$(Version)' == ''">0.9.0</Version>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Devolutions/psign</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Devolutions/psign.git</RepositoryUrl>

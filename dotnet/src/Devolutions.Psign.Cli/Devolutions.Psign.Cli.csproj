@@ -25,7 +25,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Devolutions.Psign.Core\Devolutions.Psign.Core.csproj" />
-    <ProjectReference Include="..\Devolutions.Psign.Verification\Devolutions.Psign.Verification.csproj" />
     <ProjectReference Include="..\Devolutions.Psign.Signing\Devolutions.Psign.Signing.csproj" />
   </ItemGroup>
 

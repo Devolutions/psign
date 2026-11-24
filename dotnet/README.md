@@ -11,9 +11,8 @@ The Rust implementation remains the reference: the C# port is tested differentia
 
 | Package | Use it for | Depends on |
 |---------|------------|------------|
-| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation (PE/WinMD, CAB, MSI/MSP, MSIX/APPX and bundles, catalogs, PowerShell and WSH scripts, custom ZIP Authenticode, WIM/ESD, RDP), PKCS#7/CMS read model, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. | BCL only |
-| `Devolutions.Psign.Verification` | **Signature validation only**: CMS signature checks, chain building to explicit anchors or the Microsoft AuthRoot CTL (downloaded and cached like the Rust tool), RFC 3161 timestamps, revocation helpers, Azure Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code. | Core |
-| `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
+| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation; **signature validation only** with explicit trust anchors or Microsoft AuthRoot, RFC 3161 and revocation checks, Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code or private-key handling. | BCL only |
+| `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core |
 | `Devolutions.Psign.Cli` | The managed `psign-tool` dotnet tool (portable backend only). | all |
 | `Devolutions.Psign.Server` | The managed `psign-server` dotnet tool: local loopback test services (RFC 3161 TSA, code-signing PKI with AIA / CRL / OCSP, Azure Key Vault-compatible signing, Azure Artifact Signing / Trusted Signing data plane). | Core |
 
@@ -21,7 +20,10 @@ Not packaged: `psign-depgraph` (`src/Devolutions.Psign.DepGraph`), the managed p
 dependency graph generator used by the parity harness (`parity-output/binary-manifest.json`,
 `parity-output/dependency-graph.json`).
 
-A validation-only consumer references just `Devolutions.Psign.Verification` (which brings `Devolutions.Psign.Core`).
+A validation-only consumer references just `Devolutions.Psign.Core`; it does not bring in signing code. A signing
+consumer references `Devolutions.Psign.Signing`, which brings Core transitively. The release workflow packs and
+smoke-tests these two library packages, attaches them to the GitHub release, and publishes them to NuGet.org when
+NuGet publishing is enabled.
 
 ## Layout
 
@@ -32,7 +34,6 @@ dotnet/
   PORTING.md                      # conventions for contributors (project boundaries, parity rules)
   src/
     Devolutions.Psign.Core/
-    Devolutions.Psign.Verification/
     Devolutions.Psign.Signing/
     Devolutions.Psign.Cli/          # psign-tool (managed)
     Devolutions.Psign.Server/       # psign-server (managed local test services)
@@ -78,7 +79,8 @@ in-process. CI does this on Linux, Windows and macOS.
 
 The managed `psign-server` is argv- and wire-compatible with the Rust `psign-server` (clap help / errors, startup lines,
 HTTP status codes, headers and bodies). Deterministic responses are byte-identical; generated certificates, keys and
-signatures use fresh RSA keys on every start, exactly like the Rust server, so they match structurally.
+signatures use fresh RSA keys on every start, exactly like the Rust server, so they match structurally. Its NuGet tool
+package is not published; the commands below build and install it locally.
 
 ```powershell
 dotnet pack dotnet/src/Devolutions.Psign.Server -c Release -o dist/nuget
@@ -90,6 +92,8 @@ psign-server artifact-signing-server --response-mode body-id --expect-correlatio
 ```
 
 ## Managed CLI
+
+The managed CLI NuGet tool package is not published; the commands below build and install it locally.
 
 ```powershell
 dotnet run --project dotnet/src/Devolutions.Psign.Cli -- portable pe-digest app.exe
@@ -104,6 +108,8 @@ psign-tool timestamp /tr http://tsa /td sha256 app.exe
 The managed tool accepts the same arguments as the native `psign-tool` for the portable surface (including
 signtool-style `/fd sha256` switches and `@response` files). `--mode windows` is rejected because WinVerifyTrust,
 SignerSignEx3, and registered CryptSIP providers are only reachable from the native tool.
+The managed `Devolutions.Psign.Cli` and native `Devolutions.Psign.Tool` packages both provide the `psign-tool`
+command; install them into separate tool paths or uninstall one before installing the other globally.
 
 ## Library examples
 

@@ -7,16 +7,16 @@ the port consistent across contributors.
 
 | Project | Contents | May reference |
 |---------|----------|---------------|
-| `Devolutions.Psign.Core` | Format parsing, SIP digest recomputation, signature *extraction*, layout helpers that embed an already-built signature blob, ASN.1 / CMS read model, X.509 structural view, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. **No** private keys, **no** CMS production, **no** network. | BCL |
-| `Devolutions.Psign.Verification` | Portable trust (anchors, chain building, AuthRoot CTL / CAB cache, RFC 3161 validation, revocation / online fetch, Artifact Signing identity checks) and the `trust-verify-*` style verifiers for every format. **No** signing. | Core |
-| `Devolutions.Psign.Signing` | CMS / PKCS#7 producers (`Cms/Pkcs7Builder.cs`), format signers, timestamp clients, remote signers (Azure Key Vault, Azure Artifact Signing), key / PFX / cert-store loading, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
+| `Devolutions.Psign.Core` | Format parsing, SIP digest recomputation, signature *extraction*, portable trust (anchors, chain building, AuthRoot CTL / CAB cache, RFC 3161 validation, revocation / online fetch, Artifact Signing identity checks), and `trust-verify-*` verifiers for every format. **No** private keys or CMS production. | BCL |
+| `Devolutions.Psign.Signing` | CMS / PKCS#7 producers (`Cms/Pkcs7Builder.cs`), format signers, timestamp clients, remote signers (Azure Key Vault, Azure Artifact Signing), key / PFX / cert-store loading, test PKI generation, signature removal, `code` orchestration. | Core |
 | `Devolutions.Psign.Cli` | `psign-tool` (managed) — argv-compatible with the Rust `psign-tool` portable surface. | all |
 | `Devolutions.Psign.Server` | `psign-server` (managed) — port of `src/bin/psign-server.rs`: raw `Socket` HTTP/1.1, clap-compatible CLI, x509-cert builder / serde_json / base64 emulation for byte-identical deterministic output. | Core |
 | `Devolutions.Psign.DepGraph` | `psign-depgraph` (managed, not packed) — port of `src/bin/depgraph.rs`; PE imports via `Core/Pe/PeImports` (goblin semantics). | Core |
 | `Devolutions.Psign.Tests` | xUnit tests; fixtures come from `../tests/fixtures`. | all |
 
-Namespaces follow folders: `Devolutions.Psign.Core.Cab`, `Devolutions.Psign.Signing.Catalog`, … Mirror the Rust module
-name in the file / class name so reviewers can map files 1:1 (for example `msi_digest.rs` → `Core/Msi/MsiDigest.cs`).
+Namespaces generally follow folders, with `Devolutions.Psign.Verification` retained for the validation API even though
+those sources now ship in the Core assembly. Mirror the Rust module name in the file / class name so reviewers can map
+files 1:1 (for example `msi_digest.rs` → `Core/Msi/MsiDigest.cs`).
 
 ## Foundation types (use these, do not duplicate)
 

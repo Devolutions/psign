@@ -8,8 +8,9 @@ Canonical repository: <https://github.com/Devolutions/psign>.
 
 psign is dual-language: besides the Rust implementation, [`dotnet/`](dotnet/README.md) contains a pure C#
 implementation of the whole portable stack (digests, verification, trust, signing, remote signers, and the managed
-`psign-tool` CLI), published as NuGet packages. `Devolutions.Psign.Verification` is a validation-only package with no
-signing code. The C# code is tested byte-for-byte against the Rust tool.
+`psign-tool` CLI), published as NuGet packages. The `Devolutions.Psign.Core` package contains digest and verification
+capabilities without signing code; `Devolutions.Psign.Signing` adds signing and depends on Core. The C# code is tested
+byte-for-byte against the Rust tool.
 
 ## CLI surface
 
@@ -71,12 +72,14 @@ dotnet tool run psign-tool -- --help
 Create local dotnet tool packages from prebuilt release artifacts:
 
 ```powershell
-pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.8.5 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
+pwsh ./nuget/pack-psign-dotnet-tool.ps1 -Version 0.9.0 -ArtifactsRoot ./dist -OutputDir ./dist/nuget
 ```
 
 The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`, plus an `any` fallback package for unsupported runtimes.
 
 Before dispatching the release workflow, run `pwsh ./scripts/bump-version.ps1 -Version <version>` and commit the updated files, including `Cargo.lock`. The release preflight runs the same script with `-Check` and rejects a version mismatch in any of those files.
+
+After merging, dispatch the release workflow on `master` with `publish_nuget=true` and `dry_run_nuget=false` to publish the native tool and the managed `Core` and `Signing` packages. The managed `Cli`, `Server`, and separate `Verification` packages are not published. The defaults are a dry run with NuGet publishing disabled. The `publish-prod` environment requires approval, and its NuGet trusted-publishing policy for `release.yml` must allow both new packages and new versions for `Devolutions.Psign.*` under the publishing owner.
 
 ## Linux / portable tooling
 
