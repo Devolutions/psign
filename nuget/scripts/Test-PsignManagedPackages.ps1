@@ -96,7 +96,7 @@ $types
         Invoke-Dotnet -Arguments @('build', $project, '-c', 'Release', '--no-restore')
 
         if ($item.PackageId -eq 'Devolutions.Psign.Core') {
-            $assetsPath = Join-Path $consumer 'obj\project.assets.json'
+            $assetsPath = Join-Path (Join-Path $consumer 'obj') 'project.assets.json'
             $assets = Get-Content -LiteralPath $assetsPath -Raw | ConvertFrom-Json
             if ($assets.libraries.PSObject.Properties.Name -contains "Devolutions.Psign.Signing/$Version") {
                 throw 'The validation-only Core consumer unexpectedly resolved the Signing package.'
