@@ -22,6 +22,8 @@ dependency graph generator used by the parity harness (`parity-output/binary-man
 `parity-output/dependency-graph.json`).
 
 A validation-only consumer references just `Devolutions.Psign.Verification` (which brings `Devolutions.Psign.Core`).
+The release workflow packs and smoke-tests all five packages, attaches them to the GitHub release, and publishes them
+to NuGet.org when NuGet publishing is enabled.
 
 ## Layout
 
@@ -104,6 +106,8 @@ psign-tool timestamp /tr http://tsa /td sha256 app.exe
 The managed tool accepts the same arguments as the native `psign-tool` for the portable surface (including
 signtool-style `/fd sha256` switches and `@response` files). `--mode windows` is rejected because WinVerifyTrust,
 SignerSignEx3, and registered CryptSIP providers are only reachable from the native tool.
+The managed `Devolutions.Psign.Cli` and native `Devolutions.Psign.Tool` packages both provide the `psign-tool`
+command; install them into separate tool paths or uninstall one before installing the other globally.
 
 ## Library examples
 

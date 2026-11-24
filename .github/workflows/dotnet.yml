@@ -103,22 +103,20 @@ jobs:
             10.0.x
 
       - name: Pack
-        run: |
-          dotnet pack dotnet/src/Devolutions.Psign.Core/Devolutions.Psign.Core.csproj -c Release -o dotnet/artifacts
-          dotnet pack dotnet/src/Devolutions.Psign.Verification/Devolutions.Psign.Verification.csproj -c Release -o dotnet/artifacts
-          dotnet pack dotnet/src/Devolutions.Psign.Signing/Devolutions.Psign.Signing.csproj -c Release -o dotnet/artifacts
-          dotnet pack dotnet/src/Devolutions.Psign.Cli/Devolutions.Psign.Cli.csproj -c Release -o dotnet/artifacts
-          dotnet pack dotnet/src/Devolutions.Psign.Server/Devolutions.Psign.Server.csproj -c Release -o dotnet/artifacts
+        shell: pwsh
+        run: ./nuget/pack-managed-packages.ps1 -OutputDir dotnet/artifacts
 
-      - name: Smoke-test managed dotnet tools
-        run: |
-          dotnet tool install --tool-path ./dotnet/tool-smoke --add-source ./dotnet/artifacts Devolutions.Psign.Cli
-          ./dotnet/tool-smoke/psign-tool portable pe-digest tests/fixtures/pe-authenticode-upstream/tiny64.signed.efi
-          dotnet tool install --tool-path ./dotnet/tool-smoke --add-source ./dotnet/artifacts Devolutions.Psign.Server
-          ./dotnet/tool-smoke/psign-server --version
+      - name: Smoke-test managed packages
+        shell: pwsh
+        run: ./nuget/scripts/Test-PsignManagedPackages.ps1 -PackageDir dotnet/artifacts
+
+      - name: Test release NuGet publishing
+        shell: pwsh
+        run: ./nuget/scripts/Test-PsignNuGetPublish.ps1
 
       - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
           name: psign-dotnet-nupkgs
           path: dotnet/artifacts/*.nupkg
+          if-no-files-found: error
