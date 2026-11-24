@@ -1009,18 +1009,25 @@ fn find_xml_root_start_tag(text: &str) -> Result<XmlStartTagSpan> {
 }
 
 fn resolve_clickonce_manifest_path(base_directory: &Path, manifest_path: &str) -> Result<PathBuf> {
-    let relative = Path::new(manifest_path);
+    if manifest_path.starts_with('/')
+        || manifest_path.starts_with('\\')
+        || manifest_path.as_bytes().get(1) == Some(&b':')
+    {
+        return Err(anyhow!(
+            "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
+        ));
+    }
     let mut safe = PathBuf::new();
-    for component in relative.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            std::path::Component::CurDir => {}
-            _ => {
-                return Err(anyhow!(
-                    "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
-                ));
-            }
+    for component in manifest_path.split(['/', '\\']) {
+        if component.is_empty() || component == "." {
+            continue;
         }
+        if component == ".." || component.contains(':') {
+            return Err(anyhow!(
+                "ClickOnce manifest path must be relative and stay under the base directory: {manifest_path}"
+            ));
+        }
+        safe.push(component);
     }
     if safe.as_os_str().is_empty() {
         return Err(anyhow!("ClickOnce manifest path is empty"));
