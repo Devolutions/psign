@@ -602,7 +602,6 @@ jobs:
           name: devolutions-psign-managed-nupkg
           path: |
             dist/managed/Devolutions.Psign.Core.*.nupkg
-            dist/managed/Devolutions.Psign.Verification.*.nupkg
             dist/managed/Devolutions.Psign.Signing.*.nupkg
           if-no-files-found: error
 

@@ -8,10 +8,9 @@ $toolDir = Join-Path $testRoot 'tool'
 $version = '0.9.0-test'
 $managedIds = @(
     'Devolutions.Psign.Core'
-    'Devolutions.Psign.Verification'
     'Devolutions.Psign.Signing'
 )
-$excludedIds = @('Devolutions.Psign.Cli', 'Devolutions.Psign.Server')
+$excludedIds = @('Devolutions.Psign.Verification', 'Devolutions.Psign.Cli', 'Devolutions.Psign.Server')
 $rids = @('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64', 'any')
 $expected = @(
     foreach ($id in $managedIds) { "$id.$version.nupkg" }
@@ -58,20 +57,20 @@ function Test-DryRunRequiresNoKeyAndDoesNotPush {
     }
 }
 
-function Test-ExcludesManagedToolPackages {
+function Test-ExcludesUnpublishedManagedPackages {
     $global:PsignPublishTestPushes.Clear()
     $env:NUGET_API_KEY = 'test-key'
     $output = (& $publishScript -Version $version -ManagedPackageDir $managedDir -ToolPackageDir $toolDir -DryRun 6>&1 | Out-String)
     foreach ($id in $excludedIds) {
         if ($output.Contains("$id.$version.nupkg")) {
-            throw "Dry-run included the excluded package $id."
+            throw "Dry-run included the unpublished package $id."
         }
     }
 
     & $publishScript -Version $version -ManagedPackageDir $managedDir -ToolPackageDir $toolDir
     foreach ($id in $excludedIds) {
         if ($global:PsignPublishTestPushes.Contains("$id.$version.nupkg")) {
-            throw "Publishing included the excluded package $id."
+            throw "Publishing included the unpublished package $id."
         }
     }
 }
@@ -145,7 +144,7 @@ function Test-PushFailureStopsImmediately {
             & $publishScript -Version $version -ManagedPackageDir $managedDir -ToolPackageDir $toolDir
         }
         catch {
-            $failed = $_.Exception.Message -like '*Devolutions.Psign.Verification*'
+            $failed = $_.Exception.Message -like '*Devolutions.Psign.Signing*'
         }
         if (-not $failed -or $global:PsignPublishTestPushes.Count -ne 2) {
             throw 'A failed push did not stop the remaining packages.'
@@ -170,7 +169,7 @@ try {
     $tests = @(
         'Test-PublishesPackagesInDependencyOrder'
         'Test-DryRunRequiresNoKeyAndDoesNotPush'
-        'Test-ExcludesManagedToolPackages'
+        'Test-ExcludesUnpublishedManagedPackages'
         'Test-MissingPackageStopsBeforeAnyPush'
         'Test-MissingNativePointerStopsBeforeAnyPush'
         'Test-MissingApiKeyStopsBeforeAnyPush'

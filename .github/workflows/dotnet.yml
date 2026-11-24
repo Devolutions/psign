@@ -120,6 +120,5 @@ jobs:
           name: psign-dotnet-nupkgs
           path: |
             dotnet/artifacts/Devolutions.Psign.Core.*.nupkg
-            dotnet/artifacts/Devolutions.Psign.Verification.*.nupkg
             dotnet/artifacts/Devolutions.Psign.Signing.*.nupkg
           if-no-files-found: error

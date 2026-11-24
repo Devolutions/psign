@@ -11,9 +11,8 @@ The Rust implementation remains the reference: the C# port is tested differentia
 
 | Package | Use it for | Depends on |
 |---------|------------|------------|
-| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation (PE/WinMD, CAB, MSI/MSP, MSIX/APPX and bundles, catalogs, PowerShell and WSH scripts, custom ZIP Authenticode, WIM/ESD, RDP), PKCS#7/CMS read model, OPC / NuGet / VSIX / ClickOnce / App Installer primitives, XML C14N. | BCL only |
-| `Devolutions.Psign.Verification` | **Signature validation only**: CMS signature checks, chain building to explicit anchors or the Microsoft AuthRoot CTL (downloaded and cached like the Rust tool), RFC 3161 timestamps, revocation helpers, Azure Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code. | Core |
-| `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core, Verification |
+| `Devolutions.Psign.Core` | Format parsing and SIP digest recomputation; **signature validation only** with explicit trust anchors or Microsoft AuthRoot, RFC 3161 and revocation checks, Artifact Signing identity checks, and per-format trust verifiers. Contains no signing code or private-key handling. | BCL only |
+| `Devolutions.Psign.Signing` | Portable signing compatible with psign: CMS / PKCS#7 producers, per-format signers and embedding, RFC 3161 timestamp client, Azure Key Vault and Azure Artifact Signing remote signers, PFX / PEM / DER key loading, portable certificate store, test PKI generation, signature removal, `code` orchestration. | Core |
 | `Devolutions.Psign.Cli` | The managed `psign-tool` dotnet tool (portable backend only). | all |
 | `Devolutions.Psign.Server` | The managed `psign-server` dotnet tool: local loopback test services (RFC 3161 TSA, code-signing PKI with AIA / CRL / OCSP, Azure Key Vault-compatible signing, Azure Artifact Signing / Trusted Signing data plane). | Core |
 
@@ -21,9 +20,10 @@ Not packaged: `psign-depgraph` (`src/Devolutions.Psign.DepGraph`), the managed p
 dependency graph generator used by the parity harness (`parity-output/binary-manifest.json`,
 `parity-output/dependency-graph.json`).
 
-A validation-only consumer references just `Devolutions.Psign.Verification` (which brings `Devolutions.Psign.Core`).
-The release workflow packs and smoke-tests all five packages, attaches them to the GitHub release, and publishes them
-to NuGet.org when NuGet publishing is enabled.
+A validation-only consumer references just `Devolutions.Psign.Core`; it does not bring in signing code. A signing
+consumer references `Devolutions.Psign.Signing`, which brings Core transitively. The release workflow packs and
+smoke-tests these two library packages, attaches them to the GitHub release, and publishes them to NuGet.org when
+NuGet publishing is enabled.
 
 ## Layout
 
@@ -34,7 +34,6 @@ dotnet/
   PORTING.md                      # conventions for contributors (project boundaries, parity rules)
   src/
     Devolutions.Psign.Core/
-    Devolutions.Psign.Verification/
     Devolutions.Psign.Signing/
     Devolutions.Psign.Cli/          # psign-tool (managed)
     Devolutions.Psign.Server/       # psign-server (managed local test services)
