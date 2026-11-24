@@ -225,6 +225,7 @@ fn trust_verify_options_from_shared(a: &TrustVerifySharedArgs) -> Result<TrustVe
     Ok(TrustVerifyPeOptions {
         anchor_dir: a.anchor_dir.clone(),
         trusted_ca_files: combined_trusted_ca_files(&a.trusted_ca, &a.additional_trusted_ca),
+        trusted_ca_der: Vec::new(),
         authroot_cab,
         expect_authroot_cab_sha256,
         verification_instant_override,

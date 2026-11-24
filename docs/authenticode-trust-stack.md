@@ -2,6 +2,17 @@
 
 This describes how **`crates/psign-authenticode-trust`** composes crates for **Linux/macOS-style** Authenticode trust checks without **`CertGetCertificateChain`** / **`WinVerifyTrust`**.
 
+For MSIX library consumers, `trust_verify_msix::verify_msix_signature_without_trust` verifies
+package integrity and the CMS signature and returns the code-signing certificate DER; it does
+not establish trust or validity. `trust_verify_msix_current_or_timestamp` verifies a currently
+valid chain or falls back to a trusted RFC 3161 timestamp. Resolve options first with
+`msix_options_with_auto_authroot`: absent explicit anchors, it uses system TLS CA certificates
+instead of the CLI's unauthenticated HTTP AuthRoot cache. An independently obtained
+`expect_authroot_cab_sha256` selects the pinned cache instead. System TLS trust and Windows
+Authenticode trust are distinct policies. On Windows `windows::verify_authenticode_path` invokes
+the system `/pa` policy on a path; callers must prevent replacement between path verification
+and reading signer data.
+
 ## Responsibility split
 
 | Layer | Crate | Role |

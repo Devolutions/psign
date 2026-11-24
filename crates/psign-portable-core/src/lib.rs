@@ -2760,6 +2760,7 @@ fn trust_options(
         TrustVerifyPeOptions {
             anchor_dir: request.anchor_directory.clone(),
             trusted_ca_files,
+            trusted_ca_der: Vec::new(),
             authroot_cab: request.authroot_cab.clone(),
             expect_authroot_cab_sha256: None,
             verification_instant_override: request

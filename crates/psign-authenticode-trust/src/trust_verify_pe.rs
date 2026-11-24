@@ -9,6 +9,7 @@ use crate::policy::{AuthenticodeTrustPolicy, OnlineTrustOptions};
 use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding};
 use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust;
 use anyhow::{Context, Result, anyhow};
+use der::Decode;
 use picky::x509::certificate::Cert;
 use picky::x509::date::UtcDate;
 use picky::x509::pkcs7::authenticode::AuthenticodeSignature;
@@ -21,6 +22,8 @@ use sha2::Digest;
 pub struct TrustVerifyPeOptions {
     pub anchor_dir: Option<std::path::PathBuf>,
     pub trusted_ca_files: Vec<std::path::PathBuf>,
+    /// DER-encoded certificates explicitly trusted as anchors.
+    pub trusted_ca_der: Vec<Vec<u8>>,
     pub authroot_cab: Option<std::path::PathBuf>,
     /// When set, require the AuthRoot CAB file to match this SHA-256 (bootstrap integrity).
     pub expect_authroot_cab_sha256: Option<[u8; 32]>,
@@ -130,6 +133,20 @@ pub fn load_trust_material(opts: &TrustVerifyPeOptions) -> Result<(AnchorStore, 
                 .collect::<Result<Vec<_>>>()?,
         );
         anchor_certs.extend(file_certs);
+    }
+
+    if !opts.trusted_ca_der.is_empty() {
+        for der in &opts.trusted_ca_der {
+            x509_cert::Certificate::from_der(der)
+                .map_err(|e| anyhow!("parse trusted CA DER: {e}"))?;
+            let thumb: [u8; 20] = sha1::Sha1::digest(der).into();
+            anchor_store.merge_thumbprints_only(&[thumb]);
+            // Some system roots use algorithms picky cannot parse. Their exact thumbprints remain
+            // anchors; a chain requiring an unsupported certificate still fails verification.
+            if let Ok(cert) = Cert::from_der(der) {
+                anchor_certs.push(cert);
+            }
+        }
     }
 
     if let Some(cab) = &opts.authroot_cab {
