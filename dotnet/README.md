@@ -80,7 +80,8 @@ in-process. CI does this on Linux, Windows and macOS.
 
 The managed `psign-server` is argv- and wire-compatible with the Rust `psign-server` (clap help / errors, startup lines,
 HTTP status codes, headers and bodies). Deterministic responses are byte-identical; generated certificates, keys and
-signatures use fresh RSA keys on every start, exactly like the Rust server, so they match structurally.
+signatures use fresh RSA keys on every start, exactly like the Rust server, so they match structurally. Its NuGet tool
+package is not published; the commands below build and install it locally.
 
 ```powershell
 dotnet pack dotnet/src/Devolutions.Psign.Server -c Release -o dist/nuget
@@ -92,6 +93,8 @@ psign-server artifact-signing-server --response-mode body-id --expect-correlatio
 ```
 
 ## Managed CLI
+
+The managed CLI NuGet tool package is not published; the commands below build and install it locally.
 
 ```powershell
 dotnet run --project dotnet/src/Devolutions.Psign.Cli -- portable pe-digest app.exe

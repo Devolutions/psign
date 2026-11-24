@@ -118,5 +118,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: psign-dotnet-nupkgs
-          path: dotnet/artifacts/*.nupkg
+          path: |
+            dotnet/artifacts/Devolutions.Psign.Core.*.nupkg
+            dotnet/artifacts/Devolutions.Psign.Verification.*.nupkg
+            dotnet/artifacts/Devolutions.Psign.Signing.*.nupkg
           if-no-files-found: error

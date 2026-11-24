@@ -78,7 +78,7 @@ The package is built from native `psign-tool` artifacts for `win-x64`, `win-arm6
 
 Before dispatching the release workflow, run `pwsh ./scripts/bump-version.ps1 -Version <version>` and commit the updated files, including `Cargo.lock`. The release preflight runs the same script with `-Check` and rejects a version mismatch in any of those files.
 
-After merging, dispatch the release workflow on `master` with `publish_nuget=true` and `dry_run_nuget=false` to publish the native tool and the managed `Core`, `Verification`, `Signing`, `Cli`, and `Server` packages. The defaults are a dry run with NuGet publishing disabled. The `publish-prod` environment requires approval, and its NuGet trusted-publishing policy for `release.yml` must allow both new packages and new versions for `Devolutions.Psign.*` under the publishing owner.
+After merging, dispatch the release workflow on `master` with `publish_nuget=true` and `dry_run_nuget=false` to publish the native tool and the managed `Core`, `Verification`, and `Signing` packages. The managed `Cli` and `Server` packages are not published. The defaults are a dry run with NuGet publishing disabled. The `publish-prod` environment requires approval, and its NuGet trusted-publishing policy for `release.yml` must allow both new packages and new versions for `Devolutions.Psign.*` under the publishing owner.
 
 ## Linux / portable tooling
 

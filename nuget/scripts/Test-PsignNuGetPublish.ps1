@@ -10,9 +10,8 @@ $managedIds = @(
     'Devolutions.Psign.Core'
     'Devolutions.Psign.Verification'
     'Devolutions.Psign.Signing'
-    'Devolutions.Psign.Cli'
-    'Devolutions.Psign.Server'
 )
+$excludedIds = @('Devolutions.Psign.Cli', 'Devolutions.Psign.Server')
 $rids = @('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64', 'any')
 $expected = @(
     foreach ($id in $managedIds) { "$id.$version.nupkg" }
@@ -55,6 +54,24 @@ function Test-DryRunRequiresNoKeyAndDoesNotPush {
     foreach ($name in $expected) {
         if (-not $output.Contains($name)) {
             throw "Dry-run omitted $name."
+        }
+    }
+}
+
+function Test-ExcludesManagedToolPackages {
+    $global:PsignPublishTestPushes.Clear()
+    $env:NUGET_API_KEY = 'test-key'
+    $output = (& $publishScript -Version $version -ManagedPackageDir $managedDir -ToolPackageDir $toolDir -DryRun 6>&1 | Out-String)
+    foreach ($id in $excludedIds) {
+        if ($output.Contains("$id.$version.nupkg")) {
+            throw "Dry-run included the excluded package $id."
+        }
+    }
+
+    & $publishScript -Version $version -ManagedPackageDir $managedDir -ToolPackageDir $toolDir
+    foreach ($id in $excludedIds) {
+        if ($global:PsignPublishTestPushes.Contains("$id.$version.nupkg")) {
+            throw "Publishing included the excluded package $id."
         }
     }
 }
@@ -142,7 +159,7 @@ function Test-PushFailureStopsImmediately {
 
 try {
     New-Item -ItemType Directory -Path $managedDir, $toolDir | Out-Null
-    foreach ($id in $managedIds) {
+    foreach ($id in ($managedIds + $excludedIds)) {
         New-Item -ItemType File -Path (Join-Path $managedDir "$id.$version.nupkg") | Out-Null
     }
     foreach ($rid in $rids) {
@@ -153,6 +170,7 @@ try {
     $tests = @(
         'Test-PublishesPackagesInDependencyOrder'
         'Test-DryRunRequiresNoKeyAndDoesNotPush'
+        'Test-ExcludesManagedToolPackages'
         'Test-MissingPackageStopsBeforeAnyPush'
         'Test-MissingNativePointerStopsBeforeAnyPush'
         'Test-MissingApiKeyStopsBeforeAnyPush'

@@ -47,27 +47,6 @@ try {
 </configuration>
 "@ | Set-Content -LiteralPath $config -Encoding utf8
 
-    $toolPath = Join-Path $testRoot 'tools'
-    foreach ($id in @('Devolutions.Psign.Cli', 'Devolutions.Psign.Server')) {
-        Invoke-Dotnet -Arguments @(
-            'tool', 'install', $id, '--tool-path', $toolPath,
-            '--configfile', $config, '--version', $Version
-        )
-    }
-
-    $extension = if ($IsWindows) { '.exe' } else { '' }
-    $cli = Join-Path $toolPath "psign-tool$extension"
-    $server = Join-Path $toolPath "psign-server$extension"
-    $fixture = Join-Path (Join-Path (Join-Path (Join-Path $repoRoot 'tests') 'fixtures') 'pe-authenticode-upstream') 'tiny64.signed.efi'
-    $digest = (& $cli portable pe-digest $fixture | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $digest -notmatch '^[0-9a-f]{64}$') {
-        throw 'The installed managed CLI failed its PE digest smoke test.'
-    }
-    $serverVersion = (& $server --version | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or $serverVersion -ne "psign-server $Version") {
-        throw "The installed managed server reported an unexpected version: $serverVersion"
-    }
-
     $consumer = Join-Path $testRoot 'consumer'
     New-Item -ItemType Directory -Path $consumer | Out-Null
     $project = Join-Path $consumer 'Consumer.csproj'
@@ -96,7 +75,7 @@ public static class Consumer
 
     Invoke-Dotnet -Arguments @('restore', $project, '--configfile', $config)
     Invoke-Dotnet -Arguments @('build', $project, '-c', 'Release', '--no-restore')
-    Write-Host "Managed NuGet packages $Version passed installation and consumer smoke tests."
+    Write-Host "Managed NuGet packages $Version passed consumer smoke tests."
 }
 finally {
     $env:NUGET_PACKAGES = $originalPackages

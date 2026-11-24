@@ -27,7 +27,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $outputPath = (Resolve-Path -LiteralPath $OutputDir).Path
 $sourceRoot = Join-Path $dotnetRoot 'src'
 
-foreach ($name in @('Core', 'Verification', 'Signing', 'Cli', 'Server')) {
+foreach ($name in @('Core', 'Verification', 'Signing')) {
     $id = "Devolutions.Psign.$name"
     $project = Join-Path (Join-Path $sourceRoot $id) "$id.csproj"
     dotnet pack $project -c Release "-p:Version=$Version" -o $outputPath
