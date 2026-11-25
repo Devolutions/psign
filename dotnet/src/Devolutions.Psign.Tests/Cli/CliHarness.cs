@@ -1,5 +1,6 @@
 using Devolutions.Psign.Cli;
 using Devolutions.Psign.Cli.Framework;
+using Devolutions.Psign.Cli.Portable;
 using Xunit;
 
 namespace Devolutions.Psign.Tests.Cli;
@@ -34,6 +35,25 @@ internal static class CliHarness
 
     /// <summary>Run the managed <c>psign-tool</c> in-process (or <c>PSIGN_MANAGED_TOOL</c> out of process).</summary>
     public static CliResult RunManaged(params string[] args) => RunManaged(NoEnv, args);
+
+    /// <summary>Scope a signing transport override to serialized in-process CLI calls.</summary>
+    public static T WithSigningHttpHandler<T>(HttpMessageHandler handler, Func<T> action)
+    {
+        RequireInProcess();
+        lock (Gate)
+        {
+            var previous = SigningCommands.HttpHandlerFactory;
+            SigningCommands.HttpHandlerFactory = () => handler;
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                SigningCommands.HttpHandlerFactory = previous;
+            }
+        }
+    }
 
     /// <summary>
     /// Run the managed <c>psign-tool</c> in-process with environment overrides (<c>null</c> removes a variable). The
