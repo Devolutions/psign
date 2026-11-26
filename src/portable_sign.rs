@@ -6,25 +6,10 @@ use clap::ValueEnum;
 use glob::glob;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
-#[cfg(feature = "artifact-signing-rest")]
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-
-#[cfg(feature = "artifact-signing-rest")]
-#[derive(Debug, Deserialize)]
-#[allow(non_snake_case, dead_code)]
-struct ArtifactSigningMetadataDoc {
-    Endpoint: String,
-    CodeSigningAccountName: String,
-    CertificateProfileName: String,
-    #[serde(default)]
-    CorrelationId: Option<String>,
-    #[serde(default)]
-    ExcludeCredentials: Option<Vec<String>>,
-}
 
 pub fn sign_file(args: &SignArgs, _global: &GlobalOpts) -> Result<CommandOutput> {
     if artifact_signing_requested(args) && azure_key_vault_requested(args) {
@@ -1043,13 +1028,13 @@ fn run_portable_sign_portable_core_artifact_signing(
     let metadata = artifact_signing_metadata(args)?;
     let endpoint = text_opt(args.artifact_signing_endpoint.as_deref())
         .map(ToOwned::to_owned)
-        .or_else(|| metadata.as_ref().map(|m| m.Endpoint.clone()))
+        .or_else(|| metadata.as_ref().map(|m| m.endpoint.clone()))
         .or_else(|| {
             text_opt(args.artifact_signing_endpoint_base_url.as_deref()).map(ToOwned::to_owned)
         })
         .or_else(|| {
             text_opt(args.artifact_signing_region.as_deref())
-                .map(|region| format!("https://{region}.codesigning.azure.net"))
+                .map(psign_portable_core::artifact_signing_endpoint_from_region)
         })
         .ok_or_else(|| {
             anyhow!(
@@ -1058,27 +1043,19 @@ fn run_portable_sign_portable_core_artifact_signing(
         })?;
     let account_name = text_opt(args.artifact_signing_account_name.as_deref())
         .map(ToOwned::to_owned)
-        .or_else(|| metadata.as_ref().map(|m| m.CodeSigningAccountName.clone()))
+        .or_else(|| metadata.as_ref().map(|m| m.code_signing_account_name.clone()))
         .ok_or_else(|| anyhow!("portable {target_kind} Artifact Signing requires --artifact-signing-account-name or metadata CodeSigningAccountName"))?;
     let profile_name = text_opt(args.artifact_signing_profile_name.as_deref())
         .map(ToOwned::to_owned)
-        .or_else(|| metadata.as_ref().map(|m| m.CertificateProfileName.clone()))
+        .or_else(|| metadata.as_ref().map(|m| m.certificate_profile_name.clone()))
         .ok_or_else(|| anyhow!("portable {target_kind} Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName"))?;
     let correlation_id = text_opt(args.artifact_signing_correlation_id.as_deref())
         .map(ToOwned::to_owned)
-        .or_else(|| metadata.as_ref().and_then(|m| m.CorrelationId.clone()));
-    if text_present(&args.artifact_signing_signature_algorithm)
-        || text_present(&args.artifact_signing_api_version)
-        || text_present(&args.artifact_signing_authority)
-    {
-        return Err(anyhow!(
-            "native-shaped portable {target_kind} Artifact Signing does not yet support signature-algorithm, api-version, or authority overrides"
-        ));
-    }
+        .or_else(|| metadata.as_ref().and_then(|m| m.correlation_id.clone()));
 
     let mut exclude_credentials = metadata
         .as_ref()
-        .and_then(|m| m.ExcludeCredentials.clone())
+        .and_then(|m| m.exclude_credentials.clone())
         .unwrap_or_default();
     let credential_type = args
         .artifact_signing_credential_type
@@ -1117,6 +1094,14 @@ fn run_portable_sign_portable_core_artifact_signing(
         .map(ToOwned::to_owned),
         artifact_signing_exclude_credentials: std::mem::take(&mut exclude_credentials),
         artifact_signing_correlation_id: correlation_id,
+        artifact_signing_authority: text_opt(args.artifact_signing_authority.as_deref())
+            .map(ToOwned::to_owned),
+        artifact_signing_api_version: text_opt(args.artifact_signing_api_version.as_deref())
+            .map(ToOwned::to_owned),
+        artifact_signing_signature_algorithm: text_opt(
+            args.artifact_signing_signature_algorithm.as_deref(),
+        )
+        .map(ToOwned::to_owned),
         ..Default::default()
     };
     let response = psign_portable_core::portable_sign(request).with_context(|| {
@@ -1151,19 +1136,16 @@ fn run_portable_sign_script_artifact_signing(
 }
 
 #[cfg(feature = "artifact-signing-rest")]
-fn artifact_signing_metadata(args: &SignArgs) -> Result<Option<ArtifactSigningMetadataDoc>> {
+fn artifact_signing_metadata(
+    args: &SignArgs,
+) -> Result<Option<psign_portable_core::ArtifactSigningMetadata>> {
     let metadata_path = args
         .artifact_signing_metadata
         .as_ref()
         .or(args.dmdf.as_ref());
-    let Some(path) = metadata_path else {
-        return Ok(None);
-    };
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("read '{}'", path.display()))?;
-    let doc = serde_json::from_str::<ArtifactSigningMetadataDoc>(&text)
-        .with_context(|| format!("parse Artifact Signing metadata '{}'", path.display()))?;
-    Ok(Some(doc))
+    metadata_path
+        .map(|path| psign_portable_core::ArtifactSigningMetadata::load(path))
+        .transpose()
 }
 
 fn portable_core_digest(

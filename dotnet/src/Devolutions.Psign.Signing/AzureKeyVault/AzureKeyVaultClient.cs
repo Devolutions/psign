@@ -148,6 +148,56 @@ public sealed class AzureKeyVaultClient : IDisposable
         return HttpTransport.RequiredString(rsp.Body, "access_token", "Azure AD token JSON");
     }
 
+    /// <summary>Acquire a <c>vault.azure.net</c> access token using workload identity federation (Rust <c>acquire_kv_workload_identity_token</c>).</summary>
+    public string AcquireWorkloadIdentityToken(string? authority, string tenantId, string clientId, string federatedTokenFile) =>
+        HttpTransport.RunSync(() => AcquireWorkloadIdentityTokenAsync(authority, tenantId, clientId, federatedTokenFile));
+
+    /// <inheritdoc cref="AcquireWorkloadIdentityToken"/>
+    public async Task<string> AcquireWorkloadIdentityTokenAsync(
+        string? authority,
+        string tenantId,
+        string clientId,
+        string federatedTokenFile,
+        CancellationToken cancellationToken = default)
+    {
+        string rawAssertion;
+        try
+        {
+            rawAssertion = await File.ReadAllTextAsync(federatedTokenFile, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            throw new PsignException($"read federated token file {federatedTokenFile}", IoErrorText.Inner(e));
+        }
+
+        var tenant = tenantId.Trim();
+        var cid = clientId.Trim();
+        var assertion = rawAssertion.Trim();
+        if (tenant.Length == 0 || cid.Length == 0 || assertion.Length == 0)
+        {
+            throw new PsignException("workload identity requires non-empty tenant_id, client_id, and federated token file");
+        }
+
+        var authBase = (NonBlank(authority) ?? "https://login.microsoftonline.com").TrimEnd('/');
+        var tokenUrl = $"{authBase}/{HttpText.EncodePathSegment(tenant)}/oauth2/v2.0/token";
+        using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl)
+        {
+            Content = ArtifactSigningClient.FormContent(
+                new("client_id", cid),
+                new("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+                new("client_assertion", assertion),
+                new("scope", "https://vault.azure.net/.default"),
+                new("grant_type", "client_credentials")),
+        };
+        var rsp = await _http.SendAsync(request, TimeSpan.FromSeconds(120), "Azure AD workload identity token request", cancellationToken).ConfigureAwait(false);
+        if (!rsp.IsSuccess)
+        {
+            throw new PsignException($"Azure AD workload identity token HTTP {rsp.StatusText}: {rsp.Text}");
+        }
+
+        return HttpTransport.RequiredString(rsp.Body, "access_token", "Azure AD workload identity token JSON");
+    }
+
     private static string? NonBlank(string? value)
     {
         var t = value?.Trim();

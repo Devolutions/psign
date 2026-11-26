@@ -1,7 +1,11 @@
 //! Reusable portable Authenticode operations for CLI adapters and foreign-function callers.
 
+pub mod cert_store;
+pub mod response_file;
+
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use authenticode::SpcIndirectDataContent;
@@ -380,6 +384,69 @@ pub struct PortableSignRequest {
     pub artifact_signing_exclude_credentials: Vec<String>,
     #[serde(default)]
     pub artifact_signing_correlation_id: Option<String>,
+    // Portable file-backed certificate store (`~/.psign/cert-store` or `PSIGN_CERT_STORE`)
+    #[serde(default)]
+    pub cert_sha1: Option<String>,
+    #[serde(default)]
+    pub cert_store_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub machine_store: bool,
+    #[serde(default)]
+    pub store_name: Option<String>,
+    // Additional Artifact Signing overrides and metadata resolution
+    #[serde(default)]
+    pub artifact_signing_metadata: Option<PathBuf>,
+    #[serde(default)]
+    pub artifact_signing_region: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_authority: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_api_version: Option<String>,
+    #[serde(default)]
+    pub artifact_signing_signature_algorithm: Option<String>,
+}
+
+/// Microsoft Artifact Signing metadata JSON (`metadata.json` / `/dmdf`).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactSigningMetadata {
+    #[serde(rename = "Endpoint")]
+    pub endpoint: String,
+    #[serde(rename = "CodeSigningAccountName")]
+    pub code_signing_account_name: String,
+    #[serde(rename = "CertificateProfileName")]
+    pub certificate_profile_name: String,
+    #[serde(rename = "CorrelationId", default)]
+    pub correlation_id: Option<String>,
+    #[serde(rename = "ExcludeCredentials", default)]
+    pub exclude_credentials: Option<Vec<String>>,
+}
+
+impl ArtifactSigningMetadata {
+    /// Parse Artifact Signing metadata from JSON bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON does not match the Artifact Signing metadata schema.
+    pub fn parse(json: &[u8]) -> Result<Self> {
+        serde_json::from_slice(json).context("parse Artifact Signing metadata JSON")
+    }
+
+    /// Read and parse Artifact Signing metadata from a JSON file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the file or parsing its JSON fails.
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path).with_context(|| format!("read '{}'", path.display()))?;
+        serde_json::from_slice(&raw)
+            .with_context(|| format!("parse Artifact Signing metadata '{}'", path.display()))
+    }
+}
+
+/// Construct the Artifact Signing data-plane endpoint URL for a regional hostname segment (e.g. `westus`).
+#[must_use]
+pub fn artifact_signing_endpoint_from_region(region: &str) -> String {
+    format!("https://{}.codesigning.azure.net", region.trim())
 }
 
 impl Default for PortableSignRequest {
@@ -422,6 +489,15 @@ impl Default for PortableSignRequest {
             artifact_signing_federated_token_file: None,
             artifact_signing_exclude_credentials: Vec::new(),
             artifact_signing_correlation_id: None,
+            cert_sha1: None,
+            cert_store_dir: None,
+            machine_store: false,
+            store_name: None,
+            artifact_signing_metadata: None,
+            artifact_signing_region: None,
+            artifact_signing_authority: None,
+            artifact_signing_api_version: None,
+            artifact_signing_signature_algorithm: None,
         }
     }
 }
@@ -637,6 +713,149 @@ pub fn portable_sign(request: PortableSignRequest) -> Result<PortableSignRespons
         signature,
         skipped,
     })
+}
+
+/// Sign a file into a temporary sibling file, verify that the resulting signature self-checks as
+/// [`PortableSignatureStatus::Valid`], and atomically replace the destination path on success.
+///
+/// If signing or self-verification fails, the temporary file is deleted and the target file is
+/// left untouched.
+///
+/// # Errors
+///
+/// Returns an error if signing fails, the produced signature does not self-verify as `Valid`,
+/// or the temporary file cannot be moved into place.
+pub fn portable_sign_file_verified(
+    mut request: PortableSignRequest,
+) -> Result<PortableSignResponse> {
+    let target = request.path.clone();
+    let final_output = request
+        .output_path
+        .clone()
+        .unwrap_or_else(|| target.clone());
+    let temp_output = unique_temp_output_path(&final_output, &target);
+    let format = infer_format(&target);
+    let temp_companion = (format == PortableFileFormat::AppInstaller)
+        .then(|| appinstaller_companion_path(&temp_output));
+
+    struct TempCleanupGuard {
+        paths: Vec<PathBuf>,
+        active: bool,
+    }
+    impl Drop for TempCleanupGuard {
+        fn drop(&mut self) {
+            if self.active {
+                for path in &self.paths {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    let mut cleanup_paths = vec![temp_output.clone()];
+    if let Some(companion) = &temp_companion {
+        cleanup_paths.push(companion.clone());
+    }
+    let mut guard = TempCleanupGuard {
+        paths: cleanup_paths,
+        active: true,
+    };
+
+    request.output_path = Some(temp_output.clone());
+    let mut response = portable_sign(request)?;
+    if response.signature.status != PortableSignatureStatus::Valid {
+        bail!(
+            "portable sign produced a signature that failed self-verification for '{}': {:?} ({})",
+            target.display(),
+            response.signature.status,
+            response.signature.status_message
+        );
+    }
+
+    if response.skipped && same_path_best_effort(&final_output, &target) {
+        response.output_path = final_output.clone();
+        response.signature.path = final_output;
+        return Ok(response);
+    }
+
+    replace_file_atomic(&temp_output, &final_output).with_context(|| {
+        format!(
+            "replace '{}' with signed output '{}'",
+            final_output.display(),
+            temp_output.display()
+        )
+    })?;
+    if let Some(companion) = &temp_companion {
+        let final_companion = appinstaller_companion_path(&final_output);
+        replace_file_atomic(companion, &final_companion).with_context(|| {
+            format!(
+                "replace App Installer companion '{}' with '{}'",
+                final_companion.display(),
+                companion.display()
+            )
+        })?;
+    }
+    guard.active = false;
+    response.output_path = final_output.clone();
+    response.signature.path = final_output;
+    Ok(response)
+}
+
+fn appinstaller_companion_path(path: &Path) -> PathBuf {
+    path.with_extension(
+        path.extension()
+            .map(|e| format!("{}.p7", e.to_string_lossy()))
+            .unwrap_or_else(|| "p7".to_string()),
+    )
+}
+
+fn unique_temp_output_path(final_output: &Path, input_path: &Path) -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let stem = final_output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("signed-output");
+    let ext = input_path
+        .extension()
+        .or_else(|| final_output.extension())
+        .and_then(|s| s.to_str());
+    let file_name = match ext {
+        Some(ext) if !ext.is_empty() => format!("{stem}.psign-{pid}-{seq:x}.{ext}"),
+        _ => format!("{stem}.psign-{pid}-{seq:x}"),
+    };
+    final_output.with_file_name(file_name)
+}
+
+fn same_path_best_effort(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+fn replace_file_atomic(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Fall back to copy + delete when rename fails (for example across filesystems or
+            // certain Windows sharing states where destination overwrite via rename is refused).
+            std::fs::copy(src, dst).with_context(|| {
+                format!(
+                    "rename '{}' to '{}' failed ({rename_err}); fallback copy also failed",
+                    src.display(),
+                    dst.display()
+                )
+            })?;
+            let _ = std::fs::remove_file(src);
+            Ok(())
+        }
+    }
 }
 
 pub fn portable_get_signature(
@@ -1263,6 +1482,8 @@ struct ArtifactSigningProvider {
     endpoint: String,
     account_name: String,
     profile_name: String,
+    signature_algorithm: Option<String>,
+    api_version: String,
     correlation_id: Option<String>,
     authority: Option<String>,
     auth: psign_codesigning_rest::CodesigningAuth,
@@ -1506,13 +1727,18 @@ impl SigningProvider {
             }
             #[cfg(feature = "artifact-signing-rest")]
             SigningProvider::ArtifactSigning(provider) => {
+                let sig_alg = provider
+                    .signature_algorithm
+                    .as_deref()
+                    .unwrap_or_else(|| artifact_signature_algorithm(digest_algorithm))
+                    .to_string();
                 let params = psign_codesigning_rest::CodesigningSubmitParams {
                     region: "unused".to_string(),
                     account_name: provider.account_name.clone(),
                     profile_name: provider.profile_name.clone(),
                     digest: digest.to_vec(),
-                    signature_algorithm: artifact_signature_algorithm(digest_algorithm).to_string(),
-                    api_version: psign_codesigning_rest::DEFAULT_API_VERSION.to_string(),
+                    signature_algorithm: sig_alg,
+                    api_version: provider.api_version.clone(),
                     correlation_id: provider.correlation_id.clone(),
                     authority: provider.authority.clone(),
                     auth: provider.auth.clone(),
@@ -1557,6 +1783,104 @@ fn load_signing_provider(request: &PortableSignRequest) -> Result<SigningProvide
 }
 
 #[cfg(feature = "azure-kv-sign")]
+enum ResolvedKvAuth {
+    AccessToken(String),
+    ManagedIdentity {
+        client_id: Option<String>,
+    },
+    ClientCredentials {
+        tenant_id: String,
+        client_id: String,
+        client_secret: String,
+    },
+    WorkloadIdentity {
+        tenant_id: String,
+        client_id: String,
+        federated_token_file: String,
+    },
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn env_text_opt(name: &str) -> Option<String> {
+    std::env::var(name).ok().and_then(|v| text_opt(Some(&v)))
+}
+
+#[cfg(feature = "azure-kv-sign")]
+fn resolve_kv_auth_inputs(request: &PortableSignRequest) -> Result<ResolvedKvAuth> {
+    let token = text_opt(request.azure_key_vault_access_token.as_deref());
+    let secret = text_opt(request.azure_key_vault_client_secret.as_deref());
+    let tenant = text_opt(request.azure_key_vault_tenant_id.as_deref());
+    let client = text_opt(request.azure_key_vault_client_id.as_deref());
+    let managed_identity = request.azure_key_vault_managed_identity.unwrap_or(false);
+
+    let has_sp = secret.is_some();
+    let has_tenant = tenant.is_some();
+    let has_client = client.is_some();
+    let has_token = token.is_some();
+    let sp_count = has_sp as u8 + has_tenant as u8 + has_client as u8;
+
+    if has_token && (managed_identity || sp_count == 3) {
+        bail!(
+            "use either Azure Key Vault access token or managed identity / client credentials, not multiple"
+        );
+    }
+    if managed_identity {
+        if has_sp || has_tenant {
+            bail!(
+                "Azure Key Vault managed identity cannot be combined with access tokens or client secrets"
+            );
+        }
+        let client_id = client
+            .or_else(|| env_text_opt("AZURE_MANAGED_IDENTITY_CLIENT_ID"))
+            .or_else(|| env_text_opt("AZURE_CLIENT_ID"));
+        return Ok(ResolvedKvAuth::ManagedIdentity { client_id });
+    }
+    if sp_count != 0 && sp_count != 3 {
+        bail!(
+            "Azure AD client credentials require azure_key_vault_client_id, azure_key_vault_client_secret, and azure_key_vault_tenant_id"
+        );
+    }
+    if let Some(tok) = token {
+        return Ok(ResolvedKvAuth::AccessToken(tok));
+    }
+    if sp_count == 3 {
+        return Ok(ResolvedKvAuth::ClientCredentials {
+            tenant_id: tenant.expect("tenant checked"),
+            client_id: client.expect("client checked"),
+            client_secret: secret.expect("secret checked"),
+        });
+    }
+
+    // Standard Azure environment-variable fallback when no explicit AKV credentials were supplied.
+    if let (Some(tenant_id), Some(client_id), Some(client_secret)) = (
+        env_text_opt("AZURE_TENANT_ID"),
+        env_text_opt("AZURE_CLIENT_ID"),
+        env_text_opt("AZURE_CLIENT_SECRET"),
+    ) {
+        return Ok(ResolvedKvAuth::ClientCredentials {
+            tenant_id,
+            client_id,
+            client_secret,
+        });
+    }
+    if let (Some(tenant_id), Some(client_id), Some(federated_token_file)) = (
+        env_text_opt("AZURE_TENANT_ID"),
+        env_text_opt("AZURE_CLIENT_ID"),
+        env_text_opt("AZURE_FEDERATED_TOKEN_FILE"),
+    ) {
+        return Ok(ResolvedKvAuth::WorkloadIdentity {
+            tenant_id,
+            client_id,
+            federated_token_file,
+        });
+    }
+
+    bail!(
+        "choose Azure Key Vault authentication: access token, managed identity, or client id/secret/tenant"
+    )
+}
+
+#[cfg(feature = "azure-kv-sign")]
 fn load_azure_key_vault_signing_provider(request: &PortableSignRequest) -> Result<SigningProvider> {
     use std::time::Duration;
 
@@ -1566,21 +1890,51 @@ fn load_azure_key_vault_signing_provider(request: &PortableSignRequest) -> Resul
         text_opt(request.azure_key_vault_certificate.as_deref()).ok_or_else(|| {
             anyhow::anyhow!("Azure Key Vault signing requires azure_key_vault_certificate")
         })?;
-    validate_kv_auth_inputs(request)?;
+    let resolved_auth = resolve_kv_auth_inputs(request)?;
 
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
         .build()
         .map_err(|e| anyhow::anyhow!("HTTP client: {e}"))?;
-    let auth = psign_azure_kv_rest::KvAuthParams {
-        access_token: request.azure_key_vault_access_token.as_deref(),
-        managed_identity: request.azure_key_vault_managed_identity.unwrap_or(false),
-        tenant_id: request.azure_key_vault_tenant_id.as_deref(),
-        client_id: request.azure_key_vault_client_id.as_deref(),
-        client_secret: request.azure_key_vault_client_secret.as_deref(),
-        authority: request.azure_authority.as_deref(),
+    let token = match resolved_auth {
+        ResolvedKvAuth::AccessToken(tok) => tok,
+        ResolvedKvAuth::ManagedIdentity { client_id } => {
+            let auth = psign_azure_kv_rest::KvAuthParams {
+                access_token: None,
+                managed_identity: true,
+                tenant_id: None,
+                client_id: client_id.as_deref(),
+                client_secret: None,
+                authority: request.azure_authority.as_deref(),
+            };
+            psign_azure_kv_rest::acquire_kv_access_token(&auth)?
+        }
+        ResolvedKvAuth::ClientCredentials {
+            tenant_id,
+            client_id,
+            client_secret,
+        } => {
+            let auth = psign_azure_kv_rest::KvAuthParams {
+                access_token: None,
+                managed_identity: false,
+                tenant_id: Some(&tenant_id),
+                client_id: Some(&client_id),
+                client_secret: Some(&client_secret),
+                authority: request.azure_authority.as_deref(),
+            };
+            psign_azure_kv_rest::acquire_kv_access_token(&auth)?
+        }
+        ResolvedKvAuth::WorkloadIdentity {
+            tenant_id,
+            client_id,
+            federated_token_file,
+        } => psign_azure_kv_rest::acquire_kv_workload_identity_token(
+            request.azure_authority.as_deref(),
+            &tenant_id,
+            &client_id,
+            &federated_token_file,
+        )?,
     };
-    let token = psign_azure_kv_rest::acquire_kv_access_token(&auth)?;
     let key_vault_certificate = psign_azure_kv_rest::fetch_kv_certificate(
         &http,
         &vault_url,
@@ -1614,25 +1968,66 @@ fn load_azure_key_vault_signing_provider(
 
 #[cfg(feature = "artifact-signing-rest")]
 fn load_artifact_signing_provider(request: &PortableSignRequest) -> Result<SigningProvider> {
+    let metadata = request
+        .artifact_signing_metadata
+        .as_deref()
+        .map(ArtifactSigningMetadata::load)
+        .transpose()?;
     let endpoint = text_opt(request.artifact_signing_endpoint.as_deref())
+        .or_else(|| metadata.as_ref().and_then(|m| text_opt(Some(&m.endpoint))))
+        .or_else(|| {
+            text_opt(request.artifact_signing_region.as_deref())
+                .map(|region| artifact_signing_endpoint_from_region(&region))
+        })
         .ok_or_else(|| anyhow::anyhow!("Artifact Signing requires artifact_signing_endpoint"))?;
-    let account_name =
-        text_opt(request.artifact_signing_account_name.as_deref()).ok_or_else(|| {
+    let account_name = text_opt(request.artifact_signing_account_name.as_deref())
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .and_then(|m| text_opt(Some(&m.code_signing_account_name)))
+        })
+        .ok_or_else(|| {
             anyhow::anyhow!("Artifact Signing requires artifact_signing_account_name")
         })?;
-    let profile_name =
-        text_opt(request.artifact_signing_profile_name.as_deref()).ok_or_else(|| {
+    let profile_name = text_opt(request.artifact_signing_profile_name.as_deref())
+        .or_else(|| {
+            metadata
+                .as_ref()
+                .and_then(|m| text_opt(Some(&m.certificate_profile_name)))
+        })
+        .ok_or_else(|| {
             anyhow::anyhow!("Artifact Signing requires artifact_signing_profile_name")
         })?;
-    let auth = artifact_signing_auth(request)?;
+    let correlation_id =
+        text_opt(request.artifact_signing_correlation_id.as_deref()).or_else(|| {
+            metadata
+                .as_ref()
+                .and_then(|m| text_opt(m.correlation_id.as_deref()))
+        });
+    let authority = text_opt(request.artifact_signing_authority.as_deref())
+        .or_else(|| text_opt(request.azure_authority.as_deref()));
+    let api_version = text_opt(request.artifact_signing_api_version.as_deref())
+        .unwrap_or_else(|| psign_codesigning_rest::DEFAULT_API_VERSION.to_string());
+    let signature_algorithm = text_opt(request.artifact_signing_signature_algorithm.as_deref());
+    let exclude_credentials = if !request.artifact_signing_exclude_credentials.is_empty() {
+        request.artifact_signing_exclude_credentials.clone()
+    } else {
+        metadata
+            .as_ref()
+            .and_then(|m| m.exclude_credentials.clone())
+            .unwrap_or_default()
+    };
+    let auth = artifact_signing_auth(request, exclude_credentials)?;
     let chain = load_chain_certificates(request)?;
     Ok(SigningProvider::ArtifactSigning(Box::new(
         ArtifactSigningProvider {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             account_name,
             profile_name,
-            correlation_id: text_opt(request.artifact_signing_correlation_id.as_deref()),
-            authority: text_opt(request.azure_authority.as_deref()),
+            signature_algorithm,
+            api_version,
+            correlation_id,
+            authority,
             auth,
             chain,
         },
@@ -1680,7 +2075,6 @@ fn ensure_local_signing_provider(request: &PortableSignRequest) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "azure-kv-sign", feature = "artifact-signing-rest"))]
 fn text_opt(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -1688,41 +2082,10 @@ fn text_opt(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-#[cfg(feature = "azure-kv-sign")]
-fn validate_kv_auth_inputs(request: &PortableSignRequest) -> Result<()> {
-    let has_sp = text_opt(request.azure_key_vault_client_secret.as_deref()).is_some();
-    let has_tenant = text_opt(request.azure_key_vault_tenant_id.as_deref()).is_some();
-    let has_client = text_opt(request.azure_key_vault_client_id.as_deref()).is_some();
-    let has_token = text_opt(request.azure_key_vault_access_token.as_deref()).is_some();
-    let managed_identity = request.azure_key_vault_managed_identity.unwrap_or(false);
-
-    let sp_count = has_sp as u8 + has_tenant as u8 + has_client as u8;
-    if sp_count != 0 && sp_count != 3 {
-        bail!(
-            "Azure AD client credentials require azure_key_vault_client_id, azure_key_vault_client_secret, and azure_key_vault_tenant_id"
-        );
-    }
-    if has_token && (managed_identity || sp_count == 3) {
-        bail!(
-            "use either Azure Key Vault access token or managed identity / client credentials, not multiple"
-        );
-    }
-    if managed_identity && (has_token || sp_count == 3) {
-        bail!(
-            "Azure Key Vault managed identity cannot be combined with access tokens or client secrets"
-        );
-    }
-    if !has_token && !managed_identity && sp_count != 3 {
-        bail!(
-            "choose Azure Key Vault authentication: access token, managed identity, or client id/secret/tenant"
-        );
-    }
-    Ok(())
-}
-
 #[cfg(feature = "artifact-signing-rest")]
 fn artifact_signing_auth(
     request: &PortableSignRequest,
+    exclude_credentials: Vec<String>,
 ) -> Result<psign_codesigning_rest::CodesigningAuth> {
     psign_codesigning_rest::resolve_codesigning_auth(
         &psign_codesigning_rest::CodesigningAuthInput {
@@ -1740,7 +2103,7 @@ fn artifact_signing_auth(
                 .as_deref()
                 .map(parse_artifact_signing_credential_type)
                 .transpose()?,
-            exclude_credentials: request.artifact_signing_exclude_credentials.clone(),
+            exclude_credentials,
         },
     )
 }
@@ -2411,6 +2774,8 @@ fn has_artifact_signing_provider(request: &PortableSignRequest) -> bool {
     request.artifact_signing_endpoint.is_some()
         || request.artifact_signing_account_name.is_some()
         || request.artifact_signing_profile_name.is_some()
+        || request.artifact_signing_metadata.is_some()
+        || text_opt(request.artifact_signing_region.as_deref()).is_some()
 }
 
 fn has_local_signing_material(request: &PortableSignRequest) -> bool {
@@ -2419,6 +2784,7 @@ fn has_local_signing_material(request: &PortableSignRequest) -> bool {
         || request.pfx_path.is_some()
         || request.private_key_path.is_some()
         || request.private_key_der_base64.is_some()
+        || text_opt(request.cert_sha1.as_deref()).is_some()
 }
 
 fn load_signing_material(
@@ -2431,13 +2797,20 @@ fn load_signing_material(
     ensure_local_signing_provider(request)?;
 
     let uses_pfx = request.pfx_path.is_some();
-    if uses_pfx
-        && (request.certificate_der_base64.is_some()
-            || request.certificate_path.is_some()
-            || request.private_key_der_base64.is_some()
-            || request.private_key_path.is_some())
-    {
+    let uses_cert_key = request.certificate_der_base64.is_some()
+        || request.certificate_path.is_some()
+        || request.private_key_der_base64.is_some()
+        || request.private_key_path.is_some();
+    let cert_sha1 = text_opt(request.cert_sha1.as_deref());
+
+    if uses_pfx && uses_cert_key {
         bail!("provide either pfx_path or certificate/private key material, not both");
+    }
+    if cert_sha1.is_some() && uses_pfx {
+        bail!("provide either pfx_path or cert_sha1, not both");
+    }
+    if cert_sha1.is_some() && uses_cert_key {
+        bail!("provide either cert_sha1 or certificate/private key material, not both");
     }
 
     let (cert_bytes, key_bytes, pfx_chain_ders) = if let Some(pfx_path) = &request.pfx_path {
@@ -2451,6 +2824,15 @@ fn load_signing_material(
             parsed.private_key_pem.into_bytes(),
             parsed.chain_certs_der,
         )
+    } else if let Some(sha1) = cert_sha1 {
+        let store_name = text_opt(request.store_name.as_deref()).unwrap_or_else(|| "MY".into());
+        let identity = cert_store::resolve_signing_identity(
+            request.cert_store_dir.as_deref(),
+            request.machine_store,
+            &store_name,
+            &sha1,
+        )?;
+        (identity.cert_der, identity.key_pem, Vec::new())
     } else {
         let cert_bytes = match (&request.certificate_der_base64, &request.certificate_path) {
             (Some(_), Some(_)) => {
@@ -4646,42 +5028,178 @@ mod tests {
     fn default_sign_request() -> PortableSignRequest {
         PortableSignRequest {
             path: PathBuf::from("test.dll"),
-            append_signature: false,
-            skip_signed: false,
-            output_path: None,
-            hash_algorithm: PortableDigestAlgorithm::Sha256,
-            certificate_path: None,
-            private_key_path: None,
-            certificate_der_base64: None,
-            private_key_der_base64: None,
-            pfx_path: None,
-            pfx_password: None,
-            chain_certificate_paths: vec![],
-            chain_certificates_der_base64: vec![],
-            timestamp_server: None,
-            timestamp_hash_algorithm: None,
-            azure_key_vault_url: None,
-            azure_key_vault_certificate: None,
-            azure_key_vault_certificate_version: None,
-            azure_key_vault_access_token: None,
-            azure_key_vault_client_id: None,
-            azure_key_vault_client_secret: None,
-            azure_key_vault_tenant_id: None,
-            azure_key_vault_managed_identity: None,
-            azure_authority: None,
-            artifact_signing_endpoint: None,
-            artifact_signing_account_name: None,
-            artifact_signing_profile_name: None,
-            artifact_signing_access_token: None,
-            artifact_signing_managed_identity: None,
-            artifact_signing_managed_identity_resource_id: None,
-            artifact_signing_credential_type: None,
-            artifact_signing_tenant_id: None,
-            artifact_signing_client_id: None,
-            artifact_signing_client_secret: None,
-            artifact_signing_federated_token_file: None,
-            artifact_signing_exclude_credentials: Vec::new(),
-            artifact_signing_correlation_id: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn artifact_signing_metadata_parse_load_and_region_endpoint() {
+        assert_eq!(
+            artifact_signing_endpoint_from_region(" westus "),
+            "https://westus.codesigning.azure.net"
+        );
+        let dir =
+            std::env::temp_dir().join(format!("psign-portable-core-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let meta_path = dir.join("metadata.json");
+        let json = br#"{"Endpoint":"https://wus2.codesigning.azure.net","CodeSigningAccountName":"acct","CertificateProfileName":"prof","CorrelationId":"cid-1","ExcludeCredentials":["ManagedIdentityCredential"]}"#;
+        std::fs::write(&meta_path, json).expect("write metadata");
+
+        let parsed = ArtifactSigningMetadata::parse(json).expect("parse metadata");
+        let loaded = ArtifactSigningMetadata::load(&meta_path).expect("load metadata");
+        assert_eq!(parsed, loaded);
+        assert_eq!(loaded.endpoint, "https://wus2.codesigning.azure.net");
+        assert_eq!(loaded.code_signing_account_name, "acct");
+        assert_eq!(loaded.certificate_profile_name, "prof");
+        assert_eq!(loaded.correlation_id.as_deref(), Some("cid-1"));
+        assert_eq!(
+            loaded.exclude_credentials,
+            Some(vec!["ManagedIdentityCredential".to_string()])
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portable_sign_file_verified_signs_msix_with_cert_store_and_preserves_target_on_error() {
+        use sha1::Digest as _;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir")
+            .parent()
+            .expect("repo root");
+        let pfx_bytes = std::fs::read(
+            root.join("tests/fixtures/devolutions-authenticode/authenticode-test-cert.pfx"),
+        )
+        .expect("read test PFX");
+        let parsed =
+            psign_authenticode_trust::pkcs12::parse_pfx_identity(&pfx_bytes, "CodeSign123!")
+                .expect("parse PFX");
+        let thumbprint: String = sha1::Sha1::digest(&parsed.signer_cert_der)
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect();
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "psign-portable-core-verified-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let store_dir = temp_dir.join("store");
+        let my_dir = store_dir.join("CurrentUser").join("MY");
+        std::fs::create_dir_all(&my_dir).expect("create cert store");
+        std::fs::write(
+            my_dir.join(format!("{thumbprint}.der")),
+            &parsed.signer_cert_der,
+        )
+        .expect("write cert");
+        std::fs::write(
+            my_dir.join(format!("{thumbprint}.key")),
+            parsed.private_key_pem.as_bytes(),
+        )
+        .expect("write key");
+
+        let msix_src = root.join("tests/fixtures/generated-unsigned/msix/sample.msix");
+        let msix_target = temp_dir.join("sample.msix");
+        std::fs::copy(&msix_src, &msix_target).expect("copy unsigned msix");
+
+        let response = portable_sign_file_verified(PortableSignRequest {
+            path: msix_target.clone(),
+            cert_sha1: Some(thumbprint.clone()),
+            cert_store_dir: Some(store_dir.clone()),
+            ..Default::default()
+        })
+        .expect("verified in-place MSIX signing with cert store");
+        assert_eq!(response.output_path, msix_target);
+        assert_eq!(response.signature.path, msix_target);
+        assert_eq!(response.signature.status, PortableSignatureStatus::Valid);
+        assert!(!response.skipped);
+        msix_digest::verify_msix_digest_consistency(&msix_target)
+            .expect("signed MSIX digest consistency");
+
+        // Second call with skip_signed leaves the signed file intact and marks skipped.
+        let before = std::fs::read(&msix_target).expect("read signed msix");
+        let skipped = portable_sign_file_verified(PortableSignRequest {
+            path: msix_target.clone(),
+            skip_signed: true,
+            cert_sha1: Some(thumbprint.clone()),
+            cert_store_dir: Some(store_dir.clone()),
+            ..Default::default()
+        })
+        .expect("skip already-signed MSIX");
+        assert!(skipped.skipped);
+        assert_eq!(
+            std::fs::read(&msix_target).expect("read after skip"),
+            before
+        );
+
+        // Failure leaves target untouched and removes temporary sibling files.
+        let err = portable_sign_file_verified(PortableSignRequest {
+            path: msix_target.clone(),
+            cert_sha1: Some("0000000000000000000000000000000000000000".to_string()),
+            cert_store_dir: Some(store_dir.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("resolve signing certificate"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&msix_target).expect("read after error"),
+            before
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&temp_dir)
+            .expect("read temp dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".psign-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+
+        // Reject mixing cert_sha1 with pfx_path or certificate_path.
+        let mixed_pfx = PortableSignRequest {
+            path: msix_target.clone(),
+            pfx_path: Some(PathBuf::from("a.pfx")),
+            cert_sha1: Some(thumbprint.clone()),
+            ..Default::default()
+        };
+        assert!(
+            load_signing_material(&mixed_pfx)
+                .unwrap_err()
+                .to_string()
+                .contains("not both")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn response_file_inline_and_flat_expansion() {
+        let dir =
+            std::env::temp_dir().join(format!("psign-portable-core-rsp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let rsp = dir.join("sign.rsp");
+        std::fs::write(&rsp, "--fd\nSHA256\n\"path with spaces.msix\"\n").expect("write rsp");
+
+        let flat = response_file::read_response_args(&rsp).expect("read response args");
+        assert_eq!(flat, vec!["--fd", "SHA256", "path with spaces.msix"]);
+
+        let expanded = response_file::expand_inline_args(&[
+            std::ffi::OsString::from(format!("@{}", rsp.display())),
+            std::ffi::OsString::from("@@literal"),
+        ])
+        .expect("expand inline args");
+        let strings: Vec<String> = expanded
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            strings,
+            vec!["--fd", "SHA256", "path with spaces.msix", "@literal"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

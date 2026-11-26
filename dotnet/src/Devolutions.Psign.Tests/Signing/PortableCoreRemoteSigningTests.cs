@@ -358,6 +358,179 @@ public sealed class PortableCoreRemoteSigningTests
             })).Message);
     }
 
+    [Fact]
+    public void ArtifactSigningSupportsMetadataRegionAuthorityApiVersionAndAlgorithmOnMsix()
+    {
+        using var mock = new CloudMock(MockBase);
+        var handler = new FuncHttpHandler(req =>
+        {
+            if (req.Method == "POST" && req.Path == "/tenant-as/oauth2/v2.0/token")
+            {
+                return LocalHttpResponse.Json("""{"access_token":"as-oauth-token"}""");
+            }
+
+            return mock.Handle(req);
+        });
+        using var dir = new TempDir();
+        var metaPath = dir.File("metadata.json");
+        File.WriteAllText(
+            metaPath,
+            $$"""{"Endpoint":"{{MockBase}}","CodeSigningAccountName":"{{CloudMock.Account}}","CertificateProfileName":"{{CloudMock.Profile}}","CorrelationId":"meta-corr"}""");
+        var msix = dir.File("sample.msix");
+        File.Copy(Fixtures.Path("generated-unsigned/msix/sample.msix"), msix);
+
+        var response = PortableCore.PortableSignFileVerified(
+            new PortableSignRequest
+            {
+                Path = msix,
+                ArtifactSigningMetadata = metaPath,
+                ArtifactSigningAuthority = "http://auth.mock.test",
+                ArtifactSigningApiVersion = "2024-09-01",
+                ArtifactSigningSignatureAlgorithm = "RS256",
+                ArtifactSigningTenantId = "tenant-as",
+                ArtifactSigningClientId = "client-as",
+                ArtifactSigningClientSecret = "secret-as",
+            },
+            new PortableCoreOptions { HttpHandler = handler });
+
+        Assert.Equal(PortableSignatureStatus.Valid, response.Signature.Status);
+        Assert.Equal(msix, response.OutputPath);
+        Assert.Contains(handler.Requests, r => r.Method == "POST" && r.Path == "/tenant-as/oauth2/v2.0/token");
+        var signReq = Assert.Single(handler.Requests, r => r.Path.EndsWith(":sign", StringComparison.Ordinal));
+        Assert.Contains("api-version=2024-09-01", signReq.Target, StringComparison.Ordinal);
+        Assert.Equal("meta-corr", signReq.Headers["x-correlation-id"]);
+        Assert.Equal("Bearer as-oauth-token", signReq.Headers["Authorization"]);
+    }
+
+    [Fact]
+    public void KeyVaultSupportsAzureEnvironmentFallbackForClientSecretWorkloadIdentityAndManagedIdentity()
+    {
+        using var mock = new CloudMock(MockBase);
+        var handler = new FuncHttpHandler(req =>
+        {
+            if (req.Method == "POST" && req.Path == "/env-tenant/oauth2/v2.0/token")
+            {
+                return LocalHttpResponse.Json("""{"access_token":"kv-env-token"}""");
+            }
+
+            if (req.Method == "GET" && req.Path == "/imds")
+            {
+                Assert.Contains("client_id=mi-env-client", req.Target, StringComparison.Ordinal);
+                return LocalHttpResponse.Json("""{"access_token":"kv-mi-token"}""");
+            }
+
+            return mock.Handle(req);
+        });
+        using var dir = new TempDir();
+        var source = Fixtures.Path("generated-unsigned/msix/sample.msix");
+
+        // 1. Client credentials fallback via AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET.
+        var envSp = new Dictionary<string, string?>
+        {
+            ["AZURE_TENANT_ID"] = "env-tenant",
+            ["AZURE_CLIENT_ID"] = "env-client",
+            ["AZURE_CLIENT_SECRET"] = "env-secret",
+        };
+        var outSp = dir.File("sp.msix");
+        var resSp = PortableCore.PortableSign(
+            new PortableSignRequest
+            {
+                Path = source,
+                OutputPath = outSp,
+                AzureKeyVaultUrl = MockBase,
+                AzureKeyVaultCertificate = CloudMock.KvCertificateName,
+                AzureAuthority = "http://auth.mock.test",
+            },
+            new PortableCoreOptions { HttpHandler = handler, Environment = k => envSp.GetValueOrDefault(k) });
+        Assert.Equal(PortableSignatureStatus.Valid, resSp.Signature.Status);
+        Assert.Contains(handler.Requests, r => r.Path == "/env-tenant/oauth2/v2.0/token" && r.BodyText.Contains("client_secret=env-secret", StringComparison.Ordinal));
+
+        // 2. Workload identity fallback via AZURE_FEDERATED_TOKEN_FILE.
+        var tokenFile = dir.File("fed.jwt");
+        File.WriteAllText(tokenFile, "fed-jwt-token");
+        var envWi = new Dictionary<string, string?>
+        {
+            ["AZURE_TENANT_ID"] = "env-tenant",
+            ["AZURE_CLIENT_ID"] = "env-client",
+            ["AZURE_FEDERATED_TOKEN_FILE"] = tokenFile,
+        };
+        var outWi = dir.File("wi.msix");
+        var resWi = PortableCore.PortableSign(
+            new PortableSignRequest
+            {
+                Path = source,
+                OutputPath = outWi,
+                AzureKeyVaultUrl = MockBase,
+                AzureKeyVaultCertificate = CloudMock.KvCertificateName,
+                AzureAuthority = "http://auth.mock.test",
+            },
+            new PortableCoreOptions { HttpHandler = handler, Environment = k => envWi.GetValueOrDefault(k) });
+        Assert.Equal(PortableSignatureStatus.Valid, resWi.Signature.Status);
+        Assert.Contains(handler.Requests, r => r.Path == "/env-tenant/oauth2/v2.0/token" && r.BodyText.Contains("client_assertion=fed-jwt-token", StringComparison.Ordinal));
+
+        // 3. Managed identity client_id fallback via AZURE_MANAGED_IDENTITY_CLIENT_ID.
+        var envMi = new Dictionary<string, string?>
+        {
+            ["AZURE_MANAGED_IDENTITY_CLIENT_ID"] = "mi-env-client",
+            ["PSIGN_AZURE_KV_IMDS_ENDPOINT"] = MockBase + "/imds",
+        };
+        var outMi = dir.File("mi.msix");
+        var resMi = PortableCore.PortableSign(
+            new PortableSignRequest
+            {
+                Path = source,
+                OutputPath = outMi,
+                AzureKeyVaultUrl = MockBase,
+                AzureKeyVaultCertificate = CloudMock.KvCertificateName,
+                AzureKeyVaultManagedIdentity = true,
+            },
+            new PortableCoreOptions { HttpHandler = handler, Environment = k => envMi.GetValueOrDefault(k) });
+        Assert.Equal(PortableSignatureStatus.Valid, resMi.Signature.Status);
+    }
+
+    [Fact]
+    public void PortableSignFileVerifiedSupportsCertStoreAndPreservesTargetOnError()
+    {
+        using var dir = new TempDir();
+        var storeDir = dir.File("store");
+        var store = new Devolutions.Psign.Signing.CertStore.PortableCertStore();
+        var imported = store.ImportPfx(new Devolutions.Psign.Signing.CertStore.CertStoreSelection(storeDir), Pfx, Password);
+
+        var target = dir.File("sample.msix");
+        File.Copy(Fixtures.Path("generated-unsigned/msix/sample.msix"), target);
+
+        var signed = PortableCore.PortableSignFileVerified(new PortableSignRequest
+        {
+            Path = target,
+            CertSha1 = imported.ThumbprintSha1,
+            CertStoreDir = storeDir,
+        });
+        Assert.Equal(PortableSignatureStatus.Valid, signed.Signature.Status);
+        Assert.Equal(target, signed.OutputPath);
+        Assert.Equal(target, signed.Signature.Path);
+        Assert.False(signed.Skipped);
+
+        var signedBytes = File.ReadAllBytes(target);
+        var skipped = PortableCore.PortableSignFileVerified(new PortableSignRequest
+        {
+            Path = target,
+            SkipSigned = true,
+            CertSha1 = imported.ThumbprintSha1,
+            CertStoreDir = storeDir,
+        });
+        Assert.True(skipped.Skipped);
+        Assert.Equal(signedBytes, File.ReadAllBytes(target));
+
+        Assert.Throws<PsignException>(() => PortableCore.PortableSignFileVerified(new PortableSignRequest
+        {
+            Path = target,
+            CertSha1 = new string('0', 40),
+            CertStoreDir = storeDir,
+        }));
+        Assert.Equal(signedBytes, File.ReadAllBytes(target));
+        Assert.DoesNotContain(Directory.EnumerateFiles(dir.DirPath), f => Path.GetFileName(f).Contains(".psign-", StringComparison.Ordinal));
+    }
+
     // ------------------------------------------------------------------ Rust FFI over a loopback server
 
     public static TheoryData<string, string> RemoteDifferentialCases()

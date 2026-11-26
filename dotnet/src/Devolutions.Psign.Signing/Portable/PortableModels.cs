@@ -417,6 +417,9 @@ public sealed class PortableSignRequest
         "artifact_signing_managed_identity_resource_id", "artifact_signing_credential_type", "artifact_signing_tenant_id",
         "artifact_signing_client_id", "artifact_signing_client_secret", "artifact_signing_federated_token_file",
         "artifact_signing_exclude_credentials", "artifact_signing_correlation_id",
+        "cert_sha1", "cert_store_dir", "machine_store", "store_name",
+        "artifact_signing_metadata", "artifact_signing_region", "artifact_signing_authority",
+        "artifact_signing_api_version", "artifact_signing_signature_algorithm",
     ];
 
     public string Path { get; set; } = string.Empty;
@@ -496,6 +499,24 @@ public sealed class PortableSignRequest
 
     public string? ArtifactSigningCorrelationId { get; set; }
 
+    public string? CertSha1 { get; set; }
+
+    public string? CertStoreDir { get; set; }
+
+    public bool MachineStore { get; set; }
+
+    public string? StoreName { get; set; }
+
+    public string? ArtifactSigningMetadata { get; set; }
+
+    public string? ArtifactSigningRegion { get; set; }
+
+    public string? ArtifactSigningAuthority { get; set; }
+
+    public string? ArtifactSigningApiVersion { get; set; }
+
+    public string? ArtifactSigningSignatureAlgorithm { get; set; }
+
     public static PortableSignRequest FromJson(string json) =>
         SerdeObject.Parse(json, nameof(PortableSignRequest), Fields, o => new PortableSignRequest
         {
@@ -536,6 +557,15 @@ public sealed class PortableSignRequest
             ArtifactSigningFederatedTokenFile = o.OptionalString("artifact_signing_federated_token_file"),
             ArtifactSigningExcludeCredentials = o.StringList("artifact_signing_exclude_credentials"),
             ArtifactSigningCorrelationId = o.OptionalString("artifact_signing_correlation_id"),
+            CertSha1 = o.OptionalString("cert_sha1"),
+            CertStoreDir = o.OptionalString("cert_store_dir"),
+            MachineStore = o.Bool("machine_store"),
+            StoreName = o.OptionalString("store_name"),
+            ArtifactSigningMetadata = o.OptionalString("artifact_signing_metadata"),
+            ArtifactSigningRegion = o.OptionalString("artifact_signing_region"),
+            ArtifactSigningAuthority = o.OptionalString("artifact_signing_authority"),
+            ArtifactSigningApiVersion = o.OptionalString("artifact_signing_api_version"),
+            ArtifactSigningSignatureAlgorithm = o.OptionalString("artifact_signing_signature_algorithm"),
         });
 
     public JsonObject ToJsonNode() => new()
@@ -577,6 +607,15 @@ public sealed class PortableSignRequest
         ["artifact_signing_federated_token_file"] = SerdeWrite.OptionalString(ArtifactSigningFederatedTokenFile),
         ["artifact_signing_exclude_credentials"] = SerdeWrite.StringArray(ArtifactSigningExcludeCredentials),
         ["artifact_signing_correlation_id"] = SerdeWrite.OptionalString(ArtifactSigningCorrelationId),
+        ["cert_sha1"] = SerdeWrite.OptionalString(CertSha1),
+        ["cert_store_dir"] = SerdeWrite.OptionalString(CertStoreDir),
+        ["machine_store"] = MachineStore,
+        ["store_name"] = SerdeWrite.OptionalString(StoreName),
+        ["artifact_signing_metadata"] = SerdeWrite.OptionalString(ArtifactSigningMetadata),
+        ["artifact_signing_region"] = SerdeWrite.OptionalString(ArtifactSigningRegion),
+        ["artifact_signing_authority"] = SerdeWrite.OptionalString(ArtifactSigningAuthority),
+        ["artifact_signing_api_version"] = SerdeWrite.OptionalString(ArtifactSigningApiVersion),
+        ["artifact_signing_signature_algorithm"] = SerdeWrite.OptionalString(ArtifactSigningSignatureAlgorithm),
     };
 
     public string ToJson() => RustJson.Compact(ToJsonNode());
