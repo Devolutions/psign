@@ -67,6 +67,76 @@ fn msix_packages_trust_verify() {
 }
 
 #[test]
+fn msix_integrity_returns_signer_and_rejects_modified_package() {
+    use psign_authenticode_trust::trust_verify_msix::verify_msix_signature_without_trust;
+
+    let data = std::fs::read(repo("tests/fixtures/generated-signed/msix/sample.msix")).unwrap();
+    let cert = verify_msix_signature_without_trust(&data, "msix").expect("valid signature");
+    let (pkcs7, _) = psign_sip_digest::msix_digest::msix_verified_signature(&data, "msix").unwrap();
+    let inspection = psign_authenticode_trust::inspect_authenticode_pkcs7_der(&pkcs7).unwrap();
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD.encode(cert),
+        inspection.signers[0]
+            .signer_certificate_der_base64
+            .as_deref()
+            .unwrap()
+    );
+
+    let mut bad_package = data;
+    bad_package[40] ^= 1;
+    assert!(verify_msix_signature_without_trust(&bad_package, "msix").is_err());
+}
+
+#[test]
+fn msix_auto_authroot_respects_explicit_anchors() {
+    let opts = test_ca_opts();
+    let (resolved, cache) =
+        psign_authenticode_trust::trust_verify_msix::msix_options_with_auto_authroot(&opts)
+            .expect("explicit anchors");
+    assert!(cache.is_none());
+    assert_eq!(resolved.trusted_ca_files, opts.trusted_ca_files);
+    assert!(resolved.authroot_cab.is_none());
+}
+
+#[test]
+fn msix_current_or_timestamp_rejects_override_and_untrusted_certificate() {
+    use psign_authenticode_trust::trust_verify_msix::trust_verify_msix_current_or_timestamp;
+    let data = std::fs::read(repo("tests/fixtures/generated-signed/msix/sample.msix")).unwrap();
+    let opts = test_ca_opts();
+    assert!(trust_verify_msix_current_or_timestamp(&data, "msix", &opts).is_err());
+    let untrusted = TrustVerifyPeOptions::default();
+    let error = trust_verify_msix_current_or_timestamp(&data, "msix", &untrusted).unwrap_err();
+    assert!(format!("{error:#}").contains("no trust anchors configured"));
+}
+
+#[test]
+fn msix_system_roots_are_loadable() {
+    let (opts, cache) =
+        psign_authenticode_trust::trust_verify_msix::msix_options_with_auto_authroot(
+            &TrustVerifyPeOptions::default(),
+        )
+        .expect("load OS roots");
+    assert!(cache.is_none());
+    assert!(!opts.trusted_ca_der.is_empty());
+    let (anchors, _) =
+        psign_authenticode_trust::load_trust_material(&opts).expect("parse OS roots");
+    assert!(anchors.thumbprint_count() > 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_authenticode_rejects_unsigned_and_nul_paths() {
+    use std::os::windows::ffi::OsStringExt;
+    let temp = tempfile::NamedTempFile::new().unwrap();
+    assert!(psign_authenticode_trust::windows::verify_authenticode_path(temp.path()).is_err());
+    let nul_path = std::ffi::OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]);
+    assert!(
+        psign_authenticode_trust::windows::verify_authenticode_path(Path::new(&nul_path)).is_err()
+    );
+}
+
+#[test]
 fn msix_skip_pcontent_hash_and_nested_bundle_child_tamper_are_rejected() {
     use std::io::{Cursor, Read, Write};
 

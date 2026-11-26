@@ -417,6 +417,47 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
     }
 
     [SkippableFact]
+    public void SigningTransportOverrideDoesNotLeakIntoConcurrentTimestampCommand()
+    {
+        CliHarness.RequireInProcess();
+        using var server = new LocalHttpServer(TsaHandler);
+        using var handler = new MockHttpHandler();
+        using var overrideInstalled = new ManualResetEventSlim();
+        using var releaseOverride = new ManualResetEventSlim();
+        using var timestampStarted = new ManualResetEventSlim();
+        var scoped = Task.Factory.StartNew(() =>
+            CliHarness.WithSigningHttpHandler(handler, () =>
+            {
+                overrideInstalled.Set();
+                return releaseOverride.Wait(TimeSpan.FromSeconds(30));
+            }), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        try
+        {
+            Assert.True(overrideInstalled.Wait(TimeSpan.FromSeconds(30)), "override was not installed");
+            var timestamp = Task.Factory.StartNew(() =>
+            {
+                timestampStarted.Set();
+                return CliHarness.RunManaged("portable", "rfc3161-timestamp-http-post", "--url", server.BaseUrl + "/tsa", "--digest-hex", new string('0', 64));
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            Assert.True(timestampStarted.Wait(TimeSpan.FromSeconds(30)), "timestamp command did not start");
+            bool completedBeforeRelease = timestamp.Wait(TimeSpan.FromMilliseconds(500));
+            releaseOverride.Set();
+            Assert.True(scoped.GetAwaiter().GetResult(), "override was not released");
+            var result = timestamp.GetAwaiter().GetResult();
+            Assert.False(completedBeforeRelease, "another CLI command ran while the override was active");
+            Assert.True(result.ExitCode == 0, result.Stderr);
+            Assert.Single(server.Requests);
+            Assert.Empty(handler.Requests);
+        }
+        finally
+        {
+            releaseOverride.Set();
+            scoped.GetAwaiter().GetResult();
+        }
+    }
+
+    [SkippableFact]
     public void TimestampHttpErrorsMatchRust()
     {
         RustTool.Require();
@@ -686,25 +727,24 @@ public class SigningCommandParityTests : IClassFixture<SigningCliPki>
             .Respond(200, _pki.CaDer, ("Content-Type", "application/x-x509-ca-cert"));
         using var dir = new TempDir();
         var output = dir.File("root.cer");
-        SigningCommands.HttpHandlerFactory = () => mock;
-        try
+        CliHarness.WithSigningHttpHandler(mock, () =>
         {
             var r = CliHarness.RunManaged("portable", "artifact-signing-root", "--endpoint", "https://wus.codesigning.azure.net", "--account-name", "acct", "--profile-name", "prof", "--output", output, "--access-token", "root-token");
             Assert.True(r.ExitCode == 0, r.Stderr);
             Assert.Equal($"output={output}\n", r.Stdout);
             Assert.Equal(_pki.CaDer, File.ReadAllBytes(output));
+            return r;
+        });
 
-            var bad = new MockHttpHandler();
-            bad.Map("GET", ".*").Respond(200, "not a cert"u8.ToArray(), ("Content-Type", "application/octet-stream"));
-            SigningCommands.HttpHandlerFactory = () => bad;
+        var bad = new MockHttpHandler();
+        bad.Map("GET", ".*").Respond(200, "not a cert"u8.ToArray(), ("Content-Type", "application/octet-stream"));
+        CliHarness.WithSigningHttpHandler(bad, () =>
+        {
             var e = CliHarness.RunManaged("portable", "artifact-signing-root", "--endpoint", "https://wus.codesigning.azure.net", "--account-name", "acct", "--profile-name", "prof", "--output", dir.File("bad.cer"), "--access-token", "root-token");
             Assert.Equal(1, e.ExitCode);
             Assert.StartsWith("parse Artifact Signing root certificate", e.Stderr, StringComparison.Ordinal);
-        }
-        finally
-        {
-            SigningCommands.HttpHandlerFactory = null;
-        }
+            return e;
+        });
     }
 
     // ------------------------------------------------------------------ test PKI

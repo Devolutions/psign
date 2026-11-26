@@ -32,6 +32,8 @@ pub mod trust_verify_script;
 pub mod trust_verify_vsix;
 pub mod trust_verify_zip;
 pub mod verification_instant;
+#[cfg(windows)]
+pub mod windows;
 mod xml_c14n;
 
 pub use artifact_signing::{
