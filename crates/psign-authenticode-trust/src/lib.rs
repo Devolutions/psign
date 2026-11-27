@@ -36,6 +36,9 @@ pub mod verification_instant;
 pub mod windows;
 mod xml_c14n;
 
+pub use anchor::{
+    cert_der_sha1_hex, cert_der_sha256_hex, cert_sha1_thumbprint, cert_sha256_thumbprint,
+};
 pub use artifact_signing::{
     ArtifactSigningCertificateKind, ArtifactSigningIdentity, ArtifactSigningPolicy,
     ArtifactSigningVerifiedSignature, artifact_signing_identities_from_pe,
@@ -54,11 +57,15 @@ pub use trust_verify_detached::trust_verify_detached_bytes;
 pub use trust_verify_esd::trust_verify_wim_esd_path;
 pub use trust_verify_file::trust_verify_path;
 pub use trust_verify_msi::trust_verify_msi_bytes;
-pub use trust_verify_msix::trust_verify_msix_bytes;
+pub use trust_verify_msix::{
+    MsixPinVerifyOptions, MsixRecommendedPin, MsixVerifiedSigner, msix_options_with_auto_authroot,
+    trust_verify_msix_bytes, trust_verify_msix_current_or_timestamp, verify_msix_for_pinning,
+    verify_msix_signature_without_trust, verify_msix_with_pins,
+};
 pub use trust_verify_nuget::{nuget_verified_signature_content, trust_verify_nuget_bytes};
 pub use trust_verify_pe::{
-    TrustVerifyPeOptions, TrustVerifyPeReport, load_trust_material, pe_first_pkcs7_terminal_root,
-    pkcs7_signed_data_der_terminal_root, trust_verify_pe_bytes,
+    TrustVerifyPeOptions, TrustVerifyPeReport, VerifiedSignature, load_trust_material,
+    pe_first_pkcs7_terminal_root, pkcs7_signed_data_der_terminal_root, trust_verify_pe_bytes,
 };
 pub use trust_verify_script::trust_verify_script_bytes;
 pub use trust_verify_vsix::{VsixSignature, trust_verify_vsix_bytes, verify_vsix_signature_bytes};

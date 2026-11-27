@@ -145,6 +145,18 @@ public static class Anchors
     /// <summary>Lowercase hex SHA-1 thumbprint.</summary>
     public static string CertSha1ThumbprintHex(CertificateInfo cert) => Hex.Lower(SHA1.HashData(cert.RawData));
 
+    /// <summary>SHA-256 over the certificate DER.</summary>
+    public static byte[] CertSha256Thumbprint(CertificateInfo cert) => SHA256.HashData(cert.RawData);
+
+    /// <summary>Lowercase hex SHA-256 thumbprint.</summary>
+    public static string CertSha256ThumbprintHex(CertificateInfo cert) => Hex.Lower(SHA256.HashData(cert.RawData));
+
+    /// <summary>Lowercase hex SHA-256 thumbprint of raw certificate DER bytes.</summary>
+    public static string CertDerSha256Hex(ReadOnlySpan<byte> der) => Hex.Lower(SHA256.HashData(der));
+
+    /// <summary>Lowercase hex SHA-1 thumbprint of raw certificate DER bytes.</summary>
+    public static string CertDerSha1Hex(ReadOnlySpan<byte> der) => Hex.Lower(SHA1.HashData(der));
+
     /// <summary>Parse a PEM (<c>-----BEGIN …</c>) or DER certificate (Rust <c>anchor::parse_cert_bytes</c>).</summary>
     public static CertificateInfo ParseCertBytes(ReadOnlySpan<byte> raw)
     {

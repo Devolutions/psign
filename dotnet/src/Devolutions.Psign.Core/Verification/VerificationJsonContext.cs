@@ -12,6 +12,8 @@ namespace Devolutions.Psign.Verification;
 [JsonSerializable(typeof(InspectPeFileReport))]
 [JsonSerializable(typeof(ArtifactSigningIdentity))]
 [JsonSerializable(typeof(List<ArtifactSigningSignerIdentity>))]
+[JsonSerializable(typeof(VerifiedSignature))]
+[JsonSerializable(typeof(MsixVerifiedSigner))]
 [JsonSerializable(typeof(AuthRootCache.AuthRootMeta))]
 internal sealed partial class VerificationJsonContext : JsonSerializerContext
 {

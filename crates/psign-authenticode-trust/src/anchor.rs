@@ -2,8 +2,10 @@
 
 use anyhow::{Context, Result, anyhow};
 use picky::x509::certificate::Cert;
-use sha1::{Digest, Sha1};
+use sha1::{Digest as _, Sha1};
+use sha2::Sha256;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -107,6 +109,41 @@ pub fn cert_sha1_thumbprint(cert: &Cert) -> Result<[u8; 20]> {
     let mut out = [0u8; 20];
     out.copy_from_slice(&digest);
     Ok(out)
+}
+
+/// Compute the SHA-256 thumbprint of a parsed certificate's DER encoding.
+///
+/// # Errors
+///
+/// Returns an error if the certificate cannot be DER-encoded.
+pub fn cert_sha256_thumbprint(cert: &Cert) -> Result<[u8; 32]> {
+    let der = cert
+        .to_der()
+        .map_err(|e| anyhow!("certificate DER encode failed: {e}"))?;
+    let digest = Sha256::digest(&der);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Ok(out)
+}
+
+fn encode_hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+/// Compute the lowercase hex SHA-256 thumbprint of raw DER certificate bytes.
+#[must_use]
+pub fn cert_der_sha256_hex(der: &[u8]) -> String {
+    encode_hex_lower(Sha256::digest(der).as_slice())
+}
+
+/// Compute the lowercase hex SHA-1 thumbprint of raw DER certificate bytes.
+#[must_use]
+pub fn cert_der_sha1_hex(der: &[u8]) -> String {
+    encode_hex_lower(Sha1::digest(der).as_slice())
 }
 
 pub fn parse_cert_bytes(raw: &[u8]) -> Result<Cert> {

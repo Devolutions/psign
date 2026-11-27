@@ -1,13 +1,14 @@
 //! Portable PE Authenticode **trust** verification: picky CMS + explicit anchors.
 
-use crate::anchor::AnchorStore;
+use crate::anchor::{AnchorStore, cert_der_sha1_hex, cert_der_sha256_hex};
 use crate::artifact_signing::{
-    ArtifactSigningPolicy, ArtifactSigningVerifiedSignature, verify_artifact_signing_pkcs7,
+    ArtifactSigningIdentity, ArtifactSigningPolicy, ArtifactSigningVerifiedSignature,
+    artifact_signing_identity_from_certificate, verify_artifact_signing_pkcs7_with_details,
 };
 use crate::chain::{issuer_chain_excluding_leaf, merge_unique_certs, terminal_root_cert};
 use crate::policy::{AuthenticodeTrustPolicy, OnlineTrustOptions};
-use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding};
-use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust;
+use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding_chain};
+use crate::verification_instant::resolve_verification_instant_for_pkcs7_with_trust_info;
 use anyhow::{Context, Result, anyhow};
 use der::Decode;
 use picky::x509::certificate::Cert;
@@ -16,6 +17,7 @@ use picky::x509::pkcs7::authenticode::AuthenticodeSignature;
 use psign_sip_digest::pe_digest::{PeAuthenticodeHashKind, pe_authenticode_digest};
 use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use psign_sip_digest::verify_pe::for_each_pe_pkcs7_signed_data;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 #[derive(Debug, Clone, Default)]
@@ -36,12 +38,40 @@ pub struct TrustVerifyPeOptions {
     pub artifact_signing: Option<ArtifactSigningPolicy>,
 }
 
+/// Cryptographically verified signer and chain metadata for one signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedSignature {
+    /// PE certificate-table entry index; `0` for single-signature formats.
+    pub signature_index: usize,
+    /// DER-encoded leaf signing certificate.
+    #[serde(skip)]
+    pub signer_certificate_der: Vec<u8>,
+    /// Lowercase hex SHA-256 thumbprint of [`Self::signer_certificate_der`].
+    pub signer_sha256_hex: String,
+    /// Lowercase hex SHA-1 thumbprint of [`Self::signer_certificate_der`].
+    pub signer_sha1_hex: String,
+    /// Subject distinguished name of the leaf signing certificate.
+    pub signer_subject: String,
+    /// Subject distinguished name of the terminal trust anchor, if known.
+    pub root_subject: Option<String>,
+    /// Lowercase hex SHA-1 thumbprint of the terminal trust anchor, if known.
+    pub root_sha1_hex: Option<String>,
+    /// Lowercase hex SHA-256 thumbprint of the terminal trust anchor, if known.
+    pub root_sha256_hex: Option<String>,
+    /// `true` when the verification instant came from a cryptographically verified RFC 3161 timestamp.
+    pub timestamped: bool,
+    /// Decoded Azure Artifact Signing identity when the signer carries an identity EKU.
+    pub artifact_signing: Option<ArtifactSigningIdentity>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustVerifyPeReport {
     pub pkcs7_entries_verified: usize,
     pub anchor_thumbprints: usize,
     /// One entry per verified PKCS#7 when [`TrustVerifyPeOptions::artifact_signing`] is set.
     pub artifact_signing: Vec<ArtifactSigningVerifiedSignature>,
+    /// One entry per verified signature across both generic trust and Artifact Signing.
+    pub verified_signatures: Vec<VerifiedSignature>,
 }
 
 impl TrustVerifyPeReport {
@@ -50,8 +80,42 @@ impl TrustVerifyPeReport {
             pkcs7_entries_verified: 0,
             anchor_thumbprints: anchors.thumbprint_count(),
             artifact_signing: Vec::new(),
+            verified_signatures: Vec::new(),
         }
     }
+}
+
+pub(crate) fn verified_signature_from_certs(
+    signature_index: usize,
+    leaf: &Cert,
+    root: &Cert,
+    timestamped: bool,
+) -> Result<VerifiedSignature> {
+    let signer_certificate_der = leaf
+        .to_der()
+        .map_err(|e| anyhow!("encode signer certificate: {e}"))?;
+    let root_der = root
+        .to_der()
+        .map_err(|e| anyhow!("encode root certificate: {e}"))?;
+    let artifact_signing = x509_cert::Certificate::from_der(&signer_certificate_der)
+        .ok()
+        .and_then(|cert| {
+            artifact_signing_identity_from_certificate(&cert)
+                .ok()
+                .flatten()
+        });
+    Ok(VerifiedSignature {
+        signature_index,
+        signer_sha256_hex: cert_der_sha256_hex(&signer_certificate_der),
+        signer_sha1_hex: cert_der_sha1_hex(&signer_certificate_der),
+        signer_certificate_der,
+        signer_subject: leaf.subject_name().to_string(),
+        root_subject: Some(root.subject_name().to_string()),
+        root_sha1_hex: Some(cert_der_sha1_hex(&root_der)),
+        root_sha256_hex: Some(cert_der_sha256_hex(&root_der)),
+        timestamped,
+        artifact_signing,
+    })
 }
 
 /// Anchors for `opts`: [`load_trust_material`], or the pinned Microsoft roots when
@@ -77,25 +141,28 @@ pub(crate) fn verify_pkcs7_entry(
     report: &mut TrustVerifyPeReport,
 ) -> Result<()> {
     if let Some(policy) = &opts.artifact_signing {
-        report.artifact_signing.push(verify_artifact_signing_pkcs7(
+        let (as_sig, summary) = verify_artifact_signing_pkcs7_with_details(
             pkcs7_der,
             pkcs7_index,
             digest,
             binding,
             policy,
             opts,
-        )?);
-    } else {
-        let verification_instant = resolve_verification_instant_for_pkcs7_with_trust(
-            pkcs7_der,
-            &opts.policy,
-            opts.verification_instant_override.as_ref(),
-            anchors,
-            anchor_certs,
-            &opts.online,
-            opts.verbose_chain,
         )?;
-        verify_pkcs7_trust_with_binding(
+        report.artifact_signing.push(as_sig);
+        report.verified_signatures.push(summary);
+    } else {
+        let (verification_instant, timestamped) =
+            resolve_verification_instant_for_pkcs7_with_trust_info(
+                pkcs7_der,
+                &opts.policy,
+                opts.verification_instant_override.as_ref(),
+                anchors,
+                anchor_certs,
+                &opts.online,
+                opts.verbose_chain,
+            )?;
+        let chain = verify_pkcs7_trust_with_binding_chain(
             binding,
             pkcs7_der,
             pkcs7_index,
@@ -107,6 +174,14 @@ pub(crate) fn verify_pkcs7_entry(
             &verification_instant,
             opts.verbose_chain,
         )?;
+        report
+            .verified_signatures
+            .push(verified_signature_from_certs(
+                pkcs7_index,
+                &chain.leaf,
+                &chain.root,
+                timestamped,
+            )?);
     }
     report.pkcs7_entries_verified += 1;
     Ok(())

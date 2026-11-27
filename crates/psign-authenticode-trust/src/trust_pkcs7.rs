@@ -165,6 +165,11 @@ enum CmsDigestCheck<'a> {
     Pkcs9MessageDigest(&'a [u8]),
 }
 
+pub(crate) struct VerifiedPkcs7Chain {
+    pub leaf: Cert,
+    pub root: Cert,
+}
+
 /// When **`picky`** cannot deserialize the content, validate the relevant digest binding, **RSA/SHA-256**
 /// **`SignerInfo`** signature over **`signedAttrs`**, then run the same explicit-anchor chain walk as the picky path.
 #[allow(clippy::too_many_arguments)] // CMS fallback mirrors picky path parameters; grouping would obscure control flow.
@@ -178,7 +183,7 @@ fn verify_pkcs7_trust_cms_rsa_sha256_fallback(
     online: &OnlineTrustOptions,
     verification_instant: &UtcDate,
     verbose_chain: bool,
-) -> Result<()> {
+) -> Result<VerifiedPkcs7Chain> {
     let sd = parse_pkcs7_signed_data_der(slice)
         .map_err(|e| anyhow!("CMS SignedData decode (non-PE SpcIndirectData PKCS#7): {e}"))?;
 
@@ -262,15 +267,14 @@ fn verify_pkcs7_trust_cms_rsa_sha256_fallback(
         &root_thumb,
         verification_instant,
         verbose_chain,
-    )
+    )?;
+
+    let root = root.clone();
+    Ok(VerifiedPkcs7Chain { leaf, root })
 }
 
-/// Verify picky Authenticode PKCS#7 cryptographic checks and certificate chain to configured anchors.
-///
-/// `subject_digest` must match the PKCS#7 indirect **`messageDigest`** (same bytes used for PE/CAB
-/// Authenticode image digest, etc.).
 #[allow(clippy::too_many_arguments)]
-pub fn verify_authenticode_pkcs7_trust(
+fn verify_authenticode_pkcs7_trust_chain(
     pkcs7_der: &[u8],
     pkcs7_index: usize,
     subject_digest: &[u8],
@@ -280,7 +284,7 @@ pub fn verify_authenticode_pkcs7_trust(
     online: &OnlineTrustOptions,
     verification_instant: &UtcDate,
     verbose_chain: bool,
-) -> Result<()> {
+) -> Result<VerifiedPkcs7Chain> {
     let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
     let slice = normalized.as_ref();
 
@@ -354,6 +358,66 @@ pub fn verify_authenticode_pkcs7_trust(
         &root_thumb,
         verification_instant,
         verbose_chain,
+    )?;
+
+    let root = root.clone();
+    Ok(VerifiedPkcs7Chain { leaf, root })
+}
+
+/// Verify picky Authenticode PKCS#7 cryptographic checks and certificate chain to configured anchors.
+///
+/// `subject_digest` must match the PKCS#7 indirect **`messageDigest`** (same bytes used for PE/CAB
+/// Authenticode image digest, etc.).
+#[allow(clippy::too_many_arguments)]
+pub fn verify_authenticode_pkcs7_trust(
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    subject_digest: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    policy: &AuthenticodeTrustPolicy,
+    online: &OnlineTrustOptions,
+    verification_instant: &UtcDate,
+    verbose_chain: bool,
+) -> Result<()> {
+    verify_authenticode_pkcs7_trust_chain(
+        pkcs7_der,
+        pkcs7_index,
+        subject_digest,
+        anchors,
+        anchor_certs,
+        policy,
+        online,
+        verification_instant,
+        verbose_chain,
+    )
+    .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_pkcs9_message_digest_pkcs7_trust_chain(
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    content_digest: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    policy: &AuthenticodeTrustPolicy,
+    online: &OnlineTrustOptions,
+    verification_instant: &UtcDate,
+    verbose_chain: bool,
+) -> Result<VerifiedPkcs7Chain> {
+    let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
+    let slice = normalized.as_ref();
+    verify_pkcs7_trust_cms_rsa_sha256_fallback(
+        slice,
+        pkcs7_index,
+        CmsDigestCheck::Pkcs9MessageDigest(content_digest),
+        anchors,
+        anchor_certs,
+        policy,
+        online,
+        verification_instant,
+        verbose_chain,
     )
 }
 
@@ -370,12 +434,10 @@ pub fn verify_pkcs9_message_digest_pkcs7_trust(
     verification_instant: &UtcDate,
     verbose_chain: bool,
 ) -> Result<()> {
-    let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
-    let slice = normalized.as_ref();
-    verify_pkcs7_trust_cms_rsa_sha256_fallback(
-        slice,
+    verify_pkcs9_message_digest_pkcs7_trust_chain(
+        pkcs7_der,
         pkcs7_index,
-        CmsDigestCheck::Pkcs9MessageDigest(content_digest),
+        content_digest,
         anchors,
         anchor_certs,
         policy,
@@ -383,6 +445,7 @@ pub fn verify_pkcs9_message_digest_pkcs7_trust(
         verification_instant,
         verbose_chain,
     )
+    .map(|_| ())
 }
 
 /// How a PKCS#7 binds to the signed subject.
@@ -392,6 +455,36 @@ pub enum Pkcs7DigestBinding {
     AuthenticodeIndirect,
     /// PKCS#9 `messageDigest` over external content (catalogs, detached CMS).
     Pkcs9MessageDigest,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_pkcs7_trust_with_binding_chain(
+    binding: Pkcs7DigestBinding,
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    digest: &[u8],
+    anchors: &AnchorStore,
+    anchor_certs: &[Cert],
+    policy: &AuthenticodeTrustPolicy,
+    online: &OnlineTrustOptions,
+    verification_instant: &UtcDate,
+    verbose_chain: bool,
+) -> Result<VerifiedPkcs7Chain> {
+    let verify = match binding {
+        Pkcs7DigestBinding::AuthenticodeIndirect => verify_authenticode_pkcs7_trust_chain,
+        Pkcs7DigestBinding::Pkcs9MessageDigest => verify_pkcs9_message_digest_pkcs7_trust_chain,
+    };
+    verify(
+        pkcs7_der,
+        pkcs7_index,
+        digest,
+        anchors,
+        anchor_certs,
+        policy,
+        online,
+        verification_instant,
+        verbose_chain,
+    )
 }
 
 /// [`verify_authenticode_pkcs7_trust`] or [`verify_pkcs9_message_digest_pkcs7_trust`] by binding.
@@ -408,11 +501,8 @@ pub fn verify_pkcs7_trust_with_binding(
     verification_instant: &UtcDate,
     verbose_chain: bool,
 ) -> Result<()> {
-    let verify = match binding {
-        Pkcs7DigestBinding::AuthenticodeIndirect => verify_authenticode_pkcs7_trust,
-        Pkcs7DigestBinding::Pkcs9MessageDigest => verify_pkcs9_message_digest_pkcs7_trust,
-    };
-    verify(
+    verify_pkcs7_trust_with_binding_chain(
+        binding,
         pkcs7_der,
         pkcs7_index,
         digest,
@@ -423,6 +513,7 @@ pub fn verify_pkcs7_trust_with_binding(
         verification_instant,
         verbose_chain,
     )
+    .map(|_| ())
 }
 
 #[cfg(test)]

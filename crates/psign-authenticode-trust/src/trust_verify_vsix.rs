@@ -16,11 +16,13 @@
 //!    `SignatureValue` octets).
 
 use crate::anchor::parse_cert_bytes;
-use crate::artifact_signing::verify_artifact_signing_certificate;
+use crate::artifact_signing::verify_artifact_signing_certificate_with_details;
 use crate::chain::verify_certificate_chain_to_anchors;
 use crate::rfc3161_extract::trusted_utc_date_from_timestamp_token;
 use crate::trust_pkcs7::x509_cert_has_code_signing_eku;
-use crate::trust_verify_pe::{TrustVerifyPeOptions, TrustVerifyPeReport, trust_material_for};
+use crate::trust_verify_pe::{
+    TrustVerifyPeOptions, TrustVerifyPeReport, trust_material_for, verified_signature_from_certs,
+};
 use crate::xml_c14n::{C14nMode, Element, canonicalize, parse_document};
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
@@ -495,49 +497,52 @@ pub fn trust_verify_vsix_bytes(
     let mut report = TrustVerifyPeReport::new(&anchors);
 
     if let Some(policy) = &opts.artifact_signing {
-        report
-            .artifact_signing
-            .push(verify_artifact_signing_certificate(
-                &sig.signer,
-                sig.certificates,
-                sig.timestamp_token
-                    .as_deref()
-                    .map(|t| (t, sig.signature_value.as_slice())),
-                0,
-                policy,
-                opts,
-            )?);
+        let (as_sig, summary) = verify_artifact_signing_certificate_with_details(
+            &sig.signer,
+            sig.certificates,
+            sig.timestamp_token
+                .as_deref()
+                .map(|t| (t, sig.signature_value.as_slice())),
+            0,
+            policy,
+            opts,
+        )?;
+        report.artifact_signing.push(as_sig);
+        report.verified_signatures.push(summary);
     } else {
         if opts.policy.strict_code_signing_eku && !x509_cert_has_code_signing_eku(&sig.signer)? {
             return Err(anyhow!(
                 "VSIX signer certificate lacks the code signing EKU"
             ));
         }
-        let instant = match &opts.verification_instant_override {
-            Some(instant) => instant.clone(),
+        let (instant, timestamped) = match &opts.verification_instant_override {
+            Some(instant) => (instant.clone(), false),
             None if opts.policy.prefer_timestamp_signing_time => match &sig.timestamp_token {
-                Some(token) => trusted_utc_date_from_timestamp_token(
-                    token,
-                    &sig.signature_value,
-                    &anchors,
-                    &anchor_certs,
-                    &opts.online,
-                    opts.verbose_chain,
-                )
-                .context("VSIX timestamp")?,
+                Some(token) => (
+                    trusted_utc_date_from_timestamp_token(
+                        token,
+                        &sig.signature_value,
+                        &anchors,
+                        &anchor_certs,
+                        &opts.online,
+                        opts.verbose_chain,
+                    )
+                    .context("VSIX timestamp")?,
+                    true,
+                ),
                 None if opts.policy.require_valid_timestamp => {
                     return Err(anyhow!("VSIX signature has no RFC 3161 timestamp"));
                 }
-                None => UtcDate::now(),
+                None => (UtcDate::now(), false),
             },
-            None => UtcDate::now(),
+            None => (UtcDate::now(), false),
         };
         let leaf_der = sig
             .signer
             .to_der()
             .map_err(|e| anyhow!("encode signer certificate: {e}"))?;
         let leaf = parse_cert_bytes(&leaf_der)?;
-        verify_certificate_chain_to_anchors(
+        let root = verify_certificate_chain_to_anchors(
             &leaf,
             sig.certificates,
             &anchors,
@@ -546,6 +551,9 @@ pub fn trust_verify_vsix_bytes(
             &instant,
             opts.verbose_chain,
         )?;
+        report
+            .verified_signatures
+            .push(verified_signature_from_certs(0, &leaf, &root, timestamped)?);
     }
     report.pkcs7_entries_verified = 1;
     Ok(report)

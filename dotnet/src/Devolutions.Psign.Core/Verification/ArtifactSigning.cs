@@ -142,6 +142,9 @@ public sealed record ArtifactSigningPolicy
     /// <summary>Subscriber roots for Private Trust / Public Trust Test signatures (PEM or DER files).</summary>
     public IReadOnlyList<string> PrivateTrustRootFiles { get; init; } = [];
 
+    /// <summary>Subscriber roots for Private Trust / Public Trust Test signatures as in-memory DER bytes.</summary>
+    public IReadOnlyList<byte[]> PrivateTrustRootDer { get; init; } = [];
+
     /// <summary>Require a timestamp countersignature chained to the pinned Microsoft roots (default <c>true</c>).</summary>
     public bool RequireTimestamp { get; init; } = true;
 }
@@ -528,12 +531,19 @@ public static class ArtifactSigning
             return PublicTrustAnchors();
         }
 
-        if (policy.PrivateTrustRootFiles.Count == 0)
+        if (policy.PrivateTrustRootFiles.Count == 0 && policy.PrivateTrustRootDer.Count == 0)
         {
             throw new PsignException($"{kind.AsStr()} signature requires the subscriber root certificate (private trust root)");
         }
 
-        var (_, certs) = AnchorStore.LoadFiles(policy.PrivateTrustRootFiles);
+        var certs = policy.PrivateTrustRootFiles.Count > 0
+            ? AnchorStore.LoadFiles(policy.PrivateTrustRootFiles).Certs
+            : [];
+        foreach (var der in policy.PrivateTrustRootDer)
+        {
+            certs.Add(Anchors.ParseDerCertificate(der, "parse private trust root DER: "));
+        }
+
         var usable = certs
             .Where(c => !PublicTrustRoots.Any(r => r.Sha1.AsSpan().SequenceEqual(Anchors.CertSha1Thumbprint(c))))
             .ToList();
@@ -558,12 +568,22 @@ public static class ArtifactSigning
         VerificationTime = UtcDateRfc3339(instant),
     };
 
-    /// <summary>
-    /// Verify one PKCS#7 as an Artifact Signing signature whose digest binding equals <paramref name="subjectDigest"/>:
-    /// identity EKU (+ Public Trust marker), publisher pin, timestamp chained to a pinned Microsoft root, and the signer
-    /// chain terminating at a pinned root (Public Trust) or a supplied subscriber root, valid at the timestamp.
-    /// </summary>
-    public static ArtifactSigningVerifiedSignature VerifyArtifactSigningPkcs7(
+    private static VerifiedSignature VerifiedSignatureSummary(
+        int index, CertificateInfo signer, string subject, CertificateInfo root, bool timestamped, ArtifactSigningIdentity identity) => new()
+    {
+        SignatureIndex = index,
+        SignerCertificateDer = signer.RawData.ToArray(),
+        SignerSha256Hex = Anchors.CertSha256ThumbprintHex(signer),
+        SignerSha1Hex = Anchors.CertSha1ThumbprintHex(signer),
+        SignerSubject = subject,
+        RootSubject = PickyCert.SubjectDisplay(root),
+        RootSha1Hex = Anchors.CertSha1ThumbprintHex(root),
+        RootSha256Hex = Anchors.CertSha256ThumbprintHex(root),
+        Timestamped = timestamped,
+        ArtifactSigning = identity,
+    };
+
+    internal static (ArtifactSigningVerifiedSignature ArtifactSigning, VerifiedSignature Verified) VerifyArtifactSigningPkcs7WithDetails(
         byte[] pkcs7Der,
         int pkcs7Index,
         byte[] subjectDigest,
@@ -582,17 +602,27 @@ public static class ArtifactSigning
             PreferTimestampSigningTime = false,
             RequireValidTimestamp = false,
         };
-        TrustPkcs7.VerifyPkcs7TrustWithBinding(binding, pkcs7Der, pkcs7Index, subjectDigest, asAnchors, asCerts, trustPolicy, opts.Online, instant, opts.VerboseChain, opts.Log);
-        var root = SignerTerminalRoot(pkcs7Der, asAnchors, asCerts, opts.Online);
-        return VerifiedSignature(pkcs7Index, subject, identity, root, timestamped, instant);
+        var chain = TrustPkcs7.VerifyPkcs7TrustWithBindingChain(binding, pkcs7Der, pkcs7Index, subjectDigest, asAnchors, asCerts, trustPolicy, opts.Online, instant, opts.VerboseChain, opts.Log);
+        var asSig = VerifiedSignature(pkcs7Index, subject, identity, chain.Root, timestamped, instant);
+        var summary = VerifiedSignatureSummary(pkcs7Index, signer, subject, chain.Root, timestamped, identity);
+        return (asSig, summary);
     }
 
     /// <summary>
-    /// Artifact Signing policy for non-CMS signatures (VSIX XMLDSig): the caller already verified the signature value with
-    /// <paramref name="signer"/>'s key; this checks the identity, the timestamp token (token DER and the bytes it covers),
-    /// and the signer chain to the anchors.
+    /// Verify one PKCS#7 as an Artifact Signing signature whose digest binding equals <paramref name="subjectDigest"/>:
+    /// identity EKU (+ Public Trust marker), publisher pin, timestamp chained to a pinned Microsoft root, and the signer
+    /// chain terminating at a pinned root (Public Trust) or a supplied subscriber root, valid at the timestamp.
     /// </summary>
-    public static ArtifactSigningVerifiedSignature VerifyArtifactSigningCertificate(
+    public static ArtifactSigningVerifiedSignature VerifyArtifactSigningPkcs7(
+        byte[] pkcs7Der,
+        int pkcs7Index,
+        byte[] subjectDigest,
+        Pkcs7DigestBinding binding,
+        ArtifactSigningPolicy policy,
+        TrustVerifyPeOptions opts) =>
+        VerifyArtifactSigningPkcs7WithDetails(pkcs7Der, pkcs7Index, subjectDigest, binding, policy, opts).ArtifactSigning;
+
+    internal static (ArtifactSigningVerifiedSignature ArtifactSigning, VerifiedSignature Verified) VerifyArtifactSigningCertificateWithDetails(
         CertificateInfo signer,
         IEnumerable<CertificateInfo> extraCerts,
         (byte[] Token, byte[] Covered)? timestamp,
@@ -607,22 +637,24 @@ public static class ArtifactSigning
                 : null);
         var (asAnchors, asCerts) = ArtifactSigningAnchors(identity.Kind, policy);
         var root = TrustChain.VerifyCertificateChainToAnchors(signer, extraCerts, asAnchors, asCerts, opts.Online, instant, opts.VerboseChain, opts.Log);
-        return VerifiedSignature(signatureIndex, subject, identity, root, timestamped, instant);
+        var asSig = VerifiedSignature(signatureIndex, subject, identity, root, timestamped, instant);
+        var summary = VerifiedSignatureSummary(signatureIndex, signer, subject, root, timestamped, identity);
+        return (asSig, summary);
     }
 
-    private static CertificateInfo SignerTerminalRoot(byte[] pkcs7Der, AnchorStore anchors, IReadOnlyList<CertificateInfo> anchorCerts, OnlineTrustOptions online)
-    {
-        var sd = CmsTrustHelpers.ParsePkcs7SignedDataDer(Pkcs7Wire.NormalizeForAuthenticode(pkcs7Der));
-        if (sd.SignerInfos.Count == 0)
-        {
-            throw new PsignException("SignedData has no SignerInfo");
-        }
-
-        var leaf = CmsTrustHelpers.CertificateForSigner(sd, sd.SignerInfos[0]);
-        var pool = TrustChain.MergeUniqueCerts(anchorCerts, sd.GetCertificates());
-        var chain = TrustChain.IssuerChainExcludingLeafOnline(leaf, pool, online, anchors);
-        return TrustChain.TerminalRootCert(leaf, chain);
-    }
+    /// <summary>
+    /// Artifact Signing policy for non-CMS signatures (VSIX XMLDSig): the caller already verified the signature value with
+    /// <paramref name="signer"/>'s key; this checks the identity, the timestamp token (token DER and the bytes it covers),
+    /// and the signer chain to the anchors.
+    /// </summary>
+    public static ArtifactSigningVerifiedSignature VerifyArtifactSigningCertificate(
+        CertificateInfo signer,
+        IEnumerable<CertificateInfo> extraCerts,
+        (byte[] Token, byte[] Covered)? timestamp,
+        int signatureIndex,
+        ArtifactSigningPolicy policy,
+        TrustVerifyPeOptions opts) =>
+        VerifyArtifactSigningCertificateWithDetails(signer, extraCerts, timestamp, signatureIndex, policy, opts).ArtifactSigning;
 
     private static string UtcDateRfc3339(DateTimeOffset d) =>
         PickyFormat.Truncate(d).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);

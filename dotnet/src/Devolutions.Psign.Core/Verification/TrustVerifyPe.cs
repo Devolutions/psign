@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
 using Devolutions.Psign.Core;
 using Devolutions.Psign.Core.Authenticode;
 using Devolutions.Psign.Core.Cms;
@@ -17,6 +18,9 @@ public sealed record TrustVerifyPeOptions
 
     /// <summary>Explicit trusted CA files (<c>--trusted-ca</c> + <c>--additional-trusted-ca</c>).</summary>
     public IReadOnlyList<string> TrustedCaFiles { get; init; } = [];
+
+    /// <summary>DER-encoded certificates explicitly trusted as anchors.</summary>
+    public IReadOnlyList<byte[]> TrustedCaDer { get; init; } = [];
 
     /// <summary>Microsoft AuthRoot CAB (certificates + CTL thumbprints).</summary>
     public string? AuthrootCab { get; init; }
@@ -41,6 +45,50 @@ public sealed record TrustVerifyPeOptions
     public TextWriter? Log { get; init; }
 }
 
+/// <summary>Cryptographically verified signer and chain metadata for one signature (Rust <c>VerifiedSignature</c>).</summary>
+public sealed record VerifiedSignature
+{
+    /// <summary>PE certificate-table entry index; <c>0</c> for single-signature formats.</summary>
+    [JsonPropertyName("signature_index")]
+    public int SignatureIndex { get; init; }
+
+    /// <summary>DER-encoded leaf signing certificate.</summary>
+    [JsonIgnore]
+    public byte[] SignerCertificateDer { get; init; } = [];
+
+    /// <summary>Lowercase hex SHA-256 thumbprint of <see cref="SignerCertificateDer"/>.</summary>
+    [JsonPropertyName("signer_sha256_hex")]
+    public string SignerSha256Hex { get; init; } = string.Empty;
+
+    /// <summary>Lowercase hex SHA-1 thumbprint of <see cref="SignerCertificateDer"/>.</summary>
+    [JsonPropertyName("signer_sha1_hex")]
+    public string SignerSha1Hex { get; init; } = string.Empty;
+
+    /// <summary>Subject distinguished name of the leaf signing certificate.</summary>
+    [JsonPropertyName("signer_subject")]
+    public string SignerSubject { get; init; } = string.Empty;
+
+    /// <summary>Subject distinguished name of the terminal trust anchor, if known.</summary>
+    [JsonPropertyName("root_subject")]
+    public string? RootSubject { get; init; }
+
+    /// <summary>Lowercase hex SHA-1 thumbprint of the terminal trust anchor, if known.</summary>
+    [JsonPropertyName("root_sha1_hex")]
+    public string? RootSha1Hex { get; init; }
+
+    /// <summary>Lowercase hex SHA-256 thumbprint of the terminal trust anchor, if known.</summary>
+    [JsonPropertyName("root_sha256_hex")]
+    public string? RootSha256Hex { get; init; }
+
+    /// <summary><c>true</c> when the verification instant came from a cryptographically verified RFC 3161 timestamp.</summary>
+    [JsonPropertyName("timestamped")]
+    public bool Timestamped { get; init; }
+
+    /// <summary>Decoded Azure Artifact Signing identity when the signer carries an identity EKU.</summary>
+    [JsonPropertyName("artifact_signing")]
+    public ArtifactSigningIdentity? ArtifactSigning { get; init; }
+}
+
 /// <summary>Result of a trust verification (Rust <c>TrustVerifyPeReport</c>).</summary>
 public sealed class TrustVerifyPeReport
 {
@@ -55,6 +103,9 @@ public sealed class TrustVerifyPeReport
 
     /// <summary>One entry per verified PKCS#7 when <see cref="TrustVerifyPeOptions.ArtifactSigning"/> is set.</summary>
     public List<ArtifactSigningVerifiedSignature> ArtifactSigning { get; } = [];
+
+    /// <summary>One entry per verified signature across both generic trust and Artifact Signing.</summary>
+    public List<VerifiedSignature> VerifiedSignatures { get; } = [];
 
     /// <summary>
     /// The stdout lines the Rust CLI prints on success (<c>print_trust_ok</c>), e.g.
@@ -97,6 +148,32 @@ public static class TrustVerifyPe
     public static (AnchorStore Store, List<CertificateInfo> Certs) TrustMaterialFor(TrustVerifyPeOptions opts) =>
         opts.ArtifactSigning is not null ? Verification.ArtifactSigning.PublicTrustAnchors() : LoadTrustMaterial(opts);
 
+    internal static VerifiedSignature VerifiedSignatureFromCerts(int signatureIndex, CertificateInfo leaf, CertificateInfo root, bool timestamped)
+    {
+        ArtifactSigningIdentity? artifactSigning = null;
+        try
+        {
+            artifactSigning = Verification.ArtifactSigning.IdentityFromCertificate(leaf);
+        }
+        catch (PsignException)
+        {
+        }
+
+        return new VerifiedSignature
+        {
+            SignatureIndex = signatureIndex,
+            SignerCertificateDer = leaf.RawData.ToArray(),
+            SignerSha256Hex = Anchors.CertSha256ThumbprintHex(leaf),
+            SignerSha1Hex = Anchors.CertSha1ThumbprintHex(leaf),
+            SignerSubject = PickyCert.SubjectDisplay(leaf),
+            RootSubject = PickyCert.SubjectDisplay(root),
+            RootSha1Hex = Anchors.CertSha1ThumbprintHex(root),
+            RootSha256Hex = Anchors.CertSha256ThumbprintHex(root),
+            Timestamped = timestamped,
+            ArtifactSigning = artifactSigning,
+        };
+    }
+
     /// <summary>
     /// Trust-verify one PKCS#7 whose <paramref name="digest"/> already matched the recomputed subject digest, applying
     /// either the generic anchor policy or <see cref="TrustVerifyPeOptions.ArtifactSigning"/>. Format verifiers (CAB, MSI,
@@ -114,13 +191,16 @@ public static class TrustVerifyPe
     {
         if (opts.ArtifactSigning is { } policy)
         {
-            report.ArtifactSigning.Add(Verification.ArtifactSigning.VerifyArtifactSigningPkcs7(pkcs7Der, pkcs7Index, digest, binding, policy, opts));
+            var (asSig, summary) = Verification.ArtifactSigning.VerifyArtifactSigningPkcs7WithDetails(pkcs7Der, pkcs7Index, digest, binding, policy, opts);
+            report.ArtifactSigning.Add(asSig);
+            report.VerifiedSignatures.Add(summary);
         }
         else
         {
-            var instant = VerificationInstant.ResolveVerificationInstantForPkcs7WithTrust(
+            var (instant, timestamped) = VerificationInstant.ResolveVerificationInstantForPkcs7WithTrustInfo(
                 pkcs7Der, opts.Policy, opts.VerificationInstantOverride, anchors, anchorCerts, opts.Online, opts.VerboseChain, opts.Log);
-            TrustPkcs7.VerifyPkcs7TrustWithBinding(binding, pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, opts.Policy, opts.Online, instant, opts.VerboseChain, opts.Log);
+            var chain = TrustPkcs7.VerifyPkcs7TrustWithBindingChain(binding, pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, opts.Policy, opts.Online, instant, opts.VerboseChain, opts.Log);
+            report.VerifiedSignatures.Add(VerifiedSignatureFromCerts(pkcs7Index, chain.Leaf, chain.Root, timestamped));
         }
 
         report.Pkcs7EntriesVerified++;
@@ -156,6 +236,25 @@ public static class TrustVerifyPe
             var (_, fileCerts) = AnchorStore.LoadFiles(opts.TrustedCaFiles);
             store.MergeThumbprintsOnly(fileCerts.Select(Anchors.CertSha1Thumbprint));
             certs.AddRange(fileCerts);
+        }
+
+        if (opts.TrustedCaDer.Count > 0)
+        {
+            foreach (var der in opts.TrustedCaDer)
+            {
+                CertificateInfo parsed;
+                try
+                {
+                    parsed = CertificateInfo.Parse(der);
+                }
+                catch (Exception e) when (e is PsignException or System.Formats.Asn1.AsnContentException or FormatException or CryptographicException)
+                {
+                    throw new PsignException($"parse trusted CA DER: {e.Message}");
+                }
+
+                store.MergeThumbprintsOnly([SHA1.HashData(der)]);
+                certs.Add(parsed);
+            }
         }
 
         if (opts.AuthrootCab is { } cab)

@@ -183,6 +183,7 @@ impl TrustVerifySharedArgs {
             expected_publisher_ids: self.artifact_signing_publisher_id.clone(),
             private_trust_root_files: self.artifact_signing_private_trust_root.clone(),
             require_timestamp: !self.artifact_signing_allow_missing_timestamp,
+            ..Default::default()
         }))
     }
 }
