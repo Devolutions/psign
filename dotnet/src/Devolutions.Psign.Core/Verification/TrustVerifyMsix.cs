@@ -426,6 +426,10 @@ public static class TrustVerifyMsix
         var signerCert = CertificateInfo.Parse(signerDer);
         var signerSubject = PickyCert.SubjectDisplay(signerCert);
         var artifactSigning = ArtifactSigning.IdentityFromCertificate(signerCert);
+        if (artifactSigning?.Kind == ArtifactSigningCertificateKind.PrivateTrustCiPolicy)
+        {
+            throw new PsignException("Private Trust CI Policy certificates sign WDAC policies, not Authenticode code");
+        }
 
         if (parsedThumbprints.Count > 0 && !parsedThumbprints.Any(pin => pin.Matches(signerSha256Hex, signerSha1Hex)))
         {
@@ -452,11 +456,6 @@ public static class TrustVerifyMsix
             if (artifactSigning is null)
             {
                 throw new PsignException($"MSIX signer certificate {PickyFormat.StrDebug(signerSubject)} has no Artifact Signing identity EKU");
-            }
-
-            if (artifactSigning.Kind == ArtifactSigningCertificateKind.PrivateTrustCiPolicy)
-            {
-                throw new PsignException("Private Trust CI Policy certificates sign WDAC policies, not Authenticode code");
             }
 
             bool requireTimestamp = !hasExplicitCa || artifactSigning.Kind == ArtifactSigningCertificateKind.PublicTrust;

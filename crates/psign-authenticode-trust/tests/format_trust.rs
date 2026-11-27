@@ -644,6 +644,7 @@ fn msix_pinning_artifact_signing_private_and_public_trust() {
     )
     .expect("ci policy leaf");
     let ci_key = rsa::RsaPrivateKey::from_pkcs8_pem(&ci_leaf.private_key_pem).expect("ci key");
+    let ci_sha256 = psign_authenticode_trust::cert_der_sha256_hex(&ci_leaf.cert_der);
     let ci_msix = sign_test_msix(ci_leaf.cert, vec![ca.cert.clone()], ci_key);
     let ci_err = verify_msix_with_pins(
         &ci_msix,
@@ -658,6 +659,28 @@ fn msix_pinning_artifact_signing_private_and_public_trust() {
     assert!(
         format!("{ci_err:#}").contains("Private Trust CI Policy"),
         "expected Private Trust CI Policy rejection, got: {ci_err:#}"
+    );
+    let ci_ca_file = tempfile::NamedTempFile::new().expect("temp ci ca");
+    std::fs::write(ci_ca_file.path(), &ca.cert_der).expect("write ci ca");
+    let ci_auto_err =
+        verify_msix_for_pinning(&ci_msix, "msix", &[ci_ca_file.path().to_path_buf()]).unwrap_err();
+    assert!(
+        format!("{ci_auto_err:#}").contains("Private Trust CI Policy"),
+        "expected verify_msix_for_pinning to reject Private Trust CI Policy, got: {ci_auto_err:#}"
+    );
+    let ci_thumb_err = verify_msix_with_pins(
+        &ci_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![ci_sha256],
+            allow_pinned_leaf_trust: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{ci_thumb_err:#}").contains("Private Trust CI Policy"),
+        "expected thumbprint-pinned verify_msix_with_pins to reject Private Trust CI Policy, got: {ci_thumb_err:#}"
     );
 
     // Fake Public Trust EKU signed by a non-Microsoft CA must fail Public Trust verification

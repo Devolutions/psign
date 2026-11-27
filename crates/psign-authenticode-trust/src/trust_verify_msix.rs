@@ -420,6 +420,12 @@ pub fn verify_msix_with_pins(
         .map_err(|e| anyhow!("decode MSIX signer certificate: {e}"))?;
     let signer_subject = subject_display(&x509_signer);
     let artifact_signing = artifact_signing_identity_from_certificate(&x509_signer)?;
+    if matches!(
+        &artifact_signing,
+        Some(id) if id.kind == ArtifactSigningCertificateKind::PrivateTrustCiPolicy
+    ) {
+        bail!("Private Trust CI Policy certificates sign WDAC policies, not Authenticode code");
+    }
 
     if !parsed_thumbprints.is_empty()
         && !parsed_thumbprints
@@ -455,9 +461,6 @@ pub fn verify_msix_with_pins(
                 "MSIX signer certificate {signer_subject:?} has no Artifact Signing identity EKU"
             );
         };
-        if identity.kind == ArtifactSigningCertificateKind::PrivateTrustCiPolicy {
-            bail!("Private Trust CI Policy certificates sign WDAC policies, not Authenticode code");
-        }
         let require_timestamp =
             !has_explicit_ca || identity.kind == ArtifactSigningCertificateKind::PublicTrust;
         let policy = ArtifactSigningPolicy {

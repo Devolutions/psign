@@ -188,7 +188,7 @@ public class MsixPinningTests
         var autoPt = TrustVerifyMsix.VerifyMsixForPinning(ptMsix, "msix", [ptRootPath]);
         Assert.Equal(MsixRecommendedPin.ArtifactSigningPublisherId("11.22.33.44.55.66.77.88"), autoPt.RecommendedPin);
 
-        // Private Trust CI Policy EKU is rejected.
+        // Private Trust CI Policy EKU is rejected unconditionally (publisher ID pin, auto-pinning, and thumbprint pin).
         var (ciRoot, ciLeaf, ciKey) = CreateCaAndLeaf("1.3.6.1.4.1.311.97.1.4.1.11.22.33.44");
         using (ciKey)
         {
@@ -199,6 +199,19 @@ public class MsixPinningTests
                 TrustedCaDer = [ciRoot.RawData],
             }));
             Assert.Contains("Private Trust CI Policy", ciErr.FullMessage);
+
+            using var ciDir = new TempDir();
+            var ciCaPath = ciDir.File("ci-ca.cer");
+            File.WriteAllBytes(ciCaPath, ciRoot.RawData);
+            var ciAutoErr = Assert.Throws<PsignException>(() => TrustVerifyMsix.VerifyMsixForPinning(ciMsix, "msix", [ciCaPath]));
+            Assert.Contains("Private Trust CI Policy", ciAutoErr.FullMessage);
+
+            var ciThumbErr = Assert.Throws<PsignException>(() => TrustVerifyMsix.VerifyMsixWithPins(ciMsix, "msix", new MsixPinVerifyOptions
+            {
+                ExpectedCertThumbprints = [Anchors.CertDerSha256Hex(ciLeaf.RawData)],
+                AllowPinnedLeafTrust = true,
+            }));
+            Assert.Contains("Private Trust CI Policy", ciThumbErr.FullMessage);
         }
 
         // Fake Public Trust EKU signed by non-Microsoft CA fails Public Trust verification.
