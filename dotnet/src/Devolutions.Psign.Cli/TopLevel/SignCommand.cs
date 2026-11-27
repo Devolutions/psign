@@ -1193,11 +1193,6 @@ internal static class SignCommand
             ?? metadata?.CertificateProfileName
             ?? throw new PsignException($"portable {targetKind} Artifact Signing requires --artifact-signing-profile-name or metadata CertificateProfileName");
         var correlationId = TextOpt(args.ArtifactSigningCorrelationId) ?? metadata?.CorrelationId;
-        if (TextPresent(args.ArtifactSigningSignatureAlgorithm) || TextPresent(args.ArtifactSigningApiVersion) || TextPresent(args.ArtifactSigningAuthority))
-        {
-            throw new PsignException(
-                $"native-shaped portable {targetKind} Artifact Signing does not yet support signature-algorithm, api-version, or authority overrides");
-        }
 
         var request = new PortableSignRequest
         {
@@ -1220,6 +1215,9 @@ internal static class SignCommand
             ArtifactSigningFederatedTokenFile = TextOpt(args.ArtifactSigningFederatedTokenFile),
             ArtifactSigningExcludeCredentials = metadata?.ExcludeCredentials?.ToList() ?? [],
             ArtifactSigningCorrelationId = correlationId,
+            ArtifactSigningAuthority = TextOpt(args.ArtifactSigningAuthority),
+            ArtifactSigningApiVersion = TextOpt(args.ArtifactSigningApiVersion),
+            ArtifactSigningSignatureAlgorithm = TextOpt(args.ArtifactSigningSignatureAlgorithm),
         };
         PortableSignResponse response;
         try

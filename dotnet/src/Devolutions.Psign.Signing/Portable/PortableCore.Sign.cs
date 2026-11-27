@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Devolutions.Psign.Core;
@@ -15,6 +16,7 @@ using Devolutions.Psign.Core.X509;
 using Devolutions.Psign.Core.Zip;
 using Devolutions.Psign.Signing.ArtifactSigning;
 using Devolutions.Psign.Signing.AzureKeyVault;
+using Devolutions.Psign.Signing.CertStore;
 using Devolutions.Psign.Signing.Cms;
 using Devolutions.Psign.Signing.Keys;
 using Devolutions.Psign.Signing.Msix;
@@ -69,6 +71,170 @@ public static partial class PortableCore
             Signature = signature,
             Skipped = skipped,
         };
+    }
+
+    private static long _tempOutputSequence;
+
+    /// <summary>
+    /// Sign <see cref="PortableSignRequest.Path"/> into a temporary sibling file, verify that the produced signature
+    /// self-checks as <see cref="PortableSignatureStatus.Valid"/>, and atomically replace the destination path on
+    /// success (Rust <c>portable_sign_file_verified</c>). Temporary files are deleted on failure and the original file
+    /// is left untouched.
+    /// </summary>
+    public static PortableSignResponse PortableSignFileVerified(PortableSignRequest request, PortableCoreOptions? options = null)
+    {
+        var target = request.Path;
+        var finalOutput = request.OutputPath ?? target;
+        var tempOutput = UniqueTempOutputPath(finalOutput, target);
+        var format = InferFormat(target);
+        var tempCompanion = format == PortableFileFormat.AppInstaller ? AppInstallerCompanionPath(tempOutput) : null;
+
+        var stagedRequest = CloneSignRequestWithOutput(request, tempOutput);
+        bool keepTemp = false;
+        try
+        {
+            var response = PortableSign(stagedRequest, options);
+            if (response.Signature.Status != PortableSignatureStatus.Valid)
+            {
+                throw new PsignException(
+                    $"portable sign produced a signature that failed self-verification for '{target}': {response.Signature.Status} ({response.Signature.StatusMessage})");
+            }
+
+            if (response.Skipped && SamePath(finalOutput, target))
+            {
+                response.OutputPath = finalOutput;
+                response.Signature.Path = finalOutput;
+                return response;
+            }
+
+            ReplaceFileAtomic(tempOutput, finalOutput, $"replace '{finalOutput}' with signed output '{tempOutput}'");
+            if (tempCompanion is not null)
+            {
+                var finalCompanion = AppInstallerCompanionPath(finalOutput);
+                ReplaceFileAtomic(tempCompanion, finalCompanion, $"replace App Installer companion '{finalCompanion}' with '{tempCompanion}'");
+            }
+
+            keepTemp = true;
+            response.OutputPath = finalOutput;
+            response.Signature.Path = finalOutput;
+            return response;
+        }
+        finally
+        {
+            if (!keepTemp)
+            {
+                TryDeleteFile(tempOutput);
+                if (tempCompanion is not null)
+                {
+                    TryDeleteFile(tempCompanion);
+                }
+            }
+        }
+    }
+
+    private static PortableSignRequest CloneSignRequestWithOutput(PortableSignRequest r, string outputPath) => new()
+    {
+        Path = r.Path,
+        AppendSignature = r.AppendSignature,
+        SkipSigned = r.SkipSigned,
+        OutputPath = outputPath,
+        HashAlgorithm = r.HashAlgorithm,
+        CertificatePath = r.CertificatePath,
+        PrivateKeyPath = r.PrivateKeyPath,
+        CertificateDerBase64 = r.CertificateDerBase64,
+        PrivateKeyDerBase64 = r.PrivateKeyDerBase64,
+        PfxPath = r.PfxPath,
+        PfxPassword = r.PfxPassword,
+        ChainCertificatePaths = [.. r.ChainCertificatePaths],
+        ChainCertificatesDerBase64 = [.. r.ChainCertificatesDerBase64],
+        TimestampServer = r.TimestampServer,
+        TimestampHashAlgorithm = r.TimestampHashAlgorithm,
+        AzureKeyVaultUrl = r.AzureKeyVaultUrl,
+        AzureKeyVaultCertificate = r.AzureKeyVaultCertificate,
+        AzureKeyVaultCertificateVersion = r.AzureKeyVaultCertificateVersion,
+        AzureKeyVaultAccessToken = r.AzureKeyVaultAccessToken,
+        AzureKeyVaultClientId = r.AzureKeyVaultClientId,
+        AzureKeyVaultClientSecret = r.AzureKeyVaultClientSecret,
+        AzureKeyVaultTenantId = r.AzureKeyVaultTenantId,
+        AzureKeyVaultManagedIdentity = r.AzureKeyVaultManagedIdentity,
+        AzureAuthority = r.AzureAuthority,
+        ArtifactSigningEndpoint = r.ArtifactSigningEndpoint,
+        ArtifactSigningAccountName = r.ArtifactSigningAccountName,
+        ArtifactSigningProfileName = r.ArtifactSigningProfileName,
+        ArtifactSigningAccessToken = r.ArtifactSigningAccessToken,
+        ArtifactSigningManagedIdentity = r.ArtifactSigningManagedIdentity,
+        ArtifactSigningManagedIdentityResourceId = r.ArtifactSigningManagedIdentityResourceId,
+        ArtifactSigningCredentialType = r.ArtifactSigningCredentialType,
+        ArtifactSigningTenantId = r.ArtifactSigningTenantId,
+        ArtifactSigningClientId = r.ArtifactSigningClientId,
+        ArtifactSigningClientSecret = r.ArtifactSigningClientSecret,
+        ArtifactSigningFederatedTokenFile = r.ArtifactSigningFederatedTokenFile,
+        ArtifactSigningExcludeCredentials = [.. r.ArtifactSigningExcludeCredentials],
+        ArtifactSigningCorrelationId = r.ArtifactSigningCorrelationId,
+        CertSha1 = r.CertSha1,
+        CertStoreDir = r.CertStoreDir,
+        MachineStore = r.MachineStore,
+        StoreName = r.StoreName,
+        ArtifactSigningMetadata = r.ArtifactSigningMetadata,
+        ArtifactSigningRegion = r.ArtifactSigningRegion,
+        ArtifactSigningAuthority = r.ArtifactSigningAuthority,
+        ArtifactSigningApiVersion = r.ArtifactSigningApiVersion,
+        ArtifactSigningSignatureAlgorithm = r.ArtifactSigningSignatureAlgorithm,
+    };
+
+    private static string UniqueTempOutputPath(string finalOutput, string inputPath)
+    {
+        var seq = Interlocked.Increment(ref _tempOutputSequence);
+        var pid = Environment.ProcessId;
+        var name = RustPath.FileName(finalOutput);
+        string stem;
+        if (name is null)
+        {
+            stem = "signed-output";
+        }
+        else
+        {
+            int dot = name.LastIndexOf('.');
+            stem = dot > 0 ? name[..dot] : name;
+        }
+
+        var ext = RustPath.Extension(inputPath) ?? RustPath.Extension(finalOutput);
+        var tempName = string.IsNullOrEmpty(ext)
+            ? $"{stem}.psign-{pid}-{seq:x}"
+            : $"{stem}.psign-{pid}-{seq:x}.{ext}";
+        var dir = Path.GetDirectoryName(finalOutput);
+        return string.IsNullOrEmpty(dir) ? tempName : Path.Combine(dir, tempName);
+    }
+
+    private static void ReplaceFileAtomic(string src, string dst, string context)
+    {
+        try
+        {
+            File.Move(src, dst, overwrite: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            try
+            {
+                File.Copy(src, dst, overwrite: true);
+                TryDeleteFile(src);
+            }
+            catch (Exception copyErr) when (copyErr is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                throw new PsignException(context, IoCause(copyErr));
+            }
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+        }
     }
 
     private static bool Done(Action action)
@@ -497,10 +663,19 @@ public static partial class PortableCore
     private static bool HasAzureKeyVaultProvider(PortableSignRequest r) => r.AzureKeyVaultUrl is not null || r.AzureKeyVaultCertificate is not null;
 
     private static bool HasArtifactSigningProvider(PortableSignRequest r) =>
-        r.ArtifactSigningEndpoint is not null || r.ArtifactSigningAccountName is not null || r.ArtifactSigningProfileName is not null;
+        r.ArtifactSigningEndpoint is not null
+        || r.ArtifactSigningAccountName is not null
+        || r.ArtifactSigningProfileName is not null
+        || r.ArtifactSigningMetadata is not null
+        || TextOpt(r.ArtifactSigningRegion) is not null;
 
     private static bool HasLocalSigningMaterial(PortableSignRequest r) =>
-        r.CertificatePath is not null || r.CertificateDerBase64 is not null || r.PfxPath is not null || r.PrivateKeyPath is not null || r.PrivateKeyDerBase64 is not null;
+        r.CertificatePath is not null
+        || r.CertificateDerBase64 is not null
+        || r.PfxPath is not null
+        || r.PrivateKeyPath is not null
+        || r.PrivateKeyDerBase64 is not null
+        || TextOpt(r.CertSha1) is not null;
 
     private static void ValidateSigningProviderSelection(PortableSignRequest request)
     {
@@ -550,7 +725,7 @@ public static partial class PortableCore
             return LoadArtifactSigningProvider(request, options);
         }
 
-        var (cert, key, chain) = LoadSigningMaterial(request);
+        var (cert, key, chain) = LoadSigningMaterial(request, options);
         return new LocalPortableSigningProvider(cert, key, chain);
     }
 
@@ -564,21 +739,16 @@ public static partial class PortableCore
     {
         var vaultUrl = TextOpt(request.AzureKeyVaultUrl) ?? throw new PsignException("Azure Key Vault signing requires azure_key_vault_url");
         var certificate = TextOpt(request.AzureKeyVaultCertificate) ?? throw new PsignException("Azure Key Vault signing requires azure_key_vault_certificate");
-        ValidateKvAuthInputs(request);
 
         var client = new AzureKeyVaultClient(options.HttpHandler);
+        if (TextOpt(options.GetEnvironment("PSIGN_AZURE_KV_IMDS_ENDPOINT")) is { } imdsEndpoint)
+        {
+            client.ImdsEndpoint = imdsEndpoint;
+        }
+
         try
         {
-            var auth = new KvAuthParams
-            {
-                AccessToken = request.AzureKeyVaultAccessToken,
-                ManagedIdentity = request.AzureKeyVaultManagedIdentity ?? false,
-                TenantId = request.AzureKeyVaultTenantId,
-                ClientId = request.AzureKeyVaultClientId,
-                ClientSecret = request.AzureKeyVaultClientSecret,
-                Authority = request.AzureAuthority,
-            };
-            var token = client.AcquireAccessToken(auth);
+            var token = AcquireKeyVaultToken(client, request, options);
             var kvCertificate = client.FetchCertificate(vaultUrl, certificate, request.AzureKeyVaultCertificateVersion, token);
             var signerDer = AzureKeyVaultClient.DecodeCerBase64(kvCertificate.Cer);
             CertificateInfo signerCert;
@@ -601,41 +771,110 @@ public static partial class PortableCore
         }
     }
 
-    private static void ValidateKvAuthInputs(PortableSignRequest request)
+    private static string AcquireKeyVaultToken(AzureKeyVaultClient client, PortableSignRequest request, PortableCoreOptions options)
     {
-        var hasSp = TextOpt(request.AzureKeyVaultClientSecret) is not null;
-        var hasTenant = TextOpt(request.AzureKeyVaultTenantId) is not null;
-        var hasClient = TextOpt(request.AzureKeyVaultClientId) is not null;
-        var hasToken = TextOpt(request.AzureKeyVaultAccessToken) is not null;
+        var token = TextOpt(request.AzureKeyVaultAccessToken);
+        var secret = TextOpt(request.AzureKeyVaultClientSecret);
+        var tenant = TextOpt(request.AzureKeyVaultTenantId);
+        var clientId = TextOpt(request.AzureKeyVaultClientId);
         var managedIdentity = request.AzureKeyVaultManagedIdentity ?? false;
+
+        var hasToken = token is not null;
+        var hasSp = secret is not null;
+        var hasTenant = tenant is not null;
+        var hasClient = clientId is not null;
         var spCount = (hasSp ? 1 : 0) + (hasTenant ? 1 : 0) + (hasClient ? 1 : 0);
-        if (spCount != 0 && spCount != 3)
-        {
-            throw new PsignException(
-                "Azure AD client credentials require azure_key_vault_client_id, azure_key_vault_client_secret, and azure_key_vault_tenant_id");
-        }
 
         if (hasToken && (managedIdentity || spCount == 3))
         {
             throw new PsignException("use either Azure Key Vault access token or managed identity / client credentials, not multiple");
         }
 
-        if (managedIdentity && (hasToken || spCount == 3))
+        if (managedIdentity)
         {
-            throw new PsignException("Azure Key Vault managed identity cannot be combined with access tokens or client secrets");
+            if (hasSp || hasTenant)
+            {
+                throw new PsignException("Azure Key Vault managed identity cannot be combined with access tokens or client secrets");
+            }
+
+            var miClientId = clientId
+                ?? TextOpt(options.GetEnvironment("AZURE_MANAGED_IDENTITY_CLIENT_ID"))
+                ?? TextOpt(options.GetEnvironment("AZURE_CLIENT_ID"));
+            return client.AcquireAccessToken(new KvAuthParams
+            {
+                ManagedIdentity = true,
+                ClientId = miClientId,
+                Authority = request.AzureAuthority,
+            });
         }
 
-        if (!hasToken && !managedIdentity && spCount != 3)
+        if (spCount != 0 && spCount != 3)
         {
-            throw new PsignException("choose Azure Key Vault authentication: access token, managed identity, or client id/secret/tenant");
+            throw new PsignException(
+                "Azure AD client credentials require azure_key_vault_client_id, azure_key_vault_client_secret, and azure_key_vault_tenant_id");
         }
+
+        if (token is not null)
+        {
+            return token;
+        }
+
+        if (spCount == 3)
+        {
+            return client.AcquireAccessToken(new KvAuthParams
+            {
+                TenantId = tenant,
+                ClientId = clientId,
+                ClientSecret = secret,
+                Authority = request.AzureAuthority,
+            });
+        }
+
+        var envTenant = TextOpt(options.GetEnvironment("AZURE_TENANT_ID"));
+        var envClient = TextOpt(options.GetEnvironment("AZURE_CLIENT_ID"));
+        var envSecret = TextOpt(options.GetEnvironment("AZURE_CLIENT_SECRET"));
+        if (envTenant is not null && envClient is not null && envSecret is not null)
+        {
+            return client.AcquireAccessToken(new KvAuthParams
+            {
+                TenantId = envTenant,
+                ClientId = envClient,
+                ClientSecret = envSecret,
+                Authority = request.AzureAuthority,
+            });
+        }
+
+        var envFederatedTokenFile = TextOpt(options.GetEnvironment("AZURE_FEDERATED_TOKEN_FILE"));
+        if (envTenant is not null && envClient is not null && envFederatedTokenFile is not null)
+        {
+            return client.AcquireWorkloadIdentityToken(request.AzureAuthority, envTenant, envClient, envFederatedTokenFile);
+        }
+
+        throw new PsignException("choose Azure Key Vault authentication: access token, managed identity, or client id/secret/tenant");
     }
 
     private static PortableSigningProvider LoadArtifactSigningProvider(PortableSignRequest request, PortableCoreOptions options)
     {
-        var endpoint = TextOpt(request.ArtifactSigningEndpoint) ?? throw new PsignException("Artifact Signing requires artifact_signing_endpoint");
-        var accountName = TextOpt(request.ArtifactSigningAccountName) ?? throw new PsignException("Artifact Signing requires artifact_signing_account_name");
-        var profileName = TextOpt(request.ArtifactSigningProfileName) ?? throw new PsignException("Artifact Signing requires artifact_signing_profile_name");
+        var metadata = request.ArtifactSigningMetadata is { } metadataPath
+            ? LoadArtifactSigningMetadataFile(metadataPath)
+            : null;
+        var endpoint = TextOpt(request.ArtifactSigningEndpoint)
+            ?? TextOpt(metadata?.Endpoint)
+            ?? (TextOpt(request.ArtifactSigningRegion) is { } region ? $"https://{region}.codesigning.azure.net" : null)
+            ?? throw new PsignException("Artifact Signing requires artifact_signing_endpoint");
+        var accountName = TextOpt(request.ArtifactSigningAccountName)
+            ?? TextOpt(metadata?.CodeSigningAccountName)
+            ?? throw new PsignException("Artifact Signing requires artifact_signing_account_name");
+        var profileName = TextOpt(request.ArtifactSigningProfileName)
+            ?? TextOpt(metadata?.CertificateProfileName)
+            ?? throw new PsignException("Artifact Signing requires artifact_signing_profile_name");
+        var correlationId = TextOpt(request.ArtifactSigningCorrelationId) ?? TextOpt(metadata?.CorrelationId);
+        var authority = TextOpt(request.ArtifactSigningAuthority) ?? TextOpt(request.AzureAuthority);
+        var apiVersion = TextOpt(request.ArtifactSigningApiVersion) ?? ArtifactSigningClient.DefaultApiVersion;
+        var signatureAlgorithm = TextOpt(request.ArtifactSigningSignatureAlgorithm);
+        var excludeCredentials = request.ArtifactSigningExcludeCredentials.Count > 0
+            ? [.. request.ArtifactSigningExcludeCredentials]
+            : metadata?.ExcludeCredentials?.ToList() ?? [];
         var auth = CodesigningAuthResolver.Resolve(
             new CodesigningAuthInput
             {
@@ -647,7 +886,7 @@ public static partial class PortableCore
                 ClientSecret = request.ArtifactSigningClientSecret,
                 FederatedTokenFile = request.ArtifactSigningFederatedTokenFile,
                 CredentialType = request.ArtifactSigningCredentialType is { } ct ? ParseArtifactSigningCredentialType(ct) : null,
-                ExcludeCredentials = [.. request.ArtifactSigningExcludeCredentials],
+                ExcludeCredentials = excludeCredentials,
             },
             options.Environment);
         var chain = LoadChainCertificates(request);
@@ -656,9 +895,9 @@ public static partial class PortableCore
             Region = "unused",
             AccountName = accountName,
             ProfileName = profileName,
-            ApiVersion = ArtifactSigningClient.DefaultApiVersion,
-            CorrelationId = TextOpt(request.ArtifactSigningCorrelationId),
-            Authority = TextOpt(request.AzureAuthority),
+            ApiVersion = apiVersion,
+            CorrelationId = correlationId,
+            Authority = authority,
             Auth = auth,
             EndpointBaseUrl = endpoint.TrimEnd('/'),
         };
@@ -671,7 +910,21 @@ public static partial class PortableCore
         Action<string>? debug = options.GetEnvironment("SIGNTOOL_PORTABLE_DEBUG") is not null
             ? msg => (options.DebugLog ?? Console.Error).WriteLine($"[debug] {msg}")
             : null;
-        return new ArtifactSigningPortableSigningProvider(client, template, chain, debug);
+        return new ArtifactSigningPortableSigningProvider(client, template, signatureAlgorithm, chain, debug);
+    }
+
+    private static ArtifactSigningMetadata LoadArtifactSigningMetadataFile(string path)
+    {
+        var raw = ReadFile(path, $"read '{path}'");
+        try
+        {
+            return ArtifactSigningMetadata.Parse(raw);
+        }
+        catch (PsignException e)
+        {
+            var cause = e.Message == "parse Artifact Signing metadata JSON" && e.InnerException is not null ? e.InnerException : e;
+            throw new PsignException($"parse Artifact Signing metadata '{path}'", cause);
+        }
     }
 
     /// <summary>Credential type names accepted by the request (Rust <c>parse_artifact_signing_credential_type</c>).</summary>
@@ -690,13 +943,31 @@ public static partial class PortableCore
     }
 
     /// <summary>Local signer certificate, RSA key and chain (Rust <c>load_signing_material</c>).</summary>
-    internal static (CertificateInfo Cert, RSA Key, List<CertificateInfo> Chain) LoadSigningMaterial(PortableSignRequest request)
+    internal static (CertificateInfo Cert, RSA Key, List<CertificateInfo> Chain) LoadSigningMaterial(
+        PortableSignRequest request,
+        PortableCoreOptions? options = null)
     {
         EnsureLocalSigningProvider(request);
-        if (request.PfxPath is not null
-            && (request.CertificateDerBase64 is not null || request.CertificatePath is not null || request.PrivateKeyDerBase64 is not null || request.PrivateKeyPath is not null))
+        options ??= PortableCoreOptions.Default;
+        var usesPfx = request.PfxPath is not null;
+        var usesCertKey = request.CertificateDerBase64 is not null
+            || request.CertificatePath is not null
+            || request.PrivateKeyDerBase64 is not null
+            || request.PrivateKeyPath is not null;
+        var certSha1 = TextOpt(request.CertSha1);
+        if (usesPfx && usesCertKey)
         {
             throw new PsignException("provide either pfx_path or certificate/private key material, not both");
+        }
+
+        if (certSha1 is not null && usesPfx)
+        {
+            throw new PsignException("provide either pfx_path or cert_sha1, not both");
+        }
+
+        if (certSha1 is not null && usesCertKey)
+        {
+            throw new PsignException("provide either cert_sha1 or certificate/private key material, not both");
         }
 
         byte[] certBytes;
@@ -709,6 +980,14 @@ public static partial class PortableCore
             certBytes = parsed.SignerCertificateDer;
             keyBytes = Encoding.ASCII.GetBytes(parsed.PrivateKeyPem);
             pfxChain = parsed.ChainCertificatesDer;
+        }
+        else if (certSha1 is not null)
+        {
+            var storeName = TextOpt(request.StoreName) ?? "MY";
+            var identity = new PortableCertStore(options.Environment)
+                .ResolveSigningIdentity(request.CertStoreDir, request.MachineStore, storeName, certSha1);
+            certBytes = identity.CertDer;
+            keyBytes = identity.KeyPem;
         }
         else
         {

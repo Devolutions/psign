@@ -65,3 +65,39 @@ fn fetch_certificate_and_sign_digest_against_mock_kv() {
     _m_cert.assert();
     _m_sign.assert();
 }
+
+#[test]
+fn acquire_workload_identity_token_posts_jwt_assertion() {
+    let mut server = Server::new();
+    let authority = server.url();
+    let m = server
+        .mock("POST", "/tenant-1/oauth2/v2.0/token")
+        .match_body(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("client_id".into(), "client-1".into()),
+            Matcher::UrlEncoded(
+                "client_assertion_type".into(),
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".into(),
+            ),
+            Matcher::UrlEncoded("client_assertion".into(), "jwt-assertion-body".into()),
+            Matcher::UrlEncoded("scope".into(), "https://vault.azure.net/.default".into()),
+            Matcher::UrlEncoded("grant_type".into(), "client_credentials".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"access_token":"wi-kv-token"}"#)
+        .create();
+
+    let token_file =
+        std::env::temp_dir().join(format!("psign-kv-wi-token-{}.jwt", std::process::id()));
+    std::fs::write(&token_file, "  jwt-assertion-body\n").expect("write token file");
+    let token = psign_azure_kv_rest::acquire_kv_workload_identity_token(
+        Some(&authority),
+        "tenant-1",
+        "client-1",
+        token_file.to_str().expect("utf-8 path"),
+    )
+    .expect("acquire workload identity token");
+    let _ = std::fs::remove_file(&token_file);
+    assert_eq!(token, "wi-kv-token");
+    m.assert();
+}

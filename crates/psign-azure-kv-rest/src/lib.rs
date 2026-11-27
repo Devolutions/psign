@@ -53,16 +53,25 @@ pub fn acquire_kv_access_token(params: &KvAuthParams<'_>) -> Result<String> {
         return Ok(tok.to_string());
     }
     if params.managed_identity {
+        let endpoint = std::env::var("PSIGN_AZURE_KV_IMDS_ENDPOINT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "http://169.254.169.254/metadata/identity/oauth2/token".to_string());
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| anyhow!("HTTP client: {e}"))?;
+        let mut query = vec![
+            ("api-version", "2018-02-01"),
+            ("resource", "https://vault.azure.net"),
+        ];
+        if let Some(client_id) = params.client_id.map(str::trim).filter(|s| !s.is_empty()) {
+            query.push(("client_id", client_id));
+        }
         let rsp = client
-            .get("http://169.254.169.254/metadata/identity/oauth2/token")
-            .query(&[
-                ("api-version", "2018-02-01"),
-                ("resource", "https://vault.azure.net"),
-            ])
+            .get(&endpoint)
+            .query(&query)
             .header("Metadata", "true")
             .send()
             .context("managed identity token request (IMDS)")?;
@@ -134,6 +143,77 @@ pub fn acquire_kv_access_token(params: &KvAuthParams<'_>) -> Result<String> {
         access_token: String,
     }
     let j: TokenJson = rsp.json().context("Azure AD token JSON")?;
+    Ok(j.access_token)
+}
+
+/// Acquire a Key Vault bearer token using Azure AD workload identity federation.
+///
+/// # Errors
+///
+/// Returns an error if the federated token file cannot be read, any input is empty,
+/// the OAuth authority URL is invalid, or the token endpoint returns a non-success response.
+pub fn acquire_kv_workload_identity_token(
+    authority: Option<&str>,
+    tenant_id: &str,
+    client_id: &str,
+    federated_token_file: &str,
+) -> Result<String> {
+    let assertion = std::fs::read_to_string(federated_token_file)
+        .with_context(|| format!("read federated token file {federated_token_file}"))?;
+    let tenant = tenant_id.trim();
+    let cid = client_id.trim();
+    let assertion = assertion.trim();
+    if tenant.is_empty() || cid.is_empty() || assertion.is_empty() {
+        return Err(anyhow!(
+            "workload identity requires non-empty tenant_id, client_id, and federated token file"
+        ));
+    }
+
+    let authority = authority
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("https://login.microsoftonline.com")
+        .trim()
+        .trim_end_matches('/');
+    let mut token_url =
+        Url::parse(authority).map_err(|e| anyhow!("invalid OAuth authority URL: {e}"))?;
+    token_url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("OAuth authority URL cannot be a base"))?
+        .pop_if_empty()
+        .extend([tenant, "oauth2", "v2.0", "token"]);
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| anyhow!("HTTP client: {e}"))?;
+    let rsp = client
+        .post(token_url)
+        .form(&[
+            ("client_id", cid),
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            ),
+            ("client_assertion", assertion),
+            ("scope", "https://vault.azure.net/.default"),
+            ("grant_type", "client_credentials"),
+        ])
+        .send()
+        .context("Azure AD workload identity token request")?;
+    if !rsp.status().is_success() {
+        return Err(anyhow!(
+            "Azure AD workload identity token HTTP {}: {}",
+            rsp.status(),
+            rsp.text().unwrap_or_default()
+        ));
+    }
+    #[derive(Deserialize)]
+    struct TokenJson {
+        access_token: String,
+    }
+    let j: TokenJson = rsp
+        .json()
+        .context("Azure AD workload identity token JSON")?;
     Ok(j.access_token)
 }
 

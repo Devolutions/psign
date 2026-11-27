@@ -132,20 +132,28 @@ internal sealed class ArtifactSigningPortableSigningProvider : RemotePortableSig
 {
     private readonly ArtifactSigningClient _client;
     private readonly CodesigningSubmitParams _template;
+    private readonly string? _signatureAlgorithm;
     private readonly List<CertificateInfo> _chain;
     private readonly Action<string>? _debug;
 
-    public ArtifactSigningPortableSigningProvider(ArtifactSigningClient client, CodesigningSubmitParams template, List<CertificateInfo> chain, Action<string>? debug)
+    public ArtifactSigningPortableSigningProvider(
+        ArtifactSigningClient client,
+        CodesigningSubmitParams template,
+        string? signatureAlgorithm,
+        List<CertificateInfo> chain,
+        Action<string>? debug)
     {
         _client = client;
         _template = template;
+        _signatureAlgorithm = signatureAlgorithm;
         _chain = chain;
         _debug = debug;
     }
 
     public override RemoteSignature SignRemoteDigest(AuthenticodeHashKind digest, byte[] prehash)
     {
-        var p = _template.WithDigest(prehash, ArtifactSigningClient.SignatureAlgorithmForDigest(digest));
+        var alg = _signatureAlgorithm ?? ArtifactSigningClient.SignatureAlgorithmForDigest(digest);
+        var p = _template.WithDigest(prehash, alg);
         var signed = _client.SubmitCodesignHashSignature(p, _debug);
         var (signer, returnedChain) = ArtifactSigningCertificates.Parse(signed.SigningCertificate);
         returnedChain.AddRange(_chain);

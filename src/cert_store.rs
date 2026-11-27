@@ -7,32 +7,22 @@ use crate::cli::{
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use picky::key::PrivateKey;
-use picky::x509::Cert as PickyCert;
+pub use psign_portable_core::cert_store::{
+    ENV_CERT_STORE, SigningIdentity, canonical_pkcs8_key_pem, ensure_key_matches_cert,
+    normalize_sha1_hex, normalize_store_name, resolve_base_dir, resolve_signing_identity,
+    validate_pkcs8_key_pem,
+};
 use serde::Serialize;
 use sha1::{Digest as _, Sha1};
 use std::path::{Path, PathBuf};
 use x509_cert::Certificate;
 use x509_cert::der::Decode;
 
-pub const ENV_CERT_STORE: &str = "PSIGN_CERT_STORE";
-
 #[derive(Debug, Clone)]
 struct StoreLocation {
     scope: &'static str,
     store_name: String,
     store_dir: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub struct SigningIdentity {
-    pub thumbprint_sha1: String,
-    pub scope: &'static str,
-    pub store_name: String,
-    pub store_dir: PathBuf,
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-    pub cert_der: Vec<u8>,
-    pub key_pem: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,62 +65,6 @@ pub fn cert_store_command(args: &CertStoreArgs) -> Result<CommandOutput> {
         CertStoreCommand::Export(a) => export_cert(a),
         CertStoreCommand::Remove(a) => remove_cert(a),
     }
-}
-
-pub fn resolve_signing_identity(
-    cert_store_dir: Option<&Path>,
-    machine_store: bool,
-    store_name: &str,
-    sha1: &str,
-) -> Result<SigningIdentity> {
-    let base_dir = resolve_base_dir(cert_store_dir)?;
-    let scope = if machine_store {
-        "LocalMachine"
-    } else {
-        "CurrentUser"
-    };
-    let store_name = normalize_store_name(store_name)?;
-    let store_dir = base_dir.join(scope).join(&store_name);
-    let loc = StoreLocation {
-        scope,
-        store_name,
-        store_dir,
-    };
-    let thumbprint = normalize_sha1_hex(sha1)?;
-    let cert_path = cert_path(&loc, &thumbprint);
-    let key_path = key_path(&loc, &thumbprint);
-    let cert_der = read_existing_cert(&cert_path).with_context(|| {
-        format!(
-            "resolve signing certificate SHA1 {thumbprint} in {}\\{}",
-            loc.scope, loc.store_name
-        )
-    })?;
-    Certificate::from_der(&cert_der)
-        .with_context(|| format!("parse X.509 certificate '{}'", cert_path.display()))?;
-    let key_text = std::fs::read_to_string(&key_path).with_context(|| {
-        format!(
-            "resolve private key for SHA1 {thumbprint} in {}\\{}",
-            loc.scope, loc.store_name
-        )
-    })?;
-    let key = validate_pkcs8_key_pem(&key_text).with_context(|| {
-        format!(
-            "parse private key '{}'; expected PEM unencrypted PKCS#8 (BEGIN PRIVATE KEY)",
-            key_path.display()
-        )
-    })?;
-    ensure_key_matches_cert(&cert_der, &key)?;
-    let key_pem = canonical_pkcs8_key_pem(&key)?.into_bytes();
-    Ok(SigningIdentity {
-        thumbprint_sha1: thumbprint,
-        scope: loc.scope,
-        store_name: loc.store_name,
-        store_dir: loc.store_dir,
-        cert_path,
-        key_path,
-        cert_der,
-        key_pem,
-    })
 }
 
 fn import_cert(args: &CertStoreImportArgs) -> Result<CommandOutput> {
@@ -352,70 +286,6 @@ fn resolve_location(selection: &CertStoreSelectionArgs) -> Result<StoreLocation>
     })
 }
 
-fn resolve_base_dir(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
-    }
-    if let Some(path) = std::env::var_os(ENV_CERT_STORE) {
-        return Ok(PathBuf::from(path));
-    }
-    Ok(home_dir()?.join(".psign").join("cert-store"))
-}
-
-fn home_dir() -> Result<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
-        return Ok(PathBuf::from(profile));
-    }
-    match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
-        (Some(drive), Some(path)) => {
-            let mut out = PathBuf::from(drive);
-            out.push(path);
-            Ok(out)
-        }
-        _ => Err(anyhow!(
-            "cannot resolve default cert-store path: set {ENV_CERT_STORE} or --cert-store-dir"
-        )),
-    }
-}
-
-fn normalize_store_name(input: &str) -> Result<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(anyhow!("certificate store name must not be empty"));
-    }
-    if trimmed.contains(['/', '\\', '\0']) || matches!(trimmed, "." | "..") {
-        return Err(anyhow!(
-            "certificate store name must not contain path separators or traversal segments"
-        ));
-    }
-    let canonical = match trimmed.to_ascii_lowercase().as_str() {
-        "my" => "MY",
-        "root" => "Root",
-        "ca" => "CA",
-        "trust" => "Trust",
-        "disallowed" => "Disallowed",
-        _ => trimmed,
-    };
-    Ok(canonical.to_string())
-}
-
-fn normalize_sha1_hex(input: &str) -> Result<String> {
-    let clean: String = input
-        .chars()
-        .filter(|c| *c != ':' && !c.is_ascii_whitespace())
-        .collect();
-    if clean.len() != 40 {
-        return Err(anyhow!("SHA1 thumbprint must be 40 hex characters"));
-    }
-    if !clean.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(anyhow!("SHA1 thumbprint contains invalid hex"));
-    }
-    Ok(clean.to_ascii_uppercase())
-}
-
 fn cert_path(loc: &StoreLocation, thumbprint: &str) -> PathBuf {
     loc.store_dir.join(format!("{thumbprint}.der"))
 }
@@ -481,37 +351,6 @@ fn load_pkcs8_key_pem(path: &Path) -> Result<(String, PrivateKey)> {
         )
     })?;
     Ok((canonical_pkcs8_key_pem(&key)?, key))
-}
-
-fn validate_pkcs8_key_pem(pem: &str) -> Result<PrivateKey> {
-    let parsed = picky::pem::parse_pem(pem.as_bytes()).context("parse private key PEM")?;
-    if parsed.label() != "PRIVATE KEY" {
-        return Err(anyhow!(
-            "private key PEM label must be PRIVATE KEY, got {}",
-            parsed.label()
-        ));
-    }
-    PrivateKey::from_pkcs8(parsed.data()).context("parse unencrypted PKCS#8 private key")
-}
-
-fn canonical_pkcs8_key_pem(key: &PrivateKey) -> Result<String> {
-    key.to_pem_str()
-        .map(|mut s| {
-            s.push('\n');
-            s
-        })
-        .context("encode PKCS#8 private key PEM")
-}
-
-fn ensure_key_matches_cert(cert_der: &[u8], key: &PrivateKey) -> Result<()> {
-    let cert = PickyCert::from_der(cert_der).context("parse certificate for key matching")?;
-    let key_public = key
-        .to_public_key()
-        .context("derive public key from private key")?;
-    if cert.public_key() != &key_public {
-        return Err(anyhow!("private key does not match certificate public key"));
-    }
-    Ok(())
 }
 
 fn write_key_if_needed(path: &Path, key_pem: &[u8]) -> Result<bool> {
