@@ -46,7 +46,7 @@ pub fn resolve_verification_instant_for_pkcs7(
     resolve_verification_utc_date(pkcs7_der, policy)
 }
 
-pub fn resolve_verification_instant_for_pkcs7_with_trust(
+pub(crate) fn resolve_verification_instant_for_pkcs7_with_trust_info(
     pkcs7_der: &[u8],
     policy: &AuthenticodeTrustPolicy,
     instant_override: Option<&UtcDate>,
@@ -54,12 +54,12 @@ pub fn resolve_verification_instant_for_pkcs7_with_trust(
     anchor_certs: &[picky::x509::certificate::Cert],
     online: &crate::policy::OnlineTrustOptions,
     verbose_chain: bool,
-) -> Result<UtcDate> {
+) -> Result<(UtcDate, bool)> {
     if let Some(d) = instant_override {
-        return Ok(d.clone());
+        return Ok((d.clone(), false));
     }
     if !policy.prefer_timestamp_signing_time {
-        return Ok(UtcDate::now());
+        return Ok((UtcDate::now(), false));
     }
     if policy.require_valid_timestamp {
         return match trusted_utc_date_from_authenticode_timestamp_token(
@@ -69,13 +69,34 @@ pub fn resolve_verification_instant_for_pkcs7_with_trust(
             online,
             verbose_chain,
         )? {
-            Some(d) => Ok(d),
+            Some(d) => Ok((d, true)),
             None => Err(anyhow!(
                 "timestamp required by policy but no cryptographically valid trusted RFC3161 timestamp token was found"
             )),
         };
     }
-    resolve_verification_utc_date(pkcs7_der, policy)
+    Ok((resolve_verification_utc_date(pkcs7_der, policy)?, false))
+}
+
+pub fn resolve_verification_instant_for_pkcs7_with_trust(
+    pkcs7_der: &[u8],
+    policy: &AuthenticodeTrustPolicy,
+    instant_override: Option<&UtcDate>,
+    anchors: &crate::anchor::AnchorStore,
+    anchor_certs: &[picky::x509::certificate::Cert],
+    online: &crate::policy::OnlineTrustOptions,
+    verbose_chain: bool,
+) -> Result<UtcDate> {
+    Ok(resolve_verification_instant_for_pkcs7_with_trust_info(
+        pkcs7_der,
+        policy,
+        instant_override,
+        anchors,
+        anchor_certs,
+        online,
+        verbose_chain,
+    )?
+    .0)
 }
 
 #[cfg(test)]

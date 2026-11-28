@@ -68,9 +68,10 @@ public static class VerificationInstant
 
     /// <summary>
     /// The override when set; otherwise, when a valid timestamp is required, a cryptographically verified trusted RFC 3161
-    /// timestamp; otherwise <see cref="ResolveVerificationUtcDate"/>.
+    /// timestamp; otherwise <see cref="ResolveVerificationUtcDate"/>. Also reports whether a cryptographically verified
+    /// timestamp supplied the instant.
     /// </summary>
-    public static DateTimeOffset ResolveVerificationInstantForPkcs7WithTrust(
+    internal static (DateTimeOffset Instant, bool Timestamped) ResolveVerificationInstantForPkcs7WithTrustInfo(
         ReadOnlySpan<byte> pkcs7Der,
         AuthenticodeTrustPolicy policy,
         DateTimeOffset? instantOverride,
@@ -82,21 +83,37 @@ public static class VerificationInstant
     {
         if (instantOverride is { } o)
         {
-            return o;
+            return (o, false);
         }
 
         if (!policy.PreferTimestampSigningTime)
         {
-            return PickyFormat.Now();
+            return (PickyFormat.Now(), false);
         }
 
         if (policy.RequireValidTimestamp)
         {
-            return Rfc3161Extract.TrustedUtcDateFromAuthenticodeTimestampToken(pkcs7Der, anchors, anchorCerts, online, verboseChain, log)
+            var ts = Rfc3161Extract.TrustedUtcDateFromAuthenticodeTimestampToken(pkcs7Der, anchors, anchorCerts, online, verboseChain, log)
                 ?? throw new PsignException(
                     "timestamp required by policy but no cryptographically valid trusted RFC3161 timestamp token was found");
+            return (ts, true);
         }
 
-        return ResolveVerificationUtcDate(pkcs7Der, policy);
+        return (ResolveVerificationUtcDate(pkcs7Der, policy), false);
     }
+
+    /// <summary>
+    /// The override when set; otherwise, when a valid timestamp is required, a cryptographically verified trusted RFC 3161
+    /// timestamp; otherwise <see cref="ResolveVerificationUtcDate"/>.
+    /// </summary>
+    public static DateTimeOffset ResolveVerificationInstantForPkcs7WithTrust(
+        ReadOnlySpan<byte> pkcs7Der,
+        AuthenticodeTrustPolicy policy,
+        DateTimeOffset? instantOverride,
+        AnchorStore anchors,
+        IReadOnlyList<CertificateInfo> anchorCerts,
+        OnlineTrustOptions online,
+        bool verboseChain,
+        TextWriter? log = null) =>
+        ResolveVerificationInstantForPkcs7WithTrustInfo(pkcs7Der, policy, instantOverride, anchors, anchorCerts, online, verboseChain, log).Instant;
 }

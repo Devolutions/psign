@@ -20,15 +20,15 @@
 //! - <https://learn.microsoft.com/azure/artifact-signing/concept-certificate-management>
 //! - <https://www.microsoft.com/pkiops/docs/repository.htm>
 
-use crate::anchor::{AnchorStore, cert_sha1_thumbprint, parse_cert_bytes};
+use crate::anchor::{
+    AnchorStore, cert_der_sha1_hex, cert_der_sha256_hex, cert_sha1_thumbprint, parse_cert_bytes,
+};
 use crate::chain::verify_certificate_chain_to_anchors;
-use crate::chain::{merge_unique_certs, terminal_root_cert_owned};
-use crate::policy::AuthenticodeTrustPolicy;
 use crate::rfc3161_extract::{
     trusted_utc_date_from_authenticode_timestamp_token, trusted_utc_date_from_timestamp_token,
 };
-use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding};
-use crate::trust_verify_pe::TrustVerifyPeOptions;
+use crate::trust_pkcs7::{Pkcs7DigestBinding, verify_pkcs7_trust_with_binding_chain};
+use crate::trust_verify_pe::{TrustVerifyPeOptions, VerifiedSignature};
 use anyhow::{Context, Result, anyhow};
 use der::asn1::ObjectIdentifier;
 use der::{Decode, Header, Reader, SliceReader, Tag};
@@ -37,7 +37,6 @@ use picky::x509::date::UtcDate;
 use psign_sip_digest::pkcs7::{
     parse_pkcs7_signed_data_der, signed_data_certificate_for_signer_identifier,
 };
-use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 use psign_sip_digest::verify_pe::for_each_pe_pkcs7_signed_data;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -307,7 +306,7 @@ pub fn artifact_signing_identity_from_cert_bytes(
 }
 
 /// Subject DN via picky (decodes BMPString attributes that `x509-cert` prints as hex).
-fn subject_display(cert: &Certificate) -> String {
+pub(crate) fn subject_display(cert: &Certificate) -> String {
     der::Encode::to_der(cert)
         .ok()
         .and_then(|der| Cert::from_der(&der).ok())
@@ -368,9 +367,10 @@ pub fn artifact_signing_identities_from_pe(
 /// [`TrustVerifyPeOptions::artifact_signing`] is set.
 ///
 /// Replaces the generic anchor set (`--anchor-dir`, `--trusted-ca`, AuthRoot) with
-/// [`PUBLIC_TRUST_ROOTS`] (Public Trust) or [`Self::private_trust_root_files`] (Private Trust /
-/// Public Trust Test). `verification_instant_override`, `online`, and `verbose_chain` still come
-/// from [`TrustVerifyPeOptions`].
+/// [`PUBLIC_TRUST_ROOTS`] (Public Trust) or [`Self::private_trust_root_files`] /
+/// [`Self::private_trust_root_der`] (Private Trust / Public Trust Test).
+/// `verification_instant_override`, `online`, and `verbose_chain` still come from
+/// [`TrustVerifyPeOptions`].
 #[derive(Debug, Clone)]
 pub struct ArtifactSigningPolicy {
     /// When non-empty, the signer's publisher ID must equal one of these values.
@@ -378,6 +378,9 @@ pub struct ArtifactSigningPolicy {
     /// Subscriber roots for Private Trust / Public Trust Test signatures (PEM or DER files).
     /// Public Trust signatures always use [`PUBLIC_TRUST_ROOTS`] and ignore these.
     pub private_trust_root_files: Vec<PathBuf>,
+    /// Subscriber roots for Private Trust / Public Trust Test signatures as in-memory DER bytes.
+    /// Public Trust signatures always use [`PUBLIC_TRUST_ROOTS`] and ignore these.
+    pub private_trust_root_der: Vec<Vec<u8>>,
     /// Require a timestamp countersignature chained to [`PUBLIC_TRUST_ROOTS`] (default `true`).
     ///
     /// When `false` and no timestamp is present, the wall clock is used; Artifact Signing
@@ -390,6 +393,7 @@ impl Default for ArtifactSigningPolicy {
         Self {
             expected_publisher_ids: Vec::new(),
             private_trust_root_files: Vec::new(),
+            private_trust_root_der: Vec::new(),
             require_timestamp: true,
         }
     }
@@ -528,13 +532,20 @@ fn artifact_signing_anchors(
     if kind == ArtifactSigningCertificateKind::PublicTrust {
         return public_trust_anchors();
     }
-    if policy.private_trust_root_files.is_empty() {
+    if policy.private_trust_root_files.is_empty() && policy.private_trust_root_der.is_empty() {
         return Err(anyhow!(
             "{} signature requires the subscriber root certificate (private trust root)",
             kind.as_str()
         ));
     }
-    let (_, certs) = AnchorStore::load_files(&policy.private_trust_root_files)?;
+    let mut certs = if !policy.private_trust_root_files.is_empty() {
+        AnchorStore::load_files(&policy.private_trust_root_files)?.1
+    } else {
+        Vec::new()
+    };
+    for der in &policy.private_trust_root_der {
+        certs.push(Cert::from_der(der).map_err(|e| anyhow!("parse private trust root DER: {e}"))?);
+    }
     // Microsoft production roots must never anchor a non-Public-Trust profile.
     let certs: Vec<Cert> = certs
         .into_iter()
@@ -572,6 +583,92 @@ fn verified_signature(
     })
 }
 
+fn verified_signature_summary(
+    signature_index: usize,
+    signer_certificate_der: Vec<u8>,
+    signer_subject: String,
+    root: &Cert,
+    timestamped: bool,
+    identity: ArtifactSigningIdentity,
+) -> Result<VerifiedSignature> {
+    let root_der = root
+        .to_der()
+        .map_err(|e| anyhow!("encode root certificate: {e}"))?;
+    Ok(VerifiedSignature {
+        signature_index,
+        signer_sha256_hex: cert_der_sha256_hex(&signer_certificate_der),
+        signer_sha1_hex: cert_der_sha1_hex(&signer_certificate_der),
+        signer_certificate_der,
+        signer_subject,
+        root_subject: Some(root.subject_name().to_string()),
+        root_sha1_hex: Some(cert_der_sha1_hex(&root_der)),
+        root_sha256_hex: Some(cert_der_sha256_hex(&root_der)),
+        timestamped,
+        artifact_signing: Some(identity),
+    })
+}
+
+pub(crate) fn verify_artifact_signing_pkcs7_with_details(
+    pkcs7_der: &[u8],
+    pkcs7_index: usize,
+    subject_digest: &[u8],
+    binding: Pkcs7DigestBinding,
+    policy: &ArtifactSigningPolicy,
+    opts: &TrustVerifyPeOptions,
+) -> Result<(ArtifactSigningVerifiedSignature, VerifiedSignature)> {
+    let (signer, _) = pkcs7_signer_identity(pkcs7_der)?;
+    let (signer_subject, identity) = checked_identity(&signer, policy)?;
+    let (timestamped, verification_instant) =
+        artifact_signing_instant(policy, opts, |anchors, certs| {
+            trusted_utc_date_from_authenticode_timestamp_token(
+                pkcs7_der,
+                anchors,
+                certs,
+                &opts.online,
+                opts.verbose_chain,
+            )
+        })?;
+    let (anchors, anchor_certs) = artifact_signing_anchors(identity.kind, policy)?;
+
+    let trust_policy = crate::policy::AuthenticodeTrustPolicy {
+        strict_code_signing_eku: true,
+        prefer_timestamp_signing_time: false,
+        require_valid_timestamp: false,
+    };
+    let chain = verify_pkcs7_trust_with_binding_chain(
+        binding,
+        pkcs7_der,
+        pkcs7_index,
+        subject_digest,
+        &anchors,
+        &anchor_certs,
+        &trust_policy,
+        &opts.online,
+        &verification_instant,
+        opts.verbose_chain,
+    )?;
+
+    let signer_der =
+        der::Encode::to_der(&signer).map_err(|e| anyhow!("encode signer certificate: {e}"))?;
+    let as_sig = verified_signature(
+        pkcs7_index,
+        signer_subject.clone(),
+        identity.clone(),
+        &chain.root,
+        timestamped,
+        &verification_instant,
+    )?;
+    let summary = verified_signature_summary(
+        pkcs7_index,
+        signer_der,
+        signer_subject,
+        &chain.root,
+        timestamped,
+        identity,
+    )?;
+    Ok((as_sig, summary))
+}
+
 /// Verify one PKCS#7 as an Artifact Signing signature whose digest binding equals `subject_digest`.
 ///
 /// Checks, in order: the signer carries an Artifact Signing identity EKU (and the Public Trust
@@ -588,60 +685,25 @@ pub fn verify_artifact_signing_pkcs7(
     policy: &ArtifactSigningPolicy,
     opts: &TrustVerifyPeOptions,
 ) -> Result<ArtifactSigningVerifiedSignature> {
-    let (signer, _) = pkcs7_signer_identity(pkcs7_der)?;
-    let (signer_subject, identity) = checked_identity(&signer, policy)?;
-    let (timestamped, verification_instant) =
-        artifact_signing_instant(policy, opts, |anchors, certs| {
-            trusted_utc_date_from_authenticode_timestamp_token(
-                pkcs7_der,
-                anchors,
-                certs,
-                &opts.online,
-                opts.verbose_chain,
-            )
-        })?;
-    let (anchors, anchor_certs) = artifact_signing_anchors(identity.kind, policy)?;
-
-    let trust_policy = AuthenticodeTrustPolicy {
-        strict_code_signing_eku: true,
-        prefer_timestamp_signing_time: false,
-        require_valid_timestamp: false,
-    };
-    verify_pkcs7_trust_with_binding(
-        binding,
+    Ok(verify_artifact_signing_pkcs7_with_details(
         pkcs7_der,
         pkcs7_index,
         subject_digest,
-        &anchors,
-        &anchor_certs,
-        &trust_policy,
-        &opts.online,
-        &verification_instant,
-        opts.verbose_chain,
-    )?;
-
-    let root = signer_terminal_root(pkcs7_der, &anchors, &anchor_certs, &opts.online)?;
-    verified_signature(
-        pkcs7_index,
-        signer_subject,
-        identity,
-        &root,
-        timestamped,
-        &verification_instant,
-    )
+        binding,
+        policy,
+        opts,
+    )?
+    .0)
 }
 
-/// Artifact Signing policy for signatures that are not CMS (VSIX XMLDSig): the caller has already
-/// verified the signature value with `signer`'s key, so this checks the identity, the timestamp
-/// token (`timestamp` = token DER and the bytes it covers), and `signer`'s chain to the anchors.
-pub fn verify_artifact_signing_certificate(
+pub(crate) fn verify_artifact_signing_certificate_with_details(
     signer: &Certificate,
     extra_certs: Vec<Cert>,
     timestamp: Option<(&[u8], &[u8])>,
     signature_index: usize,
     policy: &ArtifactSigningPolicy,
     opts: &TrustVerifyPeOptions,
-) -> Result<ArtifactSigningVerifiedSignature> {
+) -> Result<(ArtifactSigningVerifiedSignature, VerifiedSignature)> {
     let (signer_subject, identity) = checked_identity(signer, policy)?;
     let (timestamped, verification_instant) =
         artifact_signing_instant(policy, opts, |anchors, certs| {
@@ -672,49 +734,45 @@ pub fn verify_artifact_signing_certificate(
         &verification_instant,
         opts.verbose_chain,
     )?;
-    verified_signature(
+    let as_sig = verified_signature(
         signature_index,
-        signer_subject,
-        identity,
+        signer_subject.clone(),
+        identity.clone(),
         &root,
         timestamped,
         &verification_instant,
-    )
+    )?;
+    let summary = verified_signature_summary(
+        signature_index,
+        leaf_der,
+        signer_subject,
+        &root,
+        timestamped,
+        identity,
+    )?;
+    Ok((as_sig, summary))
 }
 
-/// Re-walk the (already verified) signer chain to report which anchor terminated it.
-fn signer_terminal_root(
-    pkcs7_der: &[u8],
-    anchors: &AnchorStore,
-    anchor_certs: &[Cert],
-    online: &crate::policy::OnlineTrustOptions,
-) -> Result<Cert> {
-    let normalized = normalize_pkcs7_der_for_authenticode(pkcs7_der);
-    let sd = parse_pkcs7_signed_data_der(normalized.as_ref())?;
-    let si = sd
-        .signer_infos
-        .0
-        .as_slice()
-        .first()
-        .ok_or_else(|| anyhow!("SignedData has no SignerInfo"))?;
-    let leaf_der =
-        der::Encode::to_der(signed_data_certificate_for_signer_identifier(&sd, &si.sid)?)
-            .map_err(|e| anyhow!("encode signer certificate: {e}"))?;
-    let leaf = Cert::from_der(&leaf_der).map_err(|e| anyhow!("picky signer certificate: {e}"))?;
-    let embedded: Vec<Cert> = sd
-        .certificates
-        .iter()
-        .flat_map(|set| set.0.iter())
-        .filter_map(|choice| match choice {
-            cms::cert::CertificateChoices::Certificate(c) => der::Encode::to_der(c).ok(),
-            _ => None,
-        })
-        .filter_map(|der| Cert::from_der(&der).ok())
-        .collect();
-    let mut pool = merge_unique_certs(anchor_certs.to_vec(), embedded)?;
-    let chain =
-        crate::chain::issuer_chain_excluding_leaf_online(&leaf, &mut pool, online, Some(anchors))?;
-    Ok(terminal_root_cert_owned(&leaf, &chain).clone())
+/// Artifact Signing policy for signatures that are not CMS (VSIX XMLDSig): the caller has already
+/// verified the signature value with `signer`'s key, so this checks the identity, the timestamp
+/// token (`timestamp` = token DER and the bytes it covers), and `signer`'s chain to the anchors.
+pub fn verify_artifact_signing_certificate(
+    signer: &Certificate,
+    extra_certs: Vec<Cert>,
+    timestamp: Option<(&[u8], &[u8])>,
+    signature_index: usize,
+    policy: &ArtifactSigningPolicy,
+    opts: &TrustVerifyPeOptions,
+) -> Result<ArtifactSigningVerifiedSignature> {
+    Ok(verify_artifact_signing_certificate_with_details(
+        signer,
+        extra_certs,
+        timestamp,
+        signature_index,
+        policy,
+        opts,
+    )?
+    .0)
 }
 
 fn utc_date_rfc3339(d: &UtcDate) -> String {
@@ -732,6 +790,7 @@ fn utc_date_rfc3339(d: &UtcDate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use psign_sip_digest::pkcs7_wire::normalize_pkcs7_der_for_authenticode;
 
     fn fixture(name: &str) -> Vec<u8> {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

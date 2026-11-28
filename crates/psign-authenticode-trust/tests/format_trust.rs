@@ -328,3 +328,579 @@ fn vsix_tampering_is_rejected() {
         vsix_err(&resigned)
     );
 }
+
+fn sign_test_msix(
+    signer_cert: x509_cert::Certificate,
+    chain_certs: Vec<x509_cert::Certificate>,
+    private_key: rsa::RsaPrivateKey,
+) -> Vec<u8> {
+    let unsigned = std::fs::read(repo("tests/fixtures/generated-unsigned/msix/sample.msix"))
+        .expect("read unsigned sample.msix");
+    let staged = psign_sip_digest::appx_package::stage_msix_family_for_signature(
+        &unsigned,
+        "msix",
+        psign_sip_digest::pe_digest::PeAuthenticodeHashKind::Sha256,
+    )
+    .expect("stage msix");
+    let pkcs7 = psign_sip_digest::pkcs7::create_msix_authenticode_pkcs7_der_rsa(
+        &staged,
+        "msix",
+        psign_sip_digest::pkcs7::AuthenticodeSigningDigest::Sha256,
+        signer_cert,
+        chain_certs,
+        private_key,
+    )
+    .expect("create msix pkcs7");
+    let mut p7x = Vec::with_capacity(4 + pkcs7.len());
+    p7x.extend_from_slice(b"PKCX");
+    p7x.extend_from_slice(&pkcs7);
+    psign_sip_digest::appx_package::replace_msix_signature_part(&staged, &p7x)
+        .expect("embed AppxSignature.p7x")
+}
+
+fn generate_self_signed_code_signing_cert(
+    not_before: std::time::SystemTime,
+    not_after: std::time::SystemTime,
+) -> (x509_cert::Certificate, Vec<u8>, rsa::RsaPrivateKey) {
+    use der::asn1::{BitString, ObjectIdentifier, OctetString};
+    use der::{Decode, Encode};
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{Keypair, SignatureEncoding, Signer};
+    use sha2::{Digest as _, Sha256};
+    use x509_cert::ext::AsExtension;
+    use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
+    use x509_cert::time::{Time, Validity};
+    use x509_cert::{Certificate, TbsCertificate, Version};
+
+    let mut rng = rand::rngs::OsRng;
+    let key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate rsa key");
+    let signing_key = SigningKey::<Sha256>::new(key.clone());
+    let spki = SubjectPublicKeyInfoOwned::from_key(signing_key.verifying_key()).expect("spki");
+    let subject =
+        psign_authenticode_trust::test_pki::parse_distinguished_name("CN=Psign Self-Signed Test")
+            .expect("dn");
+    let alg = AlgorithmIdentifierOwned {
+        oid: ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+        parameters: Some(der::Any::null()),
+    };
+    let eku = ExtendedKeyUsage(vec![ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.3")]);
+    let ku = KeyUsage(KeyUsages::DigitalSignature.into());
+    let bc = BasicConstraints {
+        ca: false,
+        path_len_constraint: None,
+    };
+    let ski_digest = sha1::Sha1::digest(spki.subject_public_key.raw_bytes());
+    let ski = x509_cert::ext::pkix::SubjectKeyIdentifier(
+        OctetString::new(ski_digest.as_slice()).expect("ski"),
+    );
+    let extensions = vec![
+        bc.to_extension(&subject, &[]).expect("bc ext"),
+        ku.to_extension(&subject, &[]).expect("ku ext"),
+        eku.to_extension(&subject, &[]).expect("eku ext"),
+        ski.to_extension(&subject, &[]).expect("ski ext"),
+    ];
+    let tbs = TbsCertificate {
+        version: Version::V3,
+        serial_number: SerialNumber::new(&[0x01, 0x23, 0x45, 0x67]).expect("serial"),
+        signature: alg.clone(),
+        issuer: subject.clone(),
+        validity: Validity {
+            not_before: Time::try_from(not_before).expect("not_before"),
+            not_after: Time::try_from(not_after).expect("not_after"),
+        },
+        subject,
+        subject_public_key_info: spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions: Some(extensions),
+    };
+    let tbs_der = tbs.to_der().expect("tbs der");
+    let sig = signing_key.sign(&tbs_der);
+    let cert = Certificate {
+        tbs_certificate: tbs,
+        signature_algorithm: alg,
+        signature: BitString::from_bytes(sig.to_bytes().as_ref()).expect("sig bitstring"),
+    };
+    let cert_der = cert.to_der().expect("cert der");
+    let cert = Certificate::from_der(&cert_der).expect("redecode cert");
+    (cert, cert_der, key)
+}
+
+#[test]
+fn verified_signatures_and_thumbprint_helpers_are_populated() {
+    use psign_authenticode_trust::{
+        ArtifactSigningPolicy, cert_der_sha1_hex, cert_der_sha256_hex, cert_sha1_thumbprint,
+        cert_sha256_thumbprint, trust_verify_msix_bytes, trust_verify_vsix_bytes,
+    };
+
+    // Thumbprint helpers agree on the pinned Microsoft root.
+    let root =
+        psign_authenticode_trust::artifact_signing::MICROSOFT_IDENTITY_VERIFICATION_ROOT_2020
+            .certificate()
+            .expect("pinned root");
+    let root_der = root.to_der().expect("root der");
+    assert_eq!(
+        cert_sha256_thumbprint(&root).expect("sha256"),
+        psign_authenticode_trust::artifact_signing::MICROSOFT_IDENTITY_VERIFICATION_ROOT_2020
+            .sha256
+    );
+    assert_eq!(
+        cert_sha1_thumbprint(&root).expect("sha1"),
+        psign_authenticode_trust::artifact_signing::MICROSOFT_IDENTITY_VERIFICATION_ROOT_2020.sha1
+    );
+    assert_eq!(
+        cert_der_sha256_hex(&root_der),
+        "5367f20c7ade0e2bca790915056d086b720c33c1fa2a2661acf787e3292e1270"
+    );
+    assert_eq!(
+        cert_der_sha1_hex(&root_der),
+        "f40042e2e5f7e8ef8189fed15519aece42c3bfa2"
+    );
+
+    // Generic MSIX trust populates verified_signatures.
+    let msix = std::fs::read(repo("tests/fixtures/generated-signed/msix/sample.msix")).unwrap();
+    let report = trust_verify_msix_bytes(&msix, "msix", &test_ca_opts()).expect("verify msix");
+    assert_eq!(report.verified_signatures.len(), 1);
+    let sig = &report.verified_signatures[0];
+    assert_eq!(sig.signature_index, 0);
+    assert!(!sig.signer_certificate_der.is_empty());
+    assert_eq!(
+        sig.signer_sha256_hex,
+        cert_der_sha256_hex(&sig.signer_certificate_der)
+    );
+    assert_eq!(
+        sig.signer_sha1_hex,
+        cert_der_sha1_hex(&sig.signer_certificate_der)
+    );
+    assert!(!sig.signer_subject.is_empty());
+    assert!(sig.root_subject.is_some());
+    assert!(sig.root_sha1_hex.as_deref().is_some_and(|h| h.len() == 40));
+    assert!(
+        sig.root_sha256_hex
+            .as_deref()
+            .is_some_and(|h| h.len() == 64)
+    );
+    assert!(!sig.timestamped);
+    assert!(sig.artifact_signing.is_none());
+
+    // Artifact Signing with private_trust_root_der populates both artifact_signing and verified_signatures.
+    let pt_msix = std::fs::read(repo(
+        "tests/fixtures/artifact-signing/private-trust/sample.msix",
+    ))
+    .unwrap();
+    let pt_root_der = std::fs::read(repo(
+        "tests/fixtures/artifact-signing/private-trust/root.cer",
+    ))
+    .unwrap();
+    let pt_report = trust_verify_msix_bytes(
+        &pt_msix,
+        "msix",
+        &TrustVerifyPeOptions {
+            artifact_signing: Some(ArtifactSigningPolicy {
+                expected_publisher_ids: vec!["11.22.33.44.55.66.77.88".into()],
+                private_trust_root_der: vec![pt_root_der.clone()],
+                require_timestamp: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("private trust msix via DER root");
+    assert_eq!(pt_report.artifact_signing.len(), 1);
+    assert_eq!(pt_report.verified_signatures.len(), 1);
+    let pt_sig = &pt_report.verified_signatures[0];
+    assert_eq!(
+        pt_sig
+            .artifact_signing
+            .as_ref()
+            .map(|id| id.publisher_id.as_str()),
+        Some("11.22.33.44.55.66.77.88")
+    );
+    assert_eq!(
+        pt_sig.root_sha256_hex.as_deref(),
+        Some(cert_der_sha256_hex(&pt_root_der).as_str())
+    );
+
+    // Generic VSIX trust also populates verified_signatures.
+    let vsix = std::fs::read(repo(
+        "tests/fixtures/package-signing/signed/sample.signed.vsix",
+    ))
+    .unwrap();
+    let vsix_report = trust_verify_vsix_bytes(&vsix, &test_ca_opts()).expect("verify vsix");
+    assert_eq!(vsix_report.verified_signatures.len(), 1);
+    assert_eq!(
+        vsix_report.verified_signatures[0].signer_sha256_hex.len(),
+        64
+    );
+}
+
+#[test]
+fn msix_pinning_artifact_signing_private_and_public_trust() {
+    use psign_authenticode_trust::{
+        ArtifactSigningCertificateKind, MsixPinVerifyOptions, MsixRecommendedPin,
+        test_pki::{
+            CodeSigningCertSpec, RootCaSpec, generate_root_ca, issue_code_signing_cert,
+            load_ca_issuer_from_cert_and_key,
+        },
+        verify_msix_for_pinning, verify_msix_with_pins,
+    };
+    use rsa::pkcs8::DecodePrivateKey;
+
+    let pt_msix = std::fs::read(repo(
+        "tests/fixtures/artifact-signing/private-trust/sample.msix",
+    ))
+    .unwrap();
+    let pt_root_path = repo("tests/fixtures/artifact-signing/private-trust/root.cer");
+    let pt_root_der = std::fs::read(&pt_root_path).unwrap();
+
+    // Private Trust publisher ID pin succeeds with file or in-memory DER root.
+    let verified = verify_msix_with_pins(
+        &pt_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_artifact_signing_publisher_ids: vec!["11.22.33.44.55.66.77.88".into()],
+            trusted_ca_files: vec![pt_root_path.clone()],
+            ..Default::default()
+        },
+    )
+    .expect("private trust pin with file root");
+    assert_eq!(
+        verified.recommended_pin,
+        MsixRecommendedPin::ArtifactSigningPublisherId("11.22.33.44.55.66.77.88".into())
+    );
+    assert_eq!(
+        verified.artifact_signing.as_ref().map(|id| id.kind),
+        Some(ArtifactSigningCertificateKind::PrivateTrust)
+    );
+
+    let verified_der = verify_msix_with_pins(
+        &pt_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_artifact_signing_publisher_ids: vec!["11.22.33.44.55.66.77.88".into()],
+            trusted_ca_der: vec![pt_root_der],
+            ..Default::default()
+        },
+    )
+    .expect("private trust pin with DER root");
+    assert_eq!(verified_der.signer_sha256_hex, verified.signer_sha256_hex);
+
+    // Mismatched publisher ID fails.
+    assert!(
+        verify_msix_with_pins(
+            &pt_msix,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_artifact_signing_publisher_ids: vec!["99.99.99.99".into()],
+                trusted_ca_files: vec![pt_root_path.clone()],
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+
+    // Private Trust without subscriber root fails closed.
+    assert!(
+        verify_msix_with_pins(
+            &pt_msix,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_artifact_signing_publisher_ids: vec!["11.22.33.44.55.66.77.88".into()],
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+
+    // verify_msix_for_pinning auto-detects Private Trust when subscriber root is supplied.
+    let auto_pt = verify_msix_for_pinning(&pt_msix, "msix", std::slice::from_ref(&pt_root_path))
+        .expect("auto-pin private trust");
+    assert_eq!(
+        auto_pt.recommended_pin,
+        MsixRecommendedPin::ArtifactSigningPublisherId("11.22.33.44.55.66.77.88".into())
+    );
+
+    // Private Trust CI Policy EKU is rejected for Artifact Signing publisher pinning and never
+    // recommended as an Artifact Signing pin.
+    let ca = generate_root_ca(&RootCaSpec {
+        subject: "CN=Psign CI Policy Test CA".into(),
+        validity_days: 30,
+        key_bits: 2048,
+    })
+    .expect("ca");
+    let ca_issuer =
+        load_ca_issuer_from_cert_and_key(&ca.cert_der, ca.private_key_pem.as_bytes(), Vec::new())
+            .expect("ca issuer");
+    let ci_leaf = issue_code_signing_cert(
+        &ca_issuer,
+        &CodeSigningCertSpec {
+            subject: "CN=Test Code Signing Certificate".into(),
+            validity_days: 30,
+            key_bits: 2048,
+            extra_eku_oids: vec!["1.3.6.1.4.1.311.97.1.4.1.11.22.33.44".into()],
+        },
+    )
+    .expect("ci policy leaf");
+    let ci_key = rsa::RsaPrivateKey::from_pkcs8_pem(&ci_leaf.private_key_pem).expect("ci key");
+    let ci_sha256 = psign_authenticode_trust::cert_der_sha256_hex(&ci_leaf.cert_der);
+    let ci_msix = sign_test_msix(ci_leaf.cert, vec![ca.cert.clone()], ci_key);
+    let ci_err = verify_msix_with_pins(
+        &ci_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_artifact_signing_publisher_ids: vec!["11.22.33.44".into()],
+            trusted_ca_der: vec![ca.cert_der.clone()],
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{ci_err:#}").contains("Private Trust CI Policy"),
+        "expected Private Trust CI Policy rejection, got: {ci_err:#}"
+    );
+    let ci_ca_file = tempfile::NamedTempFile::new().expect("temp ci ca");
+    std::fs::write(ci_ca_file.path(), &ca.cert_der).expect("write ci ca");
+    let ci_auto_err =
+        verify_msix_for_pinning(&ci_msix, "msix", &[ci_ca_file.path().to_path_buf()]).unwrap_err();
+    assert!(
+        format!("{ci_auto_err:#}").contains("Private Trust CI Policy"),
+        "expected verify_msix_for_pinning to reject Private Trust CI Policy, got: {ci_auto_err:#}"
+    );
+    let ci_thumb_err = verify_msix_with_pins(
+        &ci_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![ci_sha256],
+            allow_pinned_leaf_trust: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{ci_thumb_err:#}").contains("Private Trust CI Policy"),
+        "expected thumbprint-pinned verify_msix_with_pins to reject Private Trust CI Policy, got: {ci_thumb_err:#}"
+    );
+
+    // Fake Public Trust EKU signed by a non-Microsoft CA must fail Public Trust verification
+    // against pinned Microsoft Identity Verification Root CA 2020.
+    let fake_pub_leaf = issue_code_signing_cert(
+        &ca_issuer,
+        &CodeSigningCertSpec {
+            subject: "CN=Test Code Signing Certificate".into(),
+            validity_days: 30,
+            key_bits: 2048,
+            extra_eku_oids: vec![
+                "1.3.6.1.4.1.311.97.1.0".into(),
+                "1.3.6.1.4.1.311.97.12345.67890".into(),
+            ],
+        },
+    )
+    .expect("fake public trust leaf");
+    let fake_pub_key =
+        rsa::RsaPrivateKey::from_pkcs8_pem(&fake_pub_leaf.private_key_pem).expect("fake key");
+    let fake_pub_msix = sign_test_msix(fake_pub_leaf.cert, vec![ca.cert], fake_pub_key);
+    assert!(
+        verify_msix_with_pins(
+            &fake_pub_msix,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_artifact_signing_publisher_ids: vec!["12345.67890".into()],
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn msix_thumbprint_pinning_and_auto_pinning() {
+    use psign_authenticode_trust::{
+        MsixPinVerifyOptions, MsixRecommendedPin, cert_der_sha1_hex, cert_der_sha256_hex,
+        test_pki::{
+            CodeSigningCertSpec, RootCaSpec, generate_root_ca, issue_code_signing_cert,
+            load_ca_issuer_from_cert_and_key,
+        },
+        verify_msix_for_pinning, verify_msix_with_pins,
+    };
+    use rsa::pkcs8::DecodePrivateKey;
+    use std::time::{Duration, SystemTime};
+
+    // 1. CA-issued regular cert: explicit CA + thumbprint pins (SHA-256 and SHA-1) + auto-pinning.
+    let ca = generate_root_ca(&RootCaSpec {
+        subject: "CN=Psign Pinning Test CA".into(),
+        validity_days: 30,
+        key_bits: 2048,
+    })
+    .expect("ca");
+    let ca_issuer =
+        load_ca_issuer_from_cert_and_key(&ca.cert_der, ca.private_key_pem.as_bytes(), Vec::new())
+            .expect("ca issuer");
+    let leaf = issue_code_signing_cert(
+        &ca_issuer,
+        &CodeSigningCertSpec {
+            subject: "CN=Test Code Signing Certificate".into(),
+            validity_days: 30,
+            key_bits: 2048,
+            extra_eku_oids: Vec::new(),
+        },
+    )
+    .expect("leaf");
+    let leaf_sha256 = cert_der_sha256_hex(&leaf.cert_der);
+    let leaf_sha1 = cert_der_sha1_hex(&leaf.cert_der);
+    let leaf_key = rsa::RsaPrivateKey::from_pkcs8_pem(&leaf.private_key_pem).expect("leaf key");
+    let ca_msix = sign_test_msix(leaf.cert, vec![ca.cert], leaf_key);
+
+    let ca_file = tempfile::NamedTempFile::new().expect("temp ca");
+    std::fs::write(ca_file.path(), &ca.cert_der).expect("write ca");
+
+    // SHA-256 with prefix, uppercase, and colons.
+    let colon_upper = leaf_sha256
+        .to_ascii_uppercase()
+        .as_bytes()
+        .chunks(2)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>()
+        .join(":");
+    let pinned_sha256 = verify_msix_with_pins(
+        &ca_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![format!("sha256:{colon_upper}")],
+            trusted_ca_files: vec![ca_file.path().to_path_buf()],
+            ..Default::default()
+        },
+    )
+    .expect("pin by sha256 with explicit CA");
+    assert_eq!(pinned_sha256.signer_sha256_hex, leaf_sha256);
+    assert_eq!(pinned_sha256.signer_sha1_hex, leaf_sha1);
+    assert_eq!(
+        pinned_sha256.recommended_pin,
+        MsixRecommendedPin::CertificateSha256(leaf_sha256.clone())
+    );
+
+    // SHA-1 pin with explicit CA DER.
+    let pinned_sha1 = verify_msix_with_pins(
+        &ca_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![format!("sha1:{leaf_sha1}")],
+            trusted_ca_der: vec![ca.cert_der.clone()],
+            ..Default::default()
+        },
+    )
+    .expect("pin by sha1 with explicit CA DER");
+    assert_eq!(pinned_sha1.signer_sha1_hex, leaf_sha1);
+
+    // Wrong thumbprint is rejected.
+    assert!(
+        verify_msix_with_pins(
+            &ca_msix,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_cert_thumbprints: vec!["00".repeat(32)],
+                trusted_ca_der: vec![ca.cert_der.clone()],
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+
+    // Tampered MSIX bytes are rejected even with matching thumbprint and CA.
+    let mut tampered = ca_msix.clone();
+    tampered[40] ^= 0xff;
+    assert!(
+        verify_msix_with_pins(
+            &tampered,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_cert_thumbprints: vec![leaf_sha256.clone()],
+                trusted_ca_der: vec![ca.cert_der.clone()],
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+
+    // Private-CA-issued leaf without explicit CA succeeds when allow_pinned_leaf_trust is true.
+    verify_msix_with_pins(
+        &ca_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![leaf_sha256.clone()],
+            allow_pinned_leaf_trust: true,
+            ..Default::default()
+        },
+    )
+    .expect("CA-issued leaf with allow_pinned_leaf_trust");
+
+    // verify_msix_for_pinning recommends CertificateSha256 for regular cert with explicit CA,
+    // and fails closed without explicit CA.
+    let auto_regular = verify_msix_for_pinning(&ca_msix, "msix", &[ca_file.path().to_path_buf()])
+        .expect("auto-pin regular cert");
+    assert_eq!(
+        auto_regular.recommended_pin,
+        MsixRecommendedPin::CertificateSha256(leaf_sha256)
+    );
+    assert!(verify_msix_for_pinning(&ca_msix, "msix", &[]).is_err());
+
+    // 2. Self-signed currently-valid cert: allowed only with allow_pinned_leaf_trust.
+    let now = SystemTime::now();
+    let (self_cert, self_der, self_key) = generate_self_signed_code_signing_cert(
+        now - Duration::from_secs(3600),
+        now + Duration::from_secs(86400 * 7),
+    );
+    let self_sha256 = cert_der_sha256_hex(&self_der);
+    let self_msix = sign_test_msix(self_cert, Vec::new(), self_key);
+
+    assert!(verify_msix_for_pinning(&self_msix, "msix", &[]).is_err());
+    assert!(
+        verify_msix_with_pins(
+            &self_msix,
+            "msix",
+            &MsixPinVerifyOptions {
+                expected_cert_thumbprints: vec![self_sha256.clone()],
+                allow_pinned_leaf_trust: false,
+                ..Default::default()
+            },
+        )
+        .is_err()
+    );
+    let self_verified = verify_msix_with_pins(
+        &self_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![self_sha256.clone()],
+            allow_pinned_leaf_trust: true,
+            ..Default::default()
+        },
+    )
+    .expect("self-signed leaf with allow_pinned_leaf_trust");
+    assert_eq!(
+        self_verified.recommended_pin,
+        MsixRecommendedPin::CertificateSha256(self_sha256)
+    );
+
+    // 3. Expired untimestamped self-signed cert is rejected even with allow_pinned_leaf_trust.
+    let (expired_cert, expired_der, expired_key) = generate_self_signed_code_signing_cert(
+        now - Duration::from_secs(86400 * 30),
+        now - Duration::from_secs(3600),
+    );
+    let expired_sha256 = cert_der_sha256_hex(&expired_der);
+    let expired_msix = sign_test_msix(expired_cert, Vec::new(), expired_key);
+    let expired_err = verify_msix_with_pins(
+        &expired_msix,
+        "msix",
+        &MsixPinVerifyOptions {
+            expected_cert_thumbprints: vec![expired_sha256],
+            allow_pinned_leaf_trust: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        format!("{expired_err:#}").contains("not valid at current time"),
+        "expected expired untimestamped rejection, got: {expired_err:#}"
+    );
+}

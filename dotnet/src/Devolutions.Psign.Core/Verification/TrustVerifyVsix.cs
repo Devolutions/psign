@@ -611,13 +611,15 @@ public static class TrustVerifyVsix
 
         if (opts.ArtifactSigning is { } policy)
         {
-            report.ArtifactSigning.Add(ArtifactSigning.VerifyArtifactSigningCertificate(
+            var (asSig, summary) = ArtifactSigning.VerifyArtifactSigningCertificateWithDetails(
                 sig.Signer,
                 sig.Certificates,
                 sig.TimestampToken is { } t ? (t, sig.SignatureValue) : null,
                 0,
                 policy,
-                opts));
+                opts);
+            report.ArtifactSigning.Add(asSig);
+            report.VerifiedSignatures.Add(summary);
         }
         else
         {
@@ -627,6 +629,7 @@ public static class TrustVerifyVsix
             }
 
             DateTimeOffset instant;
+            bool timestamped = false;
             if (opts.VerificationInstantOverride is { } o)
             {
                 instant = o;
@@ -638,6 +641,7 @@ public static class TrustVerifyVsix
                     try
                     {
                         instant = Rfc3161Extract.TrustedUtcDateFromTimestampToken(token, sig.SignatureValue, anchors, anchorCerts, opts.Online, opts.VerboseChain, opts.Log);
+                        timestamped = true;
                     }
                     catch (PsignException e)
                     {
@@ -659,7 +663,8 @@ public static class TrustVerifyVsix
             }
 
             var leaf = Anchors.ParseCertBytes(sig.Signer.RawData);
-            TrustChain.VerifyCertificateChainToAnchors(leaf, sig.Certificates, anchors, anchorCerts, opts.Online, instant, opts.VerboseChain, opts.Log);
+            var root = TrustChain.VerifyCertificateChainToAnchors(leaf, sig.Certificates, anchors, anchorCerts, opts.Online, instant, opts.VerboseChain, opts.Log);
+            report.VerifiedSignatures.Add(TrustVerifyPe.VerifiedSignatureFromCerts(0, leaf, root, timestamped));
         }
 
         report.Pkcs7EntriesVerified = 1;

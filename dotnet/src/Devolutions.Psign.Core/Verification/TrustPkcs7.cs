@@ -15,6 +15,8 @@ public enum Pkcs7DigestBinding
     Pkcs9MessageDigest,
 }
 
+internal sealed record VerifiedPkcs7Chain(CertificateInfo Leaf, CertificateInfo Root);
+
 /// <summary>Shared PKCS#7 Authenticode trust step, digest already known (Rust <c>trust_pkcs7.rs</c>).</summary>
 public static class TrustPkcs7
 {
@@ -65,7 +67,7 @@ public static class TrustPkcs7
         }
     }
 
-    private static void VerifyCmsRsaSha256Fallback(
+    private static VerifiedPkcs7Chain VerifyCmsRsaSha256Fallback(
         byte[] slice,
         int pkcs7Index,
         Pkcs7DigestBinding binding,
@@ -142,13 +144,10 @@ public static class TrustPkcs7
         RequireAnchoredRoot(root, anchors, out var rootThumb);
         OnlineTrust.CheckRevocationChain(leaf, chain, online);
         VerifyTrustChainVerbose(pkcs7Index, leaf, chain, root, rootThumb, verificationInstant, verboseChain, log);
+        return new VerifiedPkcs7Chain(leaf, root);
     }
 
-    /// <summary>
-    /// Verify Authenticode PKCS#7 cryptographic checks and the certificate chain to the configured anchors.
-    /// <paramref name="subjectDigest"/> must match the PKCS#7 indirect <c>messageDigest</c>.
-    /// </summary>
-    public static void VerifyAuthenticodePkcs7Trust(
+    internal static VerifiedPkcs7Chain VerifyAuthenticodePkcs7TrustChain(
         ReadOnlySpan<byte> pkcs7Der,
         int pkcs7Index,
         ReadOnlySpan<byte> subjectDigest,
@@ -164,8 +163,7 @@ public static class TrustPkcs7
         var picky = PickyAuthenticode.TryParse(slice);
         if (picky is null)
         {
-            VerifyCmsRsaSha256Fallback(slice, pkcs7Index, Pkcs7DigestBinding.AuthenticodeIndirect, subjectDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
-            return;
+            return VerifyCmsRsaSha256Fallback(slice, pkcs7Index, Pkcs7DigestBinding.AuthenticodeIndirect, subjectDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
         }
 
         try
@@ -198,6 +196,40 @@ public static class TrustPkcs7
         RequireAnchoredRoot(root, anchors, out var rootThumb);
         OnlineTrust.CheckRevocationChain(leaf, chain, online);
         VerifyTrustChainVerbose(pkcs7Index, leaf, chain, root, rootThumb, verificationInstant, verboseChain, log);
+        return new VerifiedPkcs7Chain(leaf, root);
+    }
+
+    /// <summary>
+    /// Verify Authenticode PKCS#7 cryptographic checks and the certificate chain to the configured anchors.
+    /// <paramref name="subjectDigest"/> must match the PKCS#7 indirect <c>messageDigest</c>.
+    /// </summary>
+    public static void VerifyAuthenticodePkcs7Trust(
+        ReadOnlySpan<byte> pkcs7Der,
+        int pkcs7Index,
+        ReadOnlySpan<byte> subjectDigest,
+        AnchorStore anchors,
+        IReadOnlyList<CertificateInfo> anchorCerts,
+        AuthenticodeTrustPolicy policy,
+        OnlineTrustOptions online,
+        DateTimeOffset verificationInstant,
+        bool verboseChain,
+        TextWriter? log = null) =>
+        _ = VerifyAuthenticodePkcs7TrustChain(pkcs7Der, pkcs7Index, subjectDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
+
+    internal static VerifiedPkcs7Chain VerifyPkcs9MessageDigestPkcs7TrustChain(
+        ReadOnlySpan<byte> pkcs7Der,
+        int pkcs7Index,
+        ReadOnlySpan<byte> contentDigest,
+        AnchorStore anchors,
+        IReadOnlyList<CertificateInfo> anchorCerts,
+        AuthenticodeTrustPolicy policy,
+        OnlineTrustOptions online,
+        DateTimeOffset verificationInstant,
+        bool verboseChain,
+        TextWriter? log = null)
+    {
+        var slice = Pkcs7Wire.NormalizeForAuthenticode(pkcs7Der);
+        return VerifyCmsRsaSha256Fallback(slice, pkcs7Index, Pkcs7DigestBinding.Pkcs9MessageDigest, contentDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
     }
 
     /// <summary>Verify CMS / PKCS#7 where PKCS#9 <c>messageDigest</c> binds the signature to an external content digest.</summary>
@@ -211,11 +243,24 @@ public static class TrustPkcs7
         OnlineTrustOptions online,
         DateTimeOffset verificationInstant,
         bool verboseChain,
-        TextWriter? log = null)
-    {
-        var slice = Pkcs7Wire.NormalizeForAuthenticode(pkcs7Der);
-        VerifyCmsRsaSha256Fallback(slice, pkcs7Index, Pkcs7DigestBinding.Pkcs9MessageDigest, contentDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
-    }
+        TextWriter? log = null) =>
+        _ = VerifyPkcs9MessageDigestPkcs7TrustChain(pkcs7Der, pkcs7Index, contentDigest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
+
+    internal static VerifiedPkcs7Chain VerifyPkcs7TrustWithBindingChain(
+        Pkcs7DigestBinding binding,
+        ReadOnlySpan<byte> pkcs7Der,
+        int pkcs7Index,
+        ReadOnlySpan<byte> digest,
+        AnchorStore anchors,
+        IReadOnlyList<CertificateInfo> anchorCerts,
+        AuthenticodeTrustPolicy policy,
+        OnlineTrustOptions online,
+        DateTimeOffset verificationInstant,
+        bool verboseChain,
+        TextWriter? log = null) =>
+        binding == Pkcs7DigestBinding.AuthenticodeIndirect
+            ? VerifyAuthenticodePkcs7TrustChain(pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log)
+            : VerifyPkcs9MessageDigestPkcs7TrustChain(pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
 
     /// <summary>Dispatch on <paramref name="binding"/>.</summary>
     public static void VerifyPkcs7TrustWithBinding(
@@ -229,15 +274,6 @@ public static class TrustPkcs7
         OnlineTrustOptions online,
         DateTimeOffset verificationInstant,
         bool verboseChain,
-        TextWriter? log = null)
-    {
-        if (binding == Pkcs7DigestBinding.AuthenticodeIndirect)
-        {
-            VerifyAuthenticodePkcs7Trust(pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
-        }
-        else
-        {
-            VerifyPkcs9MessageDigestPkcs7Trust(pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
-        }
-    }
+        TextWriter? log = null) =>
+        _ = VerifyPkcs7TrustWithBindingChain(binding, pkcs7Der, pkcs7Index, digest, anchors, anchorCerts, policy, online, verificationInstant, verboseChain, log);
 }

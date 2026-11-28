@@ -3170,6 +3170,7 @@ fn trust_options(
                     expected_publisher_ids: a.publisher_ids.clone(),
                     private_trust_root_files: a.private_trust_root_paths.clone(),
                     require_timestamp: !a.allow_missing_timestamp,
+                    ..Default::default()
                 }),
         },
         temp_dir,
